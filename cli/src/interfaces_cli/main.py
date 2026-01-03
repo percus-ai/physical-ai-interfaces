@@ -2,7 +2,7 @@
 
 import typer
 from rich import print as rprint
-from app.client import PercusClient
+from interfaces_cli.client import PercusClient
 
 app = typer.Typer(help="Percus Physical AI CLI")
 
