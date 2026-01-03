@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 app = FastAPI(
-    title="Percus Physical AI API",
+    title="Physical AI API",
     version="0.1.0",
 )
 
@@ -92,7 +92,7 @@ async def get_config():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Percus Backend Server")
+    parser = argparse.ArgumentParser(description="Physical AI Backend Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", "-p", type=int, default=8000, help="Port to bind")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")

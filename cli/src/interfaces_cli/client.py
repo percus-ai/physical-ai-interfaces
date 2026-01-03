@@ -5,10 +5,10 @@ import httpx
 
 
 def get_backend_url() -> str:
-    return os.environ.get("PERCUS_BACKEND_URL", "http://localhost:8000")
+    return os.environ.get("PHI_BACKEND_URL", "http://localhost:8000")
 
 
-class PercusClient:
+class PhiClient:
     def __init__(self, base_url: str = None):
         self.base_url = base_url or get_backend_url()
         self._client = httpx.Client(base_url=self.base_url)

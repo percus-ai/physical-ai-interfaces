@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-percus = "interfaces_cli.main:app"
+phi = "interfaces_cli.main:app"
 
 [project.optional-dependencies]
 dev = [

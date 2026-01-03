@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-percus-server = "interfaces_backend.main:main"
+phi-server = "interfaces_backend.main:main"
 
 [project.optional-dependencies]
 dev = [

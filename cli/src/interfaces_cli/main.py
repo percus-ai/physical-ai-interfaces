@@ -2,15 +2,15 @@
 
 import typer
 from rich import print as rprint
-from interfaces_cli.client import PercusClient
+from interfaces_cli.client import PhiClient
 
-app = typer.Typer(help="Percus Physical AI CLI")
+app = typer.Typer(help="Physical AI CLI")
 
 
 @app.command()
 def health():
     """Check backend health."""
-    client = PercusClient()
+    client = PhiClient()
     result = client.health()
     rprint(f"[green]Backend status: {result['status']}[/green]")
 
@@ -18,7 +18,7 @@ def health():
 @app.command()
 def projects():
     """List all projects."""
-    client = PercusClient()
+    client = PhiClient()
     projects = client.list_projects()
     for p in projects:
         rprint(f"  - {p['name']}")
