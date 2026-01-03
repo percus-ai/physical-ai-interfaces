@@ -25,6 +25,14 @@ dev = [
 build = [
     "pyinstaller>=6.0.0",  # for Tauri sidecar binary
 ]
+ssh = [
+    "paramiko>=3.0.0",  # for SSH connections to training instances
+]
+cloud = [
+    "paramiko>=3.0.0",
+    "datacrunch>=1.0.0",  # for Verda cloud management
+    "boto3>=1.34.0",  # for S3/R2 storage
+]
 
 [build-system]
 requires = ["hatchling"]

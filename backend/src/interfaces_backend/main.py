@@ -1,9 +1,12 @@
 """FastAPI server entrypoint."""
 
 import argparse
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+
+from interfaces_backend.api import training_router
 
 app = FastAPI(
     title="Physical AI API",
@@ -19,8 +22,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include API routers
+app.include_router(training_router)
+
 
 # --- Health ---
+
 
 @app.get("/health")
 async def health():
