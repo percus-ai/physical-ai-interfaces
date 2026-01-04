@@ -52,7 +52,8 @@ def _get_sync_service() -> R2SyncService:
     global _sync_service
     if _sync_service is None:
         bucket = os.getenv("R2_BUCKET", "percus-data")
-        _sync_service = R2SyncService(_get_manifest(), bucket)
+        version = os.getenv("R2_VERSION", "v2")
+        _sync_service = R2SyncService(_get_manifest(), bucket, version=version)
     return _sync_service
 
 

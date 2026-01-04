@@ -50,6 +50,7 @@ class R2SyncService:
         manifest_manager: ManifestManager,
         bucket: str,
         s3_manager: Optional["S3Manager"] = None,
+        version: str = "",
     ):
         """Initialize sync service.
 
@@ -57,10 +58,16 @@ class R2SyncService:
             manifest_manager: The manifest manager instance
             bucket: R2 bucket name
             s3_manager: Optional S3Manager instance. If not provided, creates one.
+            version: Optional version prefix (e.g., "v2"). If set, all paths will be prefixed.
         """
         self.manifest = manifest_manager
         self.bucket = bucket
+        self.version = version
         self._s3: Optional["S3Manager"] = s3_manager
+
+    def _get_prefix(self) -> str:
+        """Get version prefix for paths."""
+        return f"{self.version}/" if self.version else ""
 
     @property
     def s3(self) -> "S3Manager":
@@ -78,11 +85,13 @@ class R2SyncService:
 
     def _get_remote_path(self, entry_type: str, item_id: str) -> str:
         """Get the S3 path for a dataset or model."""
-        return f"s3://{self.bucket}/{entry_type}/{item_id}"
+        prefix = self._get_prefix()
+        return f"s3://{self.bucket}/{prefix}{entry_type}/{item_id}"
 
     def _get_remote_meta_path(self, entry_type: str, item_id: str) -> str:
         """Get the S3 path for metadata file."""
-        return f"s3://{self.bucket}/{entry_type}/{item_id}/.meta.json"
+        prefix = self._get_prefix()
+        return f"s3://{self.bucket}/{prefix}{entry_type}/{item_id}/.meta.json"
 
     def _fetch_remote_metadata(
         self, entry_type: str, item_id: str
@@ -418,7 +427,8 @@ class R2SyncService:
     def sync_manifest_to_r2(self) -> bool:
         """Upload local manifest to R2."""
         try:
-            manifest_s3_path = f"s3://{self.bucket}/.manifest.json"
+            prefix = self._get_prefix()
+            manifest_s3_path = f"s3://{self.bucket}/{prefix}.manifest.json"
             bucket, key = self.s3.parse_s3_path(manifest_s3_path)
 
             import tempfile
@@ -447,7 +457,8 @@ class R2SyncService:
             True if successful
         """
         try:
-            manifest_s3_path = f"s3://{self.bucket}/.manifest.json"
+            prefix = self._get_prefix()
+            manifest_s3_path = f"s3://{self.bucket}/{prefix}.manifest.json"
             objects = self.s3.list_objects(manifest_s3_path)
             if not objects:
                 logger.info("No remote manifest found")

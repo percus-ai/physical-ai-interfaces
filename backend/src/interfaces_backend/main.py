@@ -1,8 +1,44 @@
 """FastAPI server entrypoint."""
 
 import argparse
+from pathlib import Path
 
 import uvicorn
+from dotenv import load_dotenv
+
+
+def _find_repo_root() -> Path:
+    """Find repository root by looking for data/.env file."""
+    current = Path.cwd()
+    for _ in range(10):  # Look up to 10 levels
+        # Priority: look for data/.env (indicates repo root with config)
+        if (current / "data" / ".env").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    # Fallback: look for .git that is a directory (not file, which indicates submodule)
+    current = Path.cwd()
+    for _ in range(10):
+        git_path = current / ".git"
+        if git_path.exists() and git_path.is_dir():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return Path.cwd()
+
+
+# Load .env from repository root data directory
+_repo_root = _find_repo_root()
+_env_file = _repo_root / "data" / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file)
+else:
+    # Fallback: try current directory
+    load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
