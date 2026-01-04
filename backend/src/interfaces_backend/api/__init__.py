@@ -1,6 +1,7 @@
 """API routers."""
 
 from interfaces_backend.api.analytics import router as analytics_router
+from interfaces_backend.api.build import router as build_router
 from interfaces_backend.api.calibration import router as calibration_router
 from interfaces_backend.api.config import router as config_router
 from interfaces_backend.api.hardware import router as hardware_router
@@ -16,6 +17,7 @@ from interfaces_backend.api.user import router as user_router
 
 __all__ = [
     "analytics_router",
+    "build_router",
     "calibration_router",
     "config_router",
     "hardware_router",

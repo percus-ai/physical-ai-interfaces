@@ -44,6 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from interfaces_backend.api import (
     analytics_router,
+    build_router,
     calibration_router,
     config_router,
     hardware_router,
@@ -74,6 +75,7 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(analytics_router)
+app.include_router(build_router)
 app.include_router(calibration_router)
 app.include_router(config_router)
 app.include_router(hardware_router)

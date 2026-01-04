@@ -1033,3 +1033,127 @@ class PhiClient:
         response = self._client.post("/api/user/validate-environment")
         response.raise_for_status()
         return response.json()
+
+    # =========================================================================
+    # Build
+    # =========================================================================
+
+    def get_bundled_torch_status(self) -> Dict[str, Any]:
+        """GET /api/build/bundled-torch/status - Get bundled-torch status."""
+        response = self._client.get("/api/build/bundled-torch/status")
+        response.raise_for_status()
+        return response.json()
+
+    def build_bundled_torch_ws(
+        self,
+        pytorch_version: Optional[str] = None,
+        torchvision_version: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Build bundled-torch with real-time progress via WebSocket.
+
+        Args:
+            pytorch_version: PyTorch version (git tag/branch, e.g., "v2.1.0")
+            torchvision_version: torchvision version (git tag/branch, e.g., "v0.16.0")
+            progress_callback: Called with progress updates
+
+        Returns:
+            Final result with type='complete' or type='error'
+        """
+        import websocket
+
+        # Convert http URL to ws URL
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/build/ws/bundled-torch"
+
+        result: Dict[str, Any] = {"type": "error", "error": "Unknown error"}
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=None)
+
+            # Send build request
+            ws.send(json.dumps({
+                "action": "build",
+                "pytorch_version": pytorch_version,
+                "torchvision_version": torchvision_version,
+            }))
+
+            # Receive progress updates until done
+            while True:
+                message = ws.recv()
+                data = json.loads(message)
+
+                if progress_callback:
+                    progress_callback(data)
+
+                if data.get("type") in ("complete", "error"):
+                    result = data
+                    break
+
+            ws.close()
+        except ImportError:
+            # websocket-client not installed
+            if progress_callback:
+                progress_callback({
+                    "type": "error",
+                    "error": "websocket-client not installed. Run: pip install websocket-client"
+                })
+            result = {"type": "error", "error": "websocket-client not installed"}
+        except Exception as e:
+            if progress_callback:
+                progress_callback({"type": "error", "error": str(e)})
+            result = {"type": "error", "error": str(e)}
+
+        return result
+
+    def clean_bundled_torch_ws(
+        self,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Clean bundled-torch with progress via WebSocket.
+
+        Args:
+            progress_callback: Called with progress updates
+
+        Returns:
+            Final result with type='complete' or type='error'
+        """
+        import websocket
+
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/build/ws/bundled-torch"
+
+        result: Dict[str, Any] = {"type": "error", "error": "Unknown error"}
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=60)
+
+            # Send clean request
+            ws.send(json.dumps({"action": "clean"}))
+
+            # Receive progress until done
+            while True:
+                message = ws.recv()
+                data = json.loads(message)
+
+                if progress_callback:
+                    progress_callback(data)
+
+                if data.get("type") in ("complete", "error"):
+                    result = data
+                    break
+
+            ws.close()
+        except ImportError:
+            if progress_callback:
+                progress_callback({
+                    "type": "error",
+                    "error": "websocket-client not installed"
+                })
+            result = {"type": "error", "error": "websocket-client not installed"}
+        except Exception as e:
+            if progress_callback:
+                progress_callback({"type": "error", "error": str(e)})
+            result = {"type": "error", "error": str(e)}
+
+        return result
