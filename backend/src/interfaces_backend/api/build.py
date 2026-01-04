@@ -199,67 +199,6 @@ async def websocket_bundled_torch_build(websocket: WebSocket):
                     })
                 continue
 
-            elif action == "install":
-                # Install existing bundled-torch to current environment
-                TorchBuilder = _get_torch_builder()
-                if TorchBuilder is None:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "TorchBuilder not available.",
-                    })
-                    continue
-
-                builder = TorchBuilder()
-
-                # Queue for progress updates from thread
-                progress_queue: asyncio.Queue = asyncio.Queue()
-                main_loop = asyncio.get_running_loop()
-
-                def progress_callback(progress: dict):
-                    asyncio.run_coroutine_threadsafe(
-                        progress_queue.put(progress),
-                        main_loop
-                    )
-
-                async def run_install():
-                    loop = asyncio.get_event_loop()
-                    try:
-                        await loop.run_in_executor(
-                            _executor,
-                            lambda: builder.install_existing(callback=progress_callback)
-                        )
-                    except Exception as e:
-                        logger.error(f"Install failed: {e}")
-                        await progress_queue.put({
-                            "type": "error",
-                            "error": str(e),
-                        })
-
-                install_task = asyncio.create_task(run_install())
-
-                try:
-                    while True:
-                        try:
-                            progress = await asyncio.wait_for(
-                                progress_queue.get(), timeout=1.0
-                            )
-                            await websocket.send_json(progress)
-
-                            if progress.get("type") in ("complete", "error"):
-                                break
-                        except asyncio.TimeoutError:
-                            if install_task.done():
-                                while not progress_queue.empty():
-                                    progress = await progress_queue.get()
-                                    await websocket.send_json(progress)
-                                break
-                except Exception as e:
-                    logger.error(f"Error forwarding progress: {e}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": str(e),
-                    })
-
             elif action == "build":
                 # Check if Jetson
                 platform = _get_platform()

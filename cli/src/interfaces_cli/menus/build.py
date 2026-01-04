@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, List
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from interfaces_cli.banner import show_section_header
@@ -24,7 +23,6 @@ class BuildMenu(BaseMenu):
     def get_choices(self) -> List[Choice]:
         return [
             Choice(value="status", name="📊 [STATUS] bundled-torch状態確認"),
-            Choice(value="install", name="📥 [INSTALL] 既存ビルドをインストール (高速)"),
             Choice(value="build", name="🔨 [BUILD] PyTorch/torchvisionビルド (数時間)"),
             Choice(value="clean", name="🗑️  [CLEAN] bundled-torch削除"),
         ]
@@ -32,84 +30,10 @@ class BuildMenu(BaseMenu):
     def handle_choice(self, choice: Any) -> MenuResult:
         if choice == "status":
             return self._show_status()
-        if choice == "install":
-            return self._install_bundled_torch()
         if choice == "build":
             return self._build_bundled_torch()
         if choice == "clean":
             return self._clean_bundled_torch()
-        return MenuResult.CONTINUE
-
-    def _install_bundled_torch(self) -> MenuResult:
-        """Install existing bundled-torch to current environment."""
-        show_section_header("Install Bundled-Torch")
-
-        try:
-            status = self.api.get_bundled_torch_status()
-
-            if not status.get("exists"):
-                print(f"{Colors.error('Error:')} bundled-torch not found.")
-                print(f"{Colors.muted('Run [BUILD] first to build from source.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            if not status.get("is_valid"):
-                print(f"{Colors.error('Error:')} bundled-torch exists but is not built.")
-                print(f"{Colors.muted('Run [BUILD] to complete the build.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            print(f"{Colors.CYAN}Existing bundled-torch:{Colors.RESET}")
-            print(f"  PyTorch: {status.get('pytorch_version', 'unknown')}")
-            print(f"  torchvision: {status.get('torchvision_version', 'unknown')}")
-            print(f"  Path: {status.get('pytorch_path', 'unknown')}")
-
-            print(f"\n{Colors.muted('This will install the existing build to current environment.')}")
-            print(f"{Colors.muted('No recompilation is needed - this is fast (a few minutes).')}")
-
-            confirm = inquirer.confirm(
-                message="Install to current environment?",
-                default=True,
-                style=hacker_style,
-            ).execute()
-
-            if not confirm:
-                print(f"{Colors.muted('Cancelled.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            print(f"\n{Colors.CYAN}Installing...{Colors.RESET}\n")
-
-            def progress_callback(data):
-                msg_type = data.get("type", "")
-                if msg_type == "start":
-                    print(f"  {data.get('message', 'Starting...')}")
-                elif msg_type == "progress":
-                    print(f"  {data.get('message', '...')}")
-                elif msg_type == "log":
-                    line = data.get("line", "")
-                    if line and not line.startswith("  "):
-                        truncated = line[:80] + "..." if len(line) > 80 else line
-                        print(f"    {Colors.muted(truncated)}")
-                elif msg_type == "complete":
-                    print(f"\n  {Colors.success('Done!')}")
-                elif msg_type == "error":
-                    print(f"\n  {Colors.error('Error:')} {data.get('error', 'Unknown')}")
-
-            result = self.api.install_bundled_torch_ws(progress_callback=progress_callback)
-
-            if result.get("type") == "complete":
-                print(f"\n{Colors.success('Installation completed!')}")
-                print(f"{Colors.muted('Restart the CLI/backend to use the new PyTorch.')}")
-            else:
-                print(f"\n{Colors.error('Installation failed!')}")
-                if result.get("error"):
-                    print(f"  Error: {result['error']}")
-
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
         return MenuResult.CONTINUE
 
     def _show_status(self) -> MenuResult:
@@ -138,7 +62,10 @@ class BuildMenu(BaseMenu):
             console = Console()
             console.print(table)
 
-            if not status.get("is_jetson"):
+            if status.get("is_valid"):
+                print(f"\n{Colors.success('Note:')} bundled-torch is automatically loaded via sys.path.")
+                print(f"{Colors.muted('No manual installation needed - just restart CLI/backend.')}")
+            elif not status.get("is_jetson"):
                 print(f"\n{Colors.warning('Note:')} bundled-torch build is only needed on Jetson.")
                 print(f"{Colors.muted('On other platforms, use: pip install torch torchvision')}")
 

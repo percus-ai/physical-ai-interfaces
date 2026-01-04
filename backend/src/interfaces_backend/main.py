@@ -1,7 +1,19 @@
 """FastAPI server entrypoint."""
 
 import argparse
+import sys
 from pathlib import Path
+
+# Inject bundled-torch paths BEFORE any torch imports
+# This allows Jetson's pre-built PyTorch to be used without pip install
+_bundled_torch = Path.home() / ".cache" / "daihen-physical-ai" / "bundled-torch"
+if (_bundled_torch / "pytorch").is_dir():
+    _pytorch_path = str(_bundled_torch / "pytorch")
+    _torchvision_path = str(_bundled_torch / "torchvision")
+    if _pytorch_path not in sys.path:
+        sys.path.insert(0, _pytorch_path)
+    if _torchvision_path not in sys.path:
+        sys.path.insert(0, _torchvision_path)
 
 import uvicorn
 from dotenv import load_dotenv
