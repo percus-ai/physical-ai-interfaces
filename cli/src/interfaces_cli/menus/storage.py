@@ -4,6 +4,11 @@ from typing import TYPE_CHECKING, Any, List
 
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.table import Table
 
 from interfaces_cli.banner import format_size, show_section_header
 from interfaces_cli.menu_system import BaseMenu, MenuResult
@@ -24,6 +29,7 @@ class StorageMenu(BaseMenu):
             Choice(value="models", name="🤖 [MODELS] モデル管理"),
             Choice(value="sync", name="🔄 [SYNC] R2クラウド同期"),
             Choice(value="hub", name="🌐 [HUB] HuggingFace連携"),
+            Choice(value="migration", name="📤 [MIGRATION] 旧バージョンから移管"),
             Choice(value="archive", name="📦 [ARCHIVE] アーカイブ一覧"),
             Choice(value="usage", name="📊 [USAGE] ストレージ使用量"),
         ]
@@ -37,6 +43,8 @@ class StorageMenu(BaseMenu):
             return self.submenu(R2SyncMenu)
         if choice == "hub":
             return self.submenu(HuggingFaceMenu)
+        if choice == "migration":
+            return self.submenu(MigrationMenu)
         if choice == "archive":
             return self._show_archive()
         if choice == "usage":
@@ -506,6 +514,361 @@ class HuggingFaceMenu(BaseMenu):
                     print(f"  - {m.get('id', 'unknown')}")
             else:
                 print(f"  {Colors.muted('No models found')}")
+
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+
+class MigrationMenu(BaseMenu):
+    """Migration menu - Migrate data from legacy storage."""
+
+    title = "データ移管"
+
+    def get_choices(self) -> List[Choice]:
+        return [
+            Choice(value="models", name="🤖 [MODELS] モデルを移管"),
+            Choice(value="datasets", name="📁 [DATASETS] データセットを移管"),
+        ]
+
+    def handle_choice(self, choice: Any) -> MenuResult:
+        if choice == "models":
+            return self._migrate_models()
+        if choice == "datasets":
+            return self._migrate_datasets()
+        return MenuResult.CONTINUE
+
+    def _migrate_models(self) -> MenuResult:
+        """Migrate models from legacy storage."""
+        show_section_header("モデル移管")
+
+        try:
+            print(f"{Colors.CYAN}旧バージョンのモデルを検索中...{Colors.RESET}\n")
+            result = self.api.list_legacy_models()
+            items = result.get("items", [])
+
+            if not items:
+                print(f"{Colors.muted('旧バージョンにモデルがありません')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Show list with multi-select
+            print(f"見つかったモデル: {len(items)}個\n")
+
+            choices = []
+            for item in items:
+                item_id = item.get("id", "unknown")
+                size = format_size(item.get("size_bytes", 0))
+                file_count = item.get("file_count", 0)
+                choices.append(Choice(
+                    value=item_id,
+                    name=f"{item_id} ({size}, {file_count}ファイル)",
+                ))
+
+            selected = inquirer.checkbox(
+                message="移管するモデルを選択:",
+                choices=choices,
+                style=hacker_style,
+                instruction="(Spaceで選択/解除、Enterで確定)",
+                keybindings={"toggle": [{"key": "space"}]},
+            ).execute()
+
+            if not selected:
+                print(f"{Colors.muted('キャンセルされました')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Confirm
+            print(f"\n{Colors.CYAN}選択されたモデル:{Colors.RESET}")
+            for item_id in selected:
+                print(f"  - {item_id}")
+
+            delete_legacy = inquirer.confirm(
+                message="移管後に旧バージョンのデータを削除しますか?",
+                default=False,
+                style=hacker_style,
+            ).execute()
+
+            confirm = inquirer.confirm(
+                message=f"{len(selected)}個のモデルを移管しますか?",
+                default=True,
+                style=hacker_style,
+            ).execute()
+
+            if not confirm:
+                print(f"{Colors.muted('キャンセルされました')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Execute migration with WebSocket progress
+            print(f"\n{Colors.CYAN}移管中...{Colors.RESET}\n")
+
+            console = Console()
+            current_item = {"id": "", "file": "", "copied": 0, "total": 0, "size": 0, "transferred": 0}
+            completed_items = []
+            failed_items = []
+
+            def make_progress_table():
+                """Create a progress display table."""
+                table = Table(show_header=False, box=None, padding=(0, 1))
+                table.add_column("Label", style="cyan")
+                table.add_column("Value")
+
+                if current_item["id"]:
+                    table.add_row("アイテム:", current_item["id"])
+                    if current_item["file"]:
+                        size_str = format_size(current_item["size"]) if current_item["size"] else ""
+                        # Calculate percentage
+                        if current_item["size"] > 0:
+                            pct = (current_item["transferred"] / current_item["size"]) * 100
+                            transferred_str = format_size(current_item["transferred"])
+                            progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
+                        else:
+                            progress_str = size_str
+                        table.add_row("ファイル:", current_item["file"])
+                        table.add_row("転送:", progress_str)
+                    if current_item["total"] > 0:
+                        table.add_row("ファイル数:", f"{current_item['copied']}/{current_item['total']}")
+
+                if completed_items:
+                    table.add_row("完了:", f"{len(completed_items)}/{len(selected)} アイテム")
+
+                return Panel(table, title="📤 移管進捗", border_style="cyan")
+
+            def progress_callback(data):
+                """Handle progress updates from WebSocket."""
+                msg_type = data.get("type", "")
+
+                if msg_type == "start":
+                    current_item["id"] = data.get("item_id", "")
+                    current_item["total"] = data.get("total_files", 0)
+                    current_item["copied"] = 0
+                    current_item["file"] = ""
+                    current_item["transferred"] = 0
+                elif msg_type == "copying":
+                    current_item["file"] = data.get("current_file", "")
+                    current_item["size"] = data.get("file_size", 0)
+                    current_item["copied"] = data.get("copied_files", 0)
+                    current_item["transferred"] = 0
+                elif msg_type == "progress":
+                    current_item["file"] = data.get("current_file", "")
+                    current_item["size"] = data.get("file_size", 0)
+                    current_item["transferred"] = data.get("bytes_transferred", 0)
+                elif msg_type == "copied":
+                    current_item["copied"] = data.get("copied_files", 0)
+                    current_item["transferred"] = current_item["size"]
+                elif msg_type == "complete":
+                    completed_items.append(data.get("item_id", ""))
+                    current_item["id"] = ""
+                    current_item["file"] = ""
+                    current_item["transferred"] = 0
+                elif msg_type == "error":
+                    if data.get("item_id"):
+                        failed_items.append(data.get("item_id", ""))
+
+            try:
+                with Live(make_progress_table(), console=console, refresh_per_second=4) as live:
+                    def update_display(data):
+                        progress_callback(data)
+                        live.update(make_progress_table())
+
+                    result = self.api.migrate_with_progress(
+                        entry_type="models",
+                        item_ids=selected,
+                        delete_legacy=delete_legacy,
+                        progress_callback=update_display,
+                    )
+
+                success_count = result.get("success_count", 0)
+                failed_count = result.get("failed_count", 0)
+                results = result.get("results", {})
+            except Exception as e:
+                print(f"{Colors.error('Error:')} {e}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            print(f"\n{Colors.success('移管完了')}")
+            print(f"  成功: {success_count}")
+            print(f"  失敗: {failed_count}")
+
+            if failed_count > 0:
+                print(f"\n{Colors.error('失敗したモデル:')}")
+                for item_id, info in results.items():
+                    if isinstance(info, dict) and not info.get("success"):
+                        error_msg = info.get("error", "Unknown error")
+                        print(f"  - {item_id}: {error_msg}")
+                    elif not info:
+                        print(f"  - {item_id}")
+
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+    def _migrate_datasets(self) -> MenuResult:
+        """Migrate datasets from legacy storage."""
+        show_section_header("データセット移管")
+
+        try:
+            print(f"{Colors.CYAN}旧バージョンのデータセットを検索中...{Colors.RESET}\n")
+            result = self.api.list_legacy_datasets()
+            items = result.get("items", [])
+
+            if not items:
+                print(f"{Colors.muted('旧バージョンにデータセットがありません')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Show list with multi-select
+            print(f"見つかったデータセット: {len(items)}個\n")
+
+            choices = []
+            for item in items:
+                item_id = item.get("id", "unknown")
+                size = format_size(item.get("size_bytes", 0))
+                file_count = item.get("file_count", 0)
+                choices.append(Choice(
+                    value=item_id,
+                    name=f"{item_id} ({size}, {file_count}ファイル)",
+                ))
+
+            selected = inquirer.checkbox(
+                message="移管するデータセットを選択:",
+                choices=choices,
+                style=hacker_style,
+                instruction="(Spaceで選択/解除、Enterで確定)",
+                keybindings={"toggle": [{"key": "space"}]},
+            ).execute()
+
+            if not selected:
+                print(f"{Colors.muted('キャンセルされました')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Confirm
+            print(f"\n{Colors.CYAN}選択されたデータセット:{Colors.RESET}")
+            for item_id in selected:
+                print(f"  - {item_id}")
+
+            delete_legacy = inquirer.confirm(
+                message="移管後に旧バージョンのデータを削除しますか?",
+                default=False,
+                style=hacker_style,
+            ).execute()
+
+            confirm = inquirer.confirm(
+                message=f"{len(selected)}個のデータセットを移管しますか?",
+                default=True,
+                style=hacker_style,
+            ).execute()
+
+            if not confirm:
+                print(f"{Colors.muted('キャンセルされました')}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            # Execute migration with WebSocket progress
+            print(f"\n{Colors.CYAN}移管中...{Colors.RESET}\n")
+
+            console = Console()
+            current_item = {"id": "", "file": "", "copied": 0, "total": 0, "size": 0, "transferred": 0}
+            completed_items = []
+            failed_items = []
+
+            def make_progress_table():
+                """Create a progress display table."""
+                table = Table(show_header=False, box=None, padding=(0, 1))
+                table.add_column("Label", style="cyan")
+                table.add_column("Value")
+
+                if current_item["id"]:
+                    table.add_row("アイテム:", current_item["id"])
+                    if current_item["file"]:
+                        size_str = format_size(current_item["size"]) if current_item["size"] else ""
+                        # Calculate percentage
+                        if current_item["size"] > 0:
+                            pct = (current_item["transferred"] / current_item["size"]) * 100
+                            transferred_str = format_size(current_item["transferred"])
+                            progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
+                        else:
+                            progress_str = size_str
+                        table.add_row("ファイル:", current_item["file"])
+                        table.add_row("転送:", progress_str)
+                    if current_item["total"] > 0:
+                        table.add_row("ファイル数:", f"{current_item['copied']}/{current_item['total']}")
+
+                if completed_items:
+                    table.add_row("完了:", f"{len(completed_items)}/{len(selected)} アイテム")
+
+                return Panel(table, title="📤 移管進捗", border_style="cyan")
+
+            def progress_callback(data):
+                """Handle progress updates from WebSocket."""
+                msg_type = data.get("type", "")
+
+                if msg_type == "start":
+                    current_item["id"] = data.get("item_id", "")
+                    current_item["total"] = data.get("total_files", 0)
+                    current_item["copied"] = 0
+                    current_item["file"] = ""
+                    current_item["transferred"] = 0
+                elif msg_type == "copying":
+                    current_item["file"] = data.get("current_file", "")
+                    current_item["size"] = data.get("file_size", 0)
+                    current_item["copied"] = data.get("copied_files", 0)
+                    current_item["transferred"] = 0
+                elif msg_type == "progress":
+                    current_item["file"] = data.get("current_file", "")
+                    current_item["size"] = data.get("file_size", 0)
+                    current_item["transferred"] = data.get("bytes_transferred", 0)
+                elif msg_type == "copied":
+                    current_item["copied"] = data.get("copied_files", 0)
+                    current_item["transferred"] = current_item["size"]
+                elif msg_type == "complete":
+                    completed_items.append(data.get("item_id", ""))
+                    current_item["id"] = ""
+                    current_item["file"] = ""
+                    current_item["transferred"] = 0
+                elif msg_type == "error":
+                    if data.get("item_id"):
+                        failed_items.append(data.get("item_id", ""))
+
+            try:
+                with Live(make_progress_table(), console=console, refresh_per_second=4) as live:
+                    def update_display(data):
+                        progress_callback(data)
+                        live.update(make_progress_table())
+
+                    result = self.api.migrate_with_progress(
+                        entry_type="datasets",
+                        item_ids=selected,
+                        delete_legacy=delete_legacy,
+                        progress_callback=update_display,
+                    )
+
+                success_count = result.get("success_count", 0)
+                failed_count = result.get("failed_count", 0)
+                results = result.get("results", {})
+            except Exception as e:
+                print(f"{Colors.error('Error:')} {e}")
+                input(f"\n{Colors.muted('Press Enter to continue...')}")
+                return MenuResult.CONTINUE
+
+            print(f"\n{Colors.success('移管完了')}")
+            print(f"  成功: {success_count}")
+            print(f"  失敗: {failed_count}")
+
+            if failed_count > 0:
+                print(f"\n{Colors.error('失敗したデータセット:')}")
+                for item_id, info in results.items():
+                    if isinstance(info, dict) and not info.get("success"):
+                        error_msg = info.get("error", "Unknown error")
+                        print(f"  - {item_id}: {error_msg}")
+                    elif not info:
+                        print(f"  - {item_id}")
 
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")

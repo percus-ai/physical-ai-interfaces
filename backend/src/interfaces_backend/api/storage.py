@@ -1,10 +1,12 @@
 """Storage API router for datasets and models management."""
 
+import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from interfaces_backend.models.storage import (
     ArchiveListResponse,
@@ -475,3 +477,191 @@ async def search_hub_models(
     hf = _get_hf_service()
     results = hf.search_models(query, limit)
     return {"results": results, "total": len(results)}
+
+
+# --- Migration ---
+
+
+@router.get("/migration/legacy/models")
+async def list_legacy_models():
+    """List models in legacy (root-level) storage."""
+    sync = _get_sync_service()
+    items = sync.list_legacy_items("models")
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/migration/legacy/datasets")
+async def list_legacy_datasets():
+    """List datasets in legacy (root-level) storage."""
+    sync = _get_sync_service()
+    items = sync.list_legacy_items("datasets")
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/migration/models")
+async def migrate_models(
+    item_ids: List[str] = Body(..., description="List of model IDs to migrate"),
+    delete_legacy: bool = Body(False, description="Delete legacy items after migration"),
+):
+    """Migrate models from legacy to versioned storage."""
+    sync = _get_sync_service()
+    results = sync.migrate_items(item_ids, "models", delete_legacy=delete_legacy)
+
+    success_count = sum(1 for v in results.values() if v.get("success"))
+    failed_count = len(results) - success_count
+
+    return {
+        "results": results,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "message": f"Migrated {success_count}/{len(results)} models",
+    }
+
+
+@router.post("/migration/datasets")
+async def migrate_datasets(
+    item_ids: List[str] = Body(..., description="List of dataset IDs to migrate"),
+    delete_legacy: bool = Body(False, description="Delete legacy items after migration"),
+):
+    """Migrate datasets from legacy to versioned storage."""
+    sync = _get_sync_service()
+    results = sync.migrate_items(item_ids, "datasets", delete_legacy=delete_legacy)
+
+    success_count = sum(1 for v in results.values() if v.get("success"))
+    failed_count = len(results) - success_count
+
+    return {
+        "results": results,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "message": f"Migrated {success_count}/{len(results)} datasets",
+    }
+
+
+# --- WebSocket Migration with Progress ---
+
+# Thread pool for running sync operations
+_executor = ThreadPoolExecutor(max_workers=2)
+
+
+@router.websocket("/ws/migration")
+async def websocket_migration(websocket: WebSocket):
+    """WebSocket endpoint for migration with real-time progress.
+
+    Client sends JSON messages:
+    - {"action": "migrate", "entry_type": "models"|"datasets", "item_ids": [...], "delete_legacy": bool}
+
+    Server sends progress updates:
+    - {"type": "start", "item_id": "...", "total_files": N}
+    - {"type": "copying", "item_id": "...", "current_file": "...", "file_size": N, "copied_files": M, "total_files": N}
+    - {"type": "copied", "item_id": "...", "current_file": "...", "copied_files": M, "total_files": N}
+    - {"type": "complete", "item_id": "...", "total_files": N}
+    - {"type": "error", "item_id": "...", "error": "..."}
+    - {"type": "done", "success_count": N, "failed_count": M, "results": {...}}
+    """
+    await websocket.accept()
+
+    try:
+        while True:
+            # Wait for migration request
+            data = await websocket.receive_json()
+
+            action = data.get("action")
+            if action != "migrate":
+                await websocket.send_json({"type": "error", "error": "Unknown action"})
+                continue
+
+            entry_type = data.get("entry_type", "models")
+            item_ids = data.get("item_ids", [])
+            delete_legacy = data.get("delete_legacy", False)
+
+            if not item_ids:
+                await websocket.send_json({"type": "error", "error": "No items specified"})
+                continue
+
+            # Get sync service
+            sync = _get_sync_service()
+
+            # Queue for progress updates from thread
+            progress_queue: asyncio.Queue = asyncio.Queue()
+
+            # Capture event loop for use in thread callback
+            main_loop = asyncio.get_running_loop()
+
+            def progress_callback(progress: dict):
+                """Callback to put progress in queue (called from thread)."""
+                asyncio.run_coroutine_threadsafe(
+                    progress_queue.put(progress),
+                    main_loop
+                )
+
+            async def run_migration():
+                """Run migration in thread pool."""
+                results = {}
+                success_count = 0
+                failed_count = 0
+
+                loop = asyncio.get_event_loop()
+
+                for item_id in item_ids:
+                    # Run in thread pool to avoid blocking
+                    success, error = await loop.run_in_executor(
+                        _executor,
+                        lambda iid=item_id: sync.migrate_item_with_progress(
+                            iid, entry_type, progress_callback
+                        )
+                    )
+                    results[item_id] = {"success": success, "error": error}
+                    if success:
+                        success_count += 1
+                        if delete_legacy:
+                            try:
+                                await loop.run_in_executor(
+                                    _executor,
+                                    lambda iid=item_id: sync._delete_legacy_item(iid, entry_type)
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to delete legacy {item_id}: {e}")
+                    else:
+                        failed_count += 1
+
+                # Signal completion
+                await progress_queue.put({
+                    "type": "done",
+                    "success_count": success_count,
+                    "failed_count": failed_count,
+                    "results": results,
+                })
+
+            # Start migration task
+            migration_task = asyncio.create_task(run_migration())
+
+            # Forward progress updates to WebSocket
+            try:
+                while True:
+                    # Get progress with timeout to check if task is done
+                    try:
+                        progress = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                        await websocket.send_json(progress)
+
+                        if progress.get("type") == "done":
+                            break
+                    except asyncio.TimeoutError:
+                        if migration_task.done():
+                            # Check for any remaining items in queue
+                            while not progress_queue.empty():
+                                progress = await progress_queue.get()
+                                await websocket.send_json(progress)
+                            break
+            except Exception as e:
+                logger.error(f"Error forwarding progress: {e}")
+                await websocket.send_json({"type": "error", "error": str(e)})
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "error": str(e)})
+        except Exception:
+            pass

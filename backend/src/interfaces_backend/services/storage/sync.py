@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from interfaces_backend.models.storage import (
     DatasetMetadata,
@@ -524,3 +524,236 @@ class R2SyncService:
 
         local.last_updated = _now_iso()
         self.manifest.save()
+
+    # --- Migration ---
+
+    def list_legacy_items(self, entry_type: str = "models") -> List[Dict]:
+        """List items from legacy (root-level) storage.
+
+        Args:
+            entry_type: 'models' or 'datasets'
+
+        Returns:
+            List of items found at root level (without version prefix)
+        """
+        try:
+            # List objects at root level (no version prefix)
+            legacy_path = f"s3://{self.bucket}/{entry_type}/"
+            objects = self.s3.list_objects(legacy_path)
+
+            # Group by item ID (first directory level)
+            items: Dict[str, Dict] = {}
+            for obj in objects:
+                key = obj.get("Key", "")
+                # Extract item_id from path like "models/item_id/..."
+                parts = key.split("/")
+                if len(parts) >= 2:
+                    item_id = parts[1]
+                    if item_id and item_id not in items:
+                        items[item_id] = {
+                            "id": item_id,
+                            "type": entry_type,
+                            "path": f"s3://{self.bucket}/{entry_type}/{item_id}",
+                            "size_bytes": 0,
+                            "file_count": 0,
+                        }
+                    if item_id:
+                        items[item_id]["size_bytes"] += obj.get("Size", 0)
+                        items[item_id]["file_count"] += 1
+
+            return list(items.values())
+        except Exception as e:
+            logger.error(f"Failed to list legacy items: {e}")
+            return []
+
+    def migrate_item(self, item_id: str, entry_type: str = "models") -> Tuple[bool, str]:
+        """Migrate a single item from legacy to versioned storage.
+
+        Args:
+            item_id: The item ID to migrate
+            entry_type: 'models' or 'datasets'
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        return self.migrate_item_with_progress(item_id, entry_type, None)
+
+    def migrate_item_with_progress(
+        self,
+        item_id: str,
+        entry_type: str = "models",
+        progress_callback: Optional[Callable[[Dict], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Migrate a single item from legacy to versioned storage with progress.
+
+        Args:
+            item_id: The item ID to migrate
+            entry_type: 'models' or 'datasets'
+            progress_callback: Optional callback for progress updates.
+                               Called with dict: {item_id, current_file, total_files, copied_files, file_name, file_size, bytes_transferred}
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            prefix = self._get_prefix()
+            if not prefix:
+                logger.warning("No version prefix set, migration not needed")
+                return True, ""
+
+            legacy_path = f"s3://{self.bucket}/{entry_type}/{item_id}/"
+
+            # List all objects in legacy path
+            objects = self.s3.list_objects(legacy_path)
+            if not objects:
+                msg = f"No objects found at {legacy_path}"
+                logger.warning(msg)
+                return False, msg
+
+            # Use copy() method which handles multipart automatically (5GB+ files)
+            copied_count = 0
+            total_count = len(objects)
+
+            if progress_callback:
+                progress_callback({
+                    "type": "start",
+                    "item_id": item_id,
+                    "entry_type": entry_type,
+                    "total_files": total_count,
+                    "copied_files": 0,
+                })
+
+            for obj in objects:
+                old_key = obj.get("Key", "")
+                if not old_key:
+                    continue
+
+                # Calculate new key by inserting version prefix
+                # old: models/item_id/file.pt -> new: v2/models/item_id/file.pt
+                new_key = f"{prefix}{old_key}"
+                file_size = obj.get("Size", 0)
+                file_name = old_key.split("/")[-1]
+
+                logger.info(f"Copying {old_key} ({file_size / 1024 / 1024:.1f} MB) -> {new_key}")
+
+                if progress_callback:
+                    progress_callback({
+                        "type": "copying",
+                        "item_id": item_id,
+                        "entry_type": entry_type,
+                        "total_files": total_count,
+                        "copied_files": copied_count,
+                        "current_file": file_name,
+                        "file_size": file_size,
+                        "bytes_transferred": 0,
+                    })
+
+                # Track bytes transferred for progress reporting
+                bytes_transferred = [0]  # Use list to allow mutation in closure
+
+                def make_copy_callback(fname, fsize):
+                    """Create a callback for this specific file."""
+                    def callback(bytes_amount):
+                        bytes_transferred[0] += bytes_amount
+                        if progress_callback:
+                            progress_callback({
+                                "type": "progress",
+                                "item_id": item_id,
+                                "entry_type": entry_type,
+                                "total_files": total_count,
+                                "copied_files": copied_count,
+                                "current_file": fname,
+                                "file_size": fsize,
+                                "bytes_transferred": bytes_transferred[0],
+                            })
+                    return callback
+
+                # Use copy() with callback for progress tracking
+                copy_source = {"Bucket": self.bucket, "Key": old_key}
+                self.s3.client.copy(
+                    copy_source,
+                    self.bucket,
+                    new_key,
+                    Callback=make_copy_callback(file_name, file_size),
+                )
+
+                copied_count += 1
+                logger.info(f"Copied {copied_count}/{total_count}: {old_key}")
+
+                if progress_callback:
+                    progress_callback({
+                        "type": "copied",
+                        "item_id": item_id,
+                        "entry_type": entry_type,
+                        "total_files": total_count,
+                        "copied_files": copied_count,
+                        "current_file": file_name,
+                        "file_size": file_size,
+                        "bytes_transferred": file_size,
+                    })
+
+            if progress_callback:
+                progress_callback({
+                    "type": "complete",
+                    "item_id": item_id,
+                    "entry_type": entry_type,
+                    "total_files": total_count,
+                    "copied_files": copied_count,
+                })
+
+            logger.info(f"Migrated {entry_type}/{item_id} to {prefix} ({copied_count} files)")
+            return True, ""
+        except Exception as e:
+            msg = str(e)
+            logger.error(f"Failed to migrate {entry_type}/{item_id}: {msg}")
+            if progress_callback:
+                progress_callback({
+                    "type": "error",
+                    "item_id": item_id,
+                    "entry_type": entry_type,
+                    "error": msg,
+                })
+            return False, msg
+
+    def migrate_items(
+        self, item_ids: List[str], entry_type: str = "models", delete_legacy: bool = False
+    ) -> Dict[str, Dict[str, any]]:
+        """Migrate multiple items from legacy to versioned storage.
+
+        Args:
+            item_ids: List of item IDs to migrate
+            entry_type: 'models' or 'datasets'
+            delete_legacy: If True, delete legacy items after successful migration
+
+        Returns:
+            Dict mapping item_id to {success: bool, error: str}
+        """
+        results = {}
+        for item_id in item_ids:
+            success, error = self.migrate_item(item_id, entry_type)
+            results[item_id] = {"success": success, "error": error}
+
+            if success and delete_legacy:
+                try:
+                    self._delete_legacy_item(item_id, entry_type)
+                except Exception as e:
+                    logger.warning(f"Failed to delete legacy {item_id}: {e}")
+
+        return results
+
+    def _delete_legacy_item(self, item_id: str, entry_type: str) -> bool:
+        """Delete an item from legacy (root-level) storage."""
+        try:
+            legacy_path = f"s3://{self.bucket}/{entry_type}/{item_id}/"
+            objects = self.s3.list_objects(legacy_path)
+
+            for obj in objects:
+                key = obj.get("Key", "")
+                if key:
+                    self.s3.client.delete_object(Bucket=self.bucket, Key=key)
+
+            logger.info(f"Deleted legacy {entry_type}/{item_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete legacy {entry_type}/{item_id}: {e}")
+            return False

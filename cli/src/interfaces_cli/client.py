@@ -3,8 +3,9 @@
 Auto-generated based on OpenAPI schema from /openapi.json
 """
 
+import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -469,6 +470,139 @@ class PhiClient:
         response = self._client.post("/api/storage/sync/manifest/pull")
         response.raise_for_status()
         return response.json()
+
+    def list_legacy_models(self) -> Dict[str, Any]:
+        """GET /api/storage/migration/legacy/models - List legacy models."""
+        response = self._client.get("/api/storage/migration/legacy/models")
+        response.raise_for_status()
+        return response.json()
+
+    def list_legacy_datasets(self) -> Dict[str, Any]:
+        """GET /api/storage/migration/legacy/datasets - List legacy datasets."""
+        response = self._client.get("/api/storage/migration/legacy/datasets")
+        response.raise_for_status()
+        return response.json()
+
+    def migrate_models(self, item_ids: List[str], delete_legacy: bool = False) -> Dict[str, Any]:
+        """POST /api/storage/migration/models - Migrate models to new version."""
+        response = self._client.post(
+            "/api/storage/migration/models",
+            json={"item_ids": item_ids, "delete_legacy": delete_legacy},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def migrate_datasets(self, item_ids: List[str], delete_legacy: bool = False) -> Dict[str, Any]:
+        """POST /api/storage/migration/datasets - Migrate datasets to new version."""
+        response = self._client.post(
+            "/api/storage/migration/datasets",
+            json={"item_ids": item_ids, "delete_legacy": delete_legacy},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def migrate_single_model(self, item_id: str, delete_legacy: bool = False, timeout: float = 600.0) -> Dict[str, Any]:
+        """Migrate a single model with extended timeout for large files."""
+        with httpx.Client(base_url=self.base_url, timeout=timeout) as client:
+            response = client.post(
+                "/api/storage/migration/models",
+                json={"item_ids": [item_id], "delete_legacy": delete_legacy},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def migrate_single_dataset(self, item_id: str, delete_legacy: bool = False, timeout: float = 600.0) -> Dict[str, Any]:
+        """Migrate a single dataset with extended timeout for large files."""
+        with httpx.Client(base_url=self.base_url, timeout=timeout) as client:
+            response = client.post(
+                "/api/storage/migration/datasets",
+                json={"item_ids": [item_id], "delete_legacy": delete_legacy},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def migrate_with_progress(
+        self,
+        entry_type: str,
+        item_ids: List[str],
+        delete_legacy: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Migrate items with real-time progress via WebSocket.
+
+        Args:
+            entry_type: 'models' or 'datasets'
+            item_ids: List of item IDs to migrate
+            delete_legacy: Delete legacy items after migration
+            progress_callback: Called with progress updates
+
+        Returns:
+            Final result with success_count, failed_count, results
+        """
+        import websocket
+
+        # Convert http URL to ws URL
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/storage/ws/migration"
+
+        result = {"success_count": 0, "failed_count": 0, "results": {}}
+
+        try:
+            ws = websocket.create_connection(ws_url)
+
+            # Send migration request
+            ws.send(json.dumps({
+                "action": "migrate",
+                "entry_type": entry_type,
+                "item_ids": item_ids,
+                "delete_legacy": delete_legacy,
+            }))
+
+            # Receive progress updates until done
+            while True:
+                message = ws.recv()
+                data = json.loads(message)
+
+                if progress_callback:
+                    progress_callback(data)
+
+                if data.get("type") == "done":
+                    result = data
+                    break
+                elif data.get("type") == "error" and "item_id" not in data:
+                    # Global error
+                    raise Exception(data.get("error", "Unknown error"))
+
+            ws.close()
+        except ImportError:
+            # websocket-client not installed, fall back to HTTP
+            if progress_callback:
+                progress_callback({"type": "fallback", "message": "WebSocket not available, using HTTP"})
+            for item_id in item_ids:
+                if progress_callback:
+                    progress_callback({"type": "start", "item_id": item_id})
+                try:
+                    if entry_type == "models":
+                        res = self.migrate_single_model(item_id, delete_legacy)
+                    else:
+                        res = self.migrate_single_dataset(item_id, delete_legacy)
+                    item_result = res.get("results", {}).get(item_id, {})
+                    result["results"][item_id] = item_result
+                    if item_result.get("success"):
+                        result["success_count"] += 1
+                    else:
+                        result["failed_count"] += 1
+                    if progress_callback:
+                        progress_callback({"type": "complete", "item_id": item_id})
+                except Exception as e:
+                    result["results"][item_id] = {"success": False, "error": str(e)}
+                    result["failed_count"] += 1
+                    if progress_callback:
+                        progress_callback({"type": "error", "item_id": item_id, "error": str(e)})
+        except Exception as e:
+            raise Exception(f"Migration failed: {e}")
+
+        return result
 
     # =========================================================================
     # System
