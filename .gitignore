@@ -174,6 +174,7 @@ _backup
 data
 datasets
 models
+!backend/src/interfaces_backend/models/
 runs
 user_devices.json
 */user_devices.json

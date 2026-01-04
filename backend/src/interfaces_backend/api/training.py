@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from interfaces_backend.models.training import (
@@ -26,6 +27,190 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 
 # Jobs directory - configurable via environment
 JOBS_DIR = Path.home() / ".percus" / "jobs"
+
+# Remote scripts directory - contains setup_env.sh, train_lerobot_entry.py, etc.
+# These scripts are deployed to remote instances for training
+REMOTE_SCRIPTS_DIR = Path(__file__).parent.parent.parent.parent.parent.parent / "archive" / "verda_cloud" / "remote"
+
+
+# --- SSH utilities for remote deployment ---
+
+
+def _connect_ssh(ip: str, user: str, private_key_path: str, timeout: int = 30) -> "paramiko.SSHClient":
+    """Create an SSH client connected to the remote host.
+
+    This is a strict version that raises exceptions on failure, for use in deployment.
+    Supports RSA, Ed25519, and ECDSA keys.
+    """
+    import paramiko
+
+    # Expand ~ in private key path
+    key_path = Path(private_key_path).expanduser()
+    if not key_path.exists():
+        raise FileNotFoundError(f"SSH private key not found: {key_path}")
+
+    # Try different key types
+    pkey = None
+    for key_cls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
+        try:
+            pkey = key_cls.from_private_key_file(str(key_path))
+            break
+        except Exception:
+            continue
+
+    if not pkey:
+        raise ValueError(f"Could not load SSH key from {key_path}")
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=ip,
+        username=user,
+        pkey=pkey,
+        timeout=timeout,
+        look_for_keys=False,
+        allow_agent=False,
+    )
+    return client
+
+
+def _upload_file_via_sftp(
+    ssh_client: "paramiko.SSHClient",
+    local_path: Path,
+    remote_path: str,
+) -> None:
+    """Upload a file via SFTP."""
+    sftp = ssh_client.open_sftp()
+    try:
+        sftp.put(str(local_path), remote_path)
+    finally:
+        sftp.close()
+
+
+def _upload_content_via_sftp(
+    ssh_client: "paramiko.SSHClient",
+    content: str,
+    remote_path: str,
+) -> None:
+    """Upload string content as a file via SFTP."""
+    sftp = ssh_client.open_sftp()
+    try:
+        with sftp.file(remote_path, "w") as f:
+            f.write(content)
+    finally:
+        sftp.close()
+
+
+def _run_ssh_command(
+    ssh_client: "paramiko.SSHClient",
+    command: str,
+    timeout: Optional[int] = None,
+) -> tuple[int, str, str]:
+    """Run a command via SSH and return (exit_code, stdout, stderr)."""
+    stdin, stdout, stderr = ssh_client.exec_command(command, timeout=timeout)
+    exit_code = stdout.channel.recv_exit_status()
+    return exit_code, stdout.read().decode(), stderr.read().decode()
+
+
+def _generate_training_config_yaml(request: "JobCreateRequest", job_id: str) -> str:
+    """Generate training config YAML from JobCreateRequest."""
+    config = {
+        "metadata": {
+            "name": request.name,
+            "job_id": job_id,
+        },
+        "dataset": {
+            "id": request.dataset.id,
+            "source": request.dataset.source,
+        },
+        "policy": {
+            "type": request.policy.type,
+        },
+        "training": {},
+        "wandb": {
+            "enable": request.wandb_enable,
+        },
+    }
+
+    # Add optional dataset fields
+    if request.dataset.hf_repo_id:
+        config["dataset"]["repo_id"] = request.dataset.hf_repo_id
+
+    # Add optional policy fields
+    if request.policy.pretrained_path:
+        config["policy"]["pretrained_path"] = request.policy.pretrained_path
+    if request.policy.compile_model is not None:
+        config["policy"]["compile_model"] = request.policy.compile_model
+    if request.policy.gradient_checkpointing is not None:
+        config["policy"]["gradient_checkpointing"] = request.policy.gradient_checkpointing
+    if request.policy.dtype:
+        config["policy"]["dtype"] = request.policy.dtype
+
+    # Add optional training fields
+    if request.training.steps:
+        config["training"]["steps"] = request.training.steps
+    if request.training.batch_size:
+        config["training"]["batch_size"] = request.training.batch_size
+    if request.training.save_freq:
+        config["training"]["save_freq"] = request.training.save_freq
+
+    # Add checkpoint repo if specified
+    if request.checkpoint_repo_id:
+        config["checkpoint"] = {
+            "repo_id": request.checkpoint_repo_id,
+            "upload_every_save": True,
+        }
+
+    return yaml.dump(config, default_flow_style=False, allow_unicode=True)
+
+
+def _generate_env_file(job_id: str, instance_id: str, auto_delete: bool = True) -> str:
+    """Generate .env file content with required credentials."""
+    lines = []
+
+    # HuggingFace token
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if hf_token:
+        lines.append(f"HF_TOKEN={hf_token}")
+
+    # WandB API key
+    wandb_key = os.environ.get("WANDB_API_KEY")
+    if wandb_key:
+        lines.append(f"WANDB_API_KEY={wandb_key}")
+
+    # DataCrunch credentials
+    dc_client_id = os.environ.get("DATACRUNCH_CLIENT_ID")
+    dc_client_secret = os.environ.get("DATACRUNCH_CLIENT_SECRET")
+    if dc_client_id:
+        lines.append(f"DATACRUNCH_CLIENT_ID={dc_client_id}")
+    if dc_client_secret:
+        lines.append(f"DATACRUNCH_CLIENT_SECRET={dc_client_secret}")
+
+    # R2/S3 credentials
+    r2_endpoint = os.environ.get("R2_ENDPOINT_URL") or os.environ.get("S3_ENDPOINT_URL")
+    r2_access_key = os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("S3_ACCESS_KEY_ID")
+    r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY") or os.environ.get("S3_SECRET_ACCESS_KEY")
+    if r2_endpoint:
+        lines.append(f"S3_ENDPOINT_URL={r2_endpoint}")
+        lines.append(f"R2_ENDPOINT_URL={r2_endpoint}")
+    if r2_access_key:
+        lines.append(f"S3_ACCESS_KEY_ID={r2_access_key}")
+        lines.append(f"R2_ACCESS_KEY_ID={r2_access_key}")
+    if r2_secret_key:
+        lines.append(f"S3_SECRET_ACCESS_KEY={r2_secret_key}")
+        lines.append(f"R2_SECRET_ACCESS_KEY={r2_secret_key}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _generate_instance_info_env(job_id: str, instance_id: str, auto_delete: bool = True) -> str:
+    """Generate instance_info.env content."""
+    lines = [
+        f"DATACRUNCH_INSTANCE_ID={instance_id}",
+        f"JOB_ID={job_id}",
+        f"AUTO_DELETE_INSTANCE={'true' if auto_delete else 'false'}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 # --- Verda/DataCrunch API utilities ---
@@ -809,17 +994,407 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
 
         # Update job with IP
         job_data["ip"] = ip
-        job_data["status"] = "running"
+        job_data["status"] = "deploying"
         _save_job(job_data)
 
-        # TODO: Deploy training files and start training via SSH
-        # This would involve:
-        # 1. Connect via SSH
-        # 2. Upload training config
-        # 3. Run setup script
-        # For now, just mark as running - actual deployment requires more integration
+        # SSH deployment
+        ssh_user = job_data.get("ssh_user", "root")
+        ssh_private_key = job_data.get("ssh_private_key", "~/.ssh/id_rsa")
+        remote_base_dir = job_data.get("remote_base_dir", "/root")
+        remote_run_dir = f"{remote_base_dir}/lerobot_run"
+
+        # Wait for SSH to be ready (up to 5 minutes)
+        ssh_client = None
+        ssh_deadline = time.time() + 300
+        while time.time() < ssh_deadline:
+            try:
+                ssh_client = _connect_ssh(ip, ssh_user, ssh_private_key)
+                break
+            except Exception:
+                time.sleep(10)
+
+        if not ssh_client:
+            job_data["status"] = "failed"
+            job_data["error_message"] = "SSH connection failed"
+            job_data["completed_at"] = datetime.now().isoformat()
+            _save_job(job_data)
+            return
+
+        try:
+            # Create remote directory
+            _run_ssh_command(ssh_client, f"mkdir -p {remote_run_dir}")
+
+            # Upload remote scripts
+            setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
+            read_config_path = REMOTE_SCRIPTS_DIR / "read_train_config.py"
+            train_entry_path = REMOTE_SCRIPTS_DIR / "train_lerobot_entry.py"
+
+            if setup_env_path.exists():
+                _upload_file_via_sftp(ssh_client, setup_env_path, f"{remote_run_dir}/setup_env.sh")
+            if read_config_path.exists():
+                _upload_file_via_sftp(ssh_client, read_config_path, f"{remote_run_dir}/read_train_config.py")
+            if train_entry_path.exists():
+                _upload_file_via_sftp(ssh_client, train_entry_path, f"{remote_run_dir}/train_lerobot_entry.py")
+
+            # Generate and upload training config YAML
+            config_yaml = _generate_training_config_yaml(request, job_id)
+            _upload_content_via_sftp(ssh_client, config_yaml, f"{remote_run_dir}/train.remote.yaml")
+
+            # Generate and upload .env file
+            instance_id = job_data["instance_id"]
+            env_content = _generate_env_file(job_id, instance_id)
+            _upload_content_via_sftp(ssh_client, env_content, f"{remote_run_dir}/.env")
+
+            # Generate and upload instance_info.env
+            instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
+            _upload_content_via_sftp(ssh_client, instance_info, f"{remote_run_dir}/instance_info.env")
+
+            # Make setup script executable
+            _run_ssh_command(ssh_client, f"chmod +x {remote_run_dir}/setup_env.sh")
+
+            # Start training in background with nohup
+            # The script will handle its own logging to setup_env_train.log
+            start_cmd = (
+                f"cd {remote_run_dir} && "
+                f"nohup bash setup_env.sh train > /dev/null 2>&1 &"
+            )
+            _run_ssh_command(ssh_client, start_cmd)
+
+            # Update status to running
+            job_data["status"] = "running"
+            job_data["updated_at"] = datetime.now().isoformat()
+            _save_job(job_data)
+
+        finally:
+            ssh_client.close()
 
     except Exception as e:
         job_data["status"] = "failed"
+        job_data["error_message"] = str(e)
         job_data["completed_at"] = datetime.now().isoformat()
         _save_job(job_data)
+
+
+# --- Training Configs API ---
+
+# Configs directory
+CONFIGS_DIR = Path.cwd() / "training_configs"
+
+
+def _get_config_file(config_id: str) -> Path:
+    """Get config file path."""
+    return CONFIGS_DIR / f"{config_id}.yaml"
+
+
+def _list_configs() -> list[dict]:
+    """List all training configs."""
+    if not CONFIGS_DIR.exists():
+        return []
+
+    configs = []
+    try:
+        import yaml
+    except ImportError:
+        return []
+
+    for config_file in CONFIGS_DIR.glob("*.yaml"):
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                continue
+
+            configs.append({
+                "config_id": config_file.stem,
+                "name": data.get("metadata", {}).get("name", config_file.stem),
+                "policy_type": data.get("policy", {}).get("type", "unknown"),
+                "dataset_id": data.get("dataset", {}).get("id", "unknown"),
+                "gpu_model": data.get("verda", {}).get("gpu_model", "H100"),
+                "file_path": str(config_file),
+                "modified_at": datetime.fromtimestamp(
+                    config_file.stat().st_mtime
+                ).isoformat(),
+            })
+        except Exception:
+            continue
+
+    configs.sort(key=lambda c: c.get("modified_at", ""), reverse=True)
+    return configs
+
+
+def _load_config(config_id: str) -> Optional[dict]:
+    """Load config from file."""
+    try:
+        import yaml
+    except ImportError:
+        return None
+
+    config_file = _get_config_file(config_id)
+    if not config_file.exists():
+        return None
+
+    with open(config_file, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _save_config(config_id: str, config_data: dict) -> Path:
+    """Save config to file."""
+    try:
+        import yaml
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PyYAML not installed")
+
+    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    config_file = _get_config_file(config_id)
+
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+
+    return config_file
+
+
+def _convert_model_to_yaml_format(config) -> dict:
+    """Convert Pydantic model to YAML format."""
+    return {
+        "metadata": {
+            "name": config.name,
+        },
+        "dataset": {
+            "id": config.dataset.id,
+            "source": config.dataset.source,
+            "hf_repo_id": config.dataset.hf_repo_id,
+        },
+        "policy": {
+            "type": config.policy.type,
+            "pretrained_path": config.policy.pretrained_path,
+            "compile_model": config.policy.compile_model,
+            "gradient_checkpointing": config.policy.gradient_checkpointing,
+            "dtype": config.policy.dtype,
+        },
+        "training": {
+            "steps": config.training.steps,
+            "batch_size": config.training.batch_size,
+            "save_freq": config.training.save_freq,
+        },
+        "output": {
+            "output_dir": config.output.output_dir,
+            "checkpoint_repo_id": config.output.checkpoint_repo_id,
+            "upload_every_save": config.output.upload_every_save,
+        },
+        "wandb": {
+            "enable": config.wandb.enable,
+        },
+        "verda": {
+            "gpu_model": config.cloud.gpu_model,
+            "gpus_per_instance": config.cloud.gpus_per_instance,
+            "storage_size": config.cloud.storage_size,
+            "location": config.cloud.location,
+            "is_spot": config.cloud.is_spot,
+        },
+    }
+
+
+def _convert_yaml_to_model_format(data: dict) -> dict:
+    """Convert YAML format to Pydantic model format."""
+    metadata = data.get("metadata", {})
+    dataset = data.get("dataset", {})
+    policy = data.get("policy", {})
+    training = data.get("training", {})
+    output = data.get("output", {})
+    wandb = data.get("wandb", {})
+    verda = data.get("verda", {})
+
+    return {
+        "name": metadata.get("name", ""),
+        "dataset": {
+            "id": dataset.get("id", ""),
+            "source": dataset.get("source", "r2"),
+            "hf_repo_id": dataset.get("hf_repo_id"),
+        },
+        "policy": {
+            "type": policy.get("type", "act"),
+            "pretrained_path": policy.get("pretrained_path"),
+            "compile_model": policy.get("compile_model"),
+            "gradient_checkpointing": policy.get("gradient_checkpointing"),
+            "dtype": policy.get("dtype"),
+        },
+        "training": {
+            "steps": training.get("steps"),
+            "batch_size": training.get("batch_size"),
+            "save_freq": training.get("save_freq"),
+        },
+        "output": {
+            "output_dir": output.get("output_dir"),
+            "checkpoint_repo_id": output.get("checkpoint_repo_id"),
+            "upload_every_save": output.get("upload_every_save", False),
+        },
+        "wandb": {
+            "enable": wandb.get("enable", True),
+        },
+        "cloud": {
+            "gpu_model": verda.get("gpu_model", "H100"),
+            "gpus_per_instance": verda.get("gpus_per_instance", 1),
+            "storage_size": verda.get("storage_size"),
+            "location": verda.get("location", "auto"),
+            "is_spot": verda.get("is_spot", True),
+        },
+    }
+
+
+# Import training config models
+from interfaces_backend.models.training_config import (
+    TrainingConfigInfo,
+    TrainingConfigListResponse,
+    TrainingConfigDetailResponse,
+    TrainingConfigCreateRequest,
+    TrainingConfigCreateResponse,
+    TrainingConfigModel,
+    TrainingConfigValidationResult,
+    TrainingConfigDryRunResult,
+)
+
+
+@router.get("/configs", response_model=TrainingConfigListResponse)
+async def list_training_configs():
+    """List all training configuration files."""
+    configs_data = _list_configs()
+    configs = [TrainingConfigInfo(**c) for c in configs_data]
+    return TrainingConfigListResponse(configs=configs, total=len(configs))
+
+
+@router.get("/configs/{config_id}", response_model=TrainingConfigDetailResponse)
+async def get_training_config(config_id: str):
+    """Get training configuration details."""
+    data = _load_config(config_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_id}")
+
+    model_data = _convert_yaml_to_model_format(data)
+    config = TrainingConfigModel(**model_data)
+
+    return TrainingConfigDetailResponse(
+        config_id=config_id,
+        config=config,
+        file_path=str(_get_config_file(config_id)),
+    )
+
+
+@router.post("/configs", response_model=TrainingConfigCreateResponse)
+async def create_training_config(request: TrainingConfigCreateRequest):
+    """Create a new training configuration."""
+    config_id = request.config.name.replace(" ", "_").lower()
+
+    # Check for duplicate
+    if _get_config_file(config_id).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Config '{config_id}' already exists",
+        )
+
+    yaml_data = _convert_model_to_yaml_format(request.config)
+    file_path = _save_config(config_id, yaml_data)
+
+    return TrainingConfigCreateResponse(
+        config_id=config_id,
+        file_path=str(file_path),
+        message="Training config created",
+    )
+
+
+@router.put("/configs/{config_id}", response_model=TrainingConfigCreateResponse)
+async def update_training_config(config_id: str, request: TrainingConfigCreateRequest):
+    """Update an existing training configuration."""
+    if not _get_config_file(config_id).exists():
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_id}")
+
+    yaml_data = _convert_model_to_yaml_format(request.config)
+    file_path = _save_config(config_id, yaml_data)
+
+    return TrainingConfigCreateResponse(
+        config_id=config_id,
+        file_path=str(file_path),
+        message="Training config updated",
+    )
+
+
+@router.delete("/configs/{config_id}")
+async def delete_training_config(config_id: str):
+    """Delete a training configuration."""
+    config_file = _get_config_file(config_id)
+    if not config_file.exists():
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_id}")
+
+    config_file.unlink()
+    return {"config_id": config_id, "message": "Config deleted"}
+
+
+@router.get("/configs/{config_id}/validate", response_model=TrainingConfigValidationResult)
+async def validate_training_config(config_id: str):
+    """Validate a training configuration."""
+    data = _load_config(config_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_id}")
+
+    errors = []
+    warnings = []
+
+    # Check required fields
+    dataset = data.get("dataset", {})
+    if not dataset.get("id"):
+        errors.append("dataset.id is required")
+
+    policy = data.get("policy", {})
+    if not policy.get("type"):
+        errors.append("policy.type is required")
+
+    # Check dataset source
+    source = dataset.get("source", "r2")
+    if source == "hub" and not dataset.get("hf_repo_id"):
+        warnings.append("dataset.hf_repo_id recommended for hub source")
+
+    # Check training params
+    training = data.get("training", {})
+    if not training.get("steps"):
+        warnings.append("training.steps not set (will use default)")
+
+    # Check Verda config
+    verda = data.get("verda", {})
+    if verda.get("is_spot", True):
+        warnings.append("Using spot instance (may be preempted)")
+
+    return TrainingConfigValidationResult(
+        is_valid=len(errors) == 0,
+        errors=errors,
+        warnings=warnings,
+    )
+
+
+@router.post("/configs/{config_id}/dry-run", response_model=TrainingConfigDryRunResult)
+async def dry_run_training_config(config_id: str):
+    """Simulate training launch without actually running."""
+    data = _load_config(config_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_id}")
+
+    verda = data.get("verda", {})
+    dataset = data.get("dataset", {})
+    policy = data.get("policy", {})
+
+    return TrainingConfigDryRunResult(
+        config_id=config_id,
+        would_create_instance={
+            "gpu_model": verda.get("gpu_model", "H100"),
+            "gpus_per_instance": verda.get("gpus_per_instance", 1),
+            "location": verda.get("location", "auto"),
+            "is_spot": verda.get("is_spot", True),
+            "storage_size": verda.get("storage_size"),
+        },
+        estimated_cost_per_hour=None,  # Would need Verda API to get actual price
+        files_to_deploy=[
+            ".env",
+            "train.remote.yaml",
+            "setup_env.sh",
+            "train_lerobot_entry.py",
+        ],
+        remote_command=f"bash ./setup_env.sh train",
+    )

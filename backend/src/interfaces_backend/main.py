@@ -6,7 +6,21 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from interfaces_backend.api import training_router
+from interfaces_backend.api import (
+    analytics_router,
+    calibration_router,
+    config_router,
+    hardware_router,
+    inference_router,
+    platform_router,
+    project_router,
+    recording_router,
+    storage_router,
+    system_router,
+    teleop_router,
+    training_router,
+    user_router,
+)
 
 app = FastAPI(
     title="Physical AI API",
@@ -23,7 +37,19 @@ app.add_middleware(
 )
 
 # Include API routers
+app.include_router(analytics_router)
+app.include_router(calibration_router)
+app.include_router(config_router)
+app.include_router(hardware_router)
+app.include_router(inference_router)
+app.include_router(platform_router)
+app.include_router(project_router)
+app.include_router(recording_router)
+app.include_router(storage_router)
+app.include_router(system_router)
+app.include_router(teleop_router)
 app.include_router(training_router)
+app.include_router(user_router)
 
 
 # --- Health ---
@@ -32,70 +58,6 @@ app.include_router(training_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-# --- Projects API (stub) ---
-
-@app.get("/api/projects")
-async def list_projects():
-    """List all projects."""
-    return []
-
-
-@app.post("/api/projects")
-async def create_project(name: str, robot_type: str = "so101"):
-    """Create a new project."""
-    return {"id": "new-project-id", "name": name, "robot_type": robot_type}
-
-
-@app.get("/api/projects/{project_id}")
-async def get_project(project_id: str):
-    """Get project by ID."""
-    return {"id": project_id, "name": "Example Project", "robot_type": "so101"}
-
-
-# --- Datasets API (stub) ---
-
-@app.get("/api/datasets")
-async def list_datasets():
-    """List all datasets."""
-    return []
-
-
-@app.get("/api/datasets/{dataset_id}")
-async def get_dataset(dataset_id: str):
-    """Get dataset by ID."""
-    return {"id": dataset_id, "name": "Example Dataset", "episodes": 0}
-
-
-# --- Training API (stub) ---
-
-@app.post("/api/training/start")
-async def start_training(project_id: str, policy: str = "act"):
-    """Start a training job."""
-    return {"job_id": "job-001", "status": "queued"}
-
-
-@app.get("/api/training/status/{job_id}")
-async def training_status(job_id: str):
-    """Get training job status."""
-    return {"job_id": job_id, "status": "running", "progress": 0}
-
-
-# --- Hardware API (stub) ---
-
-@app.get("/api/hardware/cameras")
-async def list_cameras():
-    """List connected cameras."""
-    return []
-
-
-# --- Config API ---
-
-@app.get("/api/config")
-async def get_config():
-    """Get current configuration."""
-    return {"data_dir": "data/", "robot_type": "so101"}
 
 
 def main():
