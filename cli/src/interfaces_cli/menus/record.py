@@ -1,9 +1,13 @@
-"""Record menu - Data recording operations."""
+"""Record menu - Simplified data recording operations."""
 
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
 from interfaces_cli.banner import show_section_header
 from interfaces_cli.menu_system import BaseMenu, MenuResult
@@ -18,30 +22,17 @@ class RecordMenu(BaseMenu):
 
     title = "データ録画"
 
-    def _get_device_config(self) -> dict:
-        """Get user device configuration."""
-        try:
-            return self.api.get_user_devices()
-        except Exception:
-            return {}
-
     def get_choices(self) -> List[Choice]:
         return [
-            Choice(value="new", name="🎬 [NEW] 新規録画セッション"),
-            Choice(value="recordings", name="📁 [LIST] 録画一覧"),
-            Choice(value="sessions", name="📋 [SESSIONS] アクティブセッション"),
-            Choice(value="export", name="📤 [EXPORT] データセットへ出力"),
+            Choice(value="record", name="🎬 [RECORD] 録画開始"),
+            Choice(value="list", name="📁 [LIST] 録画一覧"),
         ]
 
     def handle_choice(self, choice: Any) -> MenuResult:
-        if choice == "new":
+        if choice == "record":
             return self._start_recording()
-        if choice == "recordings":
+        if choice == "list":
             return self.submenu(RecordingsListMenu)
-        if choice == "sessions":
-            return self._show_sessions()
-        if choice == "export":
-            return self._export_recording()
         return MenuResult.CONTINUE
 
     def _select_project(self) -> Optional[str]:
@@ -51,11 +42,24 @@ class RecordMenu(BaseMenu):
             projects = result.get("projects", [])
             if not projects:
                 print(f"{Colors.warning('No projects found.')}")
-                print(f"{Colors.muted('Create a project first in SETUP menu.')}")
+                print(f"{Colors.muted('Project YAML files should be in data/projects/')}")
                 input(f"\n{Colors.muted('Press Enter to continue...')}")
                 return None
 
-            choices = [Choice(value=p, name=p) for p in projects]
+            # Get project details for display
+            choices = []
+            for p in projects:
+                try:
+                    project_info = self.api.get_project(p)
+                    display_name = project_info.get("display_name", p)
+                    description = project_info.get("description", "")
+                    label = f"📦 {display_name}"
+                    if description:
+                        label += f" - {description[:40]}"
+                    choices.append(Choice(value=p, name=label))
+                except Exception:
+                    choices.append(Choice(value=p, name=f"📦 {p}"))
+
             choices.append(Choice(value="__back__", name="« Cancel"))
 
             selected = inquirer.select(
@@ -74,348 +78,131 @@ class RecordMenu(BaseMenu):
 
     def _start_recording(self) -> MenuResult:
         """Start a new recording session."""
-        project_id = self._select_project()
-        if not project_id:
+        project_name = self._select_project()
+        if not project_name:
             return MenuResult.CONTINUE
 
-        show_section_header(f"New Recording: {project_id}")
+        show_section_header(f"Recording: {project_name}")
 
         try:
-            # Get device config for defaults
-            devices = self._get_device_config()
-            leader_config = devices.get("leader_right") or {}
-            follower_config = devices.get("follower_right") or {}
-            cameras_config = devices.get("cameras") or {}
+            # Get project info for display
+            try:
+                project_info = self.api.get_project(project_name)
+                print(f"  Project: {project_info.get('display_name', project_name)}")
+                print(f"  Description: {project_info.get('description', 'N/A')}")
+                print(f"  Episode time: {project_info.get('episode_time_s', 60)}s")
+                print(f"  Reset time: {project_info.get('reset_time_s', 10)}s")
+                print()
+            except Exception:
+                pass
 
-            # Get username
-            username = inquirer.text(
-                message="Username:",
-                default="user",
-                style=hacker_style,
-            ).execute()
-
-            # Robot type
-            robot_type = inquirer.select(
-                message="Robot type:",
-                choices=[
-                    Choice(value="so101", name="SO-101"),
-                    Choice(value="so100", name="SO-100"),
-                ],
-                style=hacker_style,
-            ).execute()
-
-            # Get ports (with defaults from config)
-            default_leader = leader_config.get("port") or "/dev/ttyUSB0"
-            default_follower = follower_config.get("port") or "/dev/ttyUSB1"
-
-            leader_port = inquirer.text(
-                message="Leader arm port:",
-                default=default_leader,
-                style=hacker_style,
-            ).execute()
-
-            follower_port = inquirer.text(
-                message="Follower arm port:",
-                default=default_follower,
-                style=hacker_style,
-            ).execute()
-
-            # Arm IDs (auto-generate from device type)
-            leader_id = inquirer.text(
-                message="Leader ID:",
-                default="leader_right",
-                style=hacker_style,
-            ).execute()
-
-            follower_id = inquirer.text(
-                message="Follower ID:",
-                default="follower_right",
-                style=hacker_style,
-            ).execute()
-
-            # Recording parameters
-            fps = inquirer.text(
-                message="FPS:",
-                default="30",
-                style=hacker_style,
-            ).execute()
-
+            # Get episode count
             num_episodes = inquirer.text(
                 message="Number of episodes:",
                 default="1",
+                validate=lambda x: x.isdigit() and int(x) > 0,
                 style=hacker_style,
             ).execute()
 
-            episode_time_s = inquirer.text(
-                message="Episode time (seconds):",
-                default="60",
-                style=hacker_style,
-            ).execute()
+            if num_episodes is None:
+                return MenuResult.CONTINUE
 
-            reset_time_s = inquirer.text(
-                message="Reset time between episodes (seconds):",
-                default="5",
-                style=hacker_style,
-            ).execute()
-
-            # Task description
-            task_description = inquirer.text(
-                message="Task description (optional):",
-                default="",
-                style=hacker_style,
-            ).execute()
-
-            # Camera configuration
-            print(f"\n{Colors.CYAN}Camera Configuration:{Colors.RESET}")
-
-            cameras = []
-
-            # If cameras are configured, offer to use them
-            if cameras_config:
-                use_configured = inquirer.confirm(
-                    message=f"Use configured cameras ({len(cameras_config)} available)?",
-                    default=True,
-                    style=hacker_style,
-                ).execute()
-
-                if use_configured:
-                    # Let user select which configured cameras to use
-                    camera_choices = [
-                        Choice(value=name, name=f"{name} ({cam.get('id')}) - {cam.get('friendly_name', '')}")
-                        for name, cam in cameras_config.items()
-                    ]
-                    selected_cameras = inquirer.checkbox(
-                        message="Select cameras to use:",
-                        choices=camera_choices,
-                        style=hacker_style,
-                    ).execute()
-
-                    for cam_name in selected_cameras:
-                        cam = cameras_config.get(cam_name, {})
-                        cam_id = cam.get("id", "0")
-                        cam_type = cam.get("type", "OpenCV").lower()
-                        if cam_type == "opencv":
-                            cam_type = "opencv"
-                        cameras.append({
-                            "camera_id": cam_name,
-                            "camera_type": cam_type,
-                            "index_or_path": int(cam_id) if cam_id.isdigit() else cam_id,
-                            "width": cam.get("width", 640),
-                            "height": cam.get("height", 480),
-                            "fps": cam.get("fps", 30),
-                            "warmup_s": 2.0,
-                        })
-
-            # Allow adding custom cameras
-            add_custom = inquirer.confirm(
-                message="Add custom camera?" if cameras else "Add camera?",
-                default=not cameras,
-                style=hacker_style,
-            ).execute()
-
-            while add_custom:
-                camera_id = inquirer.text(
-                    message="Camera ID (e.g., 'top', 'wrist'):",
-                    default="top",
-                    style=hacker_style,
-                ).execute()
-
-                camera_type = inquirer.select(
-                    message="Camera type:",
-                    choices=[
-                        Choice(value="opencv", name="OpenCV (webcam)"),
-                        Choice(value="intelrealsense", name="Intel RealSense"),
-                    ],
-                    style=hacker_style,
-                ).execute()
-
-                index_or_path = inquirer.text(
-                    message="Camera index or path:",
-                    default="0",
-                    style=hacker_style,
-                ).execute()
-
-                cam_width = inquirer.text(
-                    message="Width:",
-                    default="640",
-                    style=hacker_style,
-                ).execute()
-
-                cam_height = inquirer.text(
-                    message="Height:",
-                    default="480",
-                    style=hacker_style,
-                ).execute()
-
-                cam_fps = inquirer.text(
-                    message="Camera FPS:",
-                    default="30",
-                    style=hacker_style,
-                ).execute()
-
-                cameras.append({
-                    "camera_id": camera_id,
-                    "camera_type": camera_type,
-                    "index_or_path": int(index_or_path) if index_or_path.isdigit() else index_or_path,
-                    "width": int(cam_width),
-                    "height": int(cam_height),
-                    "fps": int(cam_fps),
-                    "warmup_s": 2.0,
-                })
-
-                add_custom = inquirer.confirm(
-                    message="Add another camera?",
-                    default=False,
-                    style=hacker_style,
-                ).execute()
-
-            # Build request
-            request_data = {
-                "username": username,
-                "project_id": project_id,
-                "robot_type": robot_type,
-                "leader_port": leader_port,
-                "follower_port": follower_port,
-                "leader_id": leader_id,
-                "follower_id": follower_id,
-                "fps": int(fps),
-                "num_episodes": int(num_episodes),
-                "episode_time_s": float(episode_time_s),
-                "reset_time_s": float(reset_time_s),
-                "cameras": cameras,
-            }
-            if task_description:
-                request_data["task_description"] = task_description
-
-            # Start recording session
-            print(f"\n{Colors.muted('Creating recording session...')}")
-            result = self.api.start_recording(request_data)
-
-            session = result.get("session", {})
-            session_id = session.get("session_id", "unknown")
-            output_path = session.get("output_path", "")
-
-            print(f"\n{Colors.success('Recording session created')}")
-            print(f"  Session: {session_id}")
-            print(f"  Project: {project_id}")
+            # Confirm
+            print(f"\n{Colors.CYAN}Recording Configuration:{Colors.RESET}")
+            print(f"  Project: {project_name}")
             print(f"  Episodes: {num_episodes}")
-            print(f"  Output: {output_path}")
-            print(f"  Message: {result.get('message', '')}")
+            print()
 
-            # Ask to run
-            run = inquirer.confirm(
-                message="Start recording now?",
+            confirm = inquirer.confirm(
+                message="Start recording?",
                 default=True,
                 style=hacker_style,
             ).execute()
 
-            if run:
-                self.api.run_recording(session_id)
-                print(f"\n{Colors.success('Recording running!')}")
-                print(f"{Colors.muted('Press Enter to stop recording...')}")
+            if not confirm:
+                return MenuResult.CONTINUE
 
-                try:
-                    input()
-                except KeyboardInterrupt:
-                    pass
+            # Start recording with WebSocket for real-time output
+            print(f"\n{Colors.muted('Starting lerobot-record...')}")
+            print(f"{Colors.muted('Press Ctrl+C to stop recording.')}\n")
 
-                stop_result = self.api.stop_recording(session_id)
-                print(f"\n{Colors.success('Recording stopped.')}")
-                print(f"  Total frames: {stop_result.get('total_frames', 0)}")
-                print(f"  Duration: {stop_result.get('duration_seconds', 0):.1f}s")
-                print(f"  Size: {stop_result.get('size_mb', 0):.1f} MB")
-                print(f"  Output: {stop_result.get('output_path', '')}")
+            console = Console()
+            output_lines: List[str] = []
+            max_display_lines = 20
+            status_info = {
+                "project": project_name,
+                "output_path": "",
+                "started": False,
+                "num_episodes": num_episodes,
+            }
 
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
+            def make_output_panel():
+                """Create output display panel."""
+                text = Text()
 
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
+                if status_info["started"]:
+                    text.append(f"Project: {status_info['project']}  ", style="cyan")
+                    text.append(f"Episodes: {status_info['num_episodes']}\n", style="cyan")
+                    text.append(f"Output: {status_info['output_path']}\n\n", style="dim")
 
-    def _show_sessions(self) -> MenuResult:
-        """Show recording sessions."""
-        show_section_header("Recording Sessions")
+                # Show last N lines
+                display_lines = output_lines[-max_display_lines:]
+                for line in display_lines:
+                    if line.startswith("[stderr]"):
+                        text.append(line + "\n", style="yellow")
+                    elif "error" in line.lower() or "Error" in line:
+                        text.append(line + "\n", style="red")
+                    elif "INFO" in line:
+                        text.append(line + "\n", style="dim")
+                    else:
+                        text.append(line + "\n")
 
-        try:
-            result = self.api.list_recording_sessions()
-            sessions = result.get("sessions", [])
-            total = result.get("total", len(sessions))
+                return Panel(text, title="🎬 録画中", border_style="cyan")
 
-            if sessions:
-                print(f"{Colors.CYAN}Active Sessions ({total}):{Colors.RESET}\n")
-                for s in sessions:
-                    session_id = s.get("session_id", "unknown")
-                    project_id = s.get("project_id", "?")
-                    episode_name = s.get("episode_name", "")
-                    status = s.get("status", "unknown")
-                    is_recording = s.get("is_recording", False)
-                    frames = s.get("frames_recorded", 0)
-                    duration = s.get("duration_seconds", 0)
-                    current_ep = s.get("current_episode", 0)
-                    num_eps = s.get("num_episodes", 1)
+            def on_progress(msg):
+                """Handle progress messages from WebSocket."""
+                msg_type = msg.get("type")
+                if msg_type == "start":
+                    status_info["started"] = True
+                    status_info["output_path"] = msg.get("output_path", "N/A")
+                    output_lines.append(f"[開始] Recording started")
+                elif msg_type == "output":
+                    line = msg.get("line", "")
+                    if line:
+                        output_lines.append(line)
+                elif msg_type == "error_output":
+                    line = msg.get("line", "")
+                    if line:
+                        output_lines.append(f"[stderr] {line}")
+                elif msg_type == "error":
+                    output_lines.append(f"[ERROR] {msg.get('error', 'Unknown')}")
 
-                    icon = Colors.success("*") if is_recording else Colors.muted("*")
-                    status_str = Colors.success("recording") if is_recording else status
+            try:
+                with Live(make_output_panel(), console=console, refresh_per_second=4) as live:
+                    def update_display(msg):
+                        on_progress(msg)
+                        live.update(make_output_panel())
 
-                    print(f"  {icon} {session_id}")
-                    print(f"      Project: {project_id}/{episode_name}")
-                    print(f"      Status: {status_str}")
-                    print(f"      Progress: Episode {current_ep}/{num_eps}")
-                    print(f"      Frames: {frames}, Duration: {duration:.1f}s")
-                    if s.get("error_message"):
-                        print(f"      Error: {Colors.error(s.get('error_message'))}")
-                    print()
+                    result = self.api.record_ws(
+                        project_name,
+                        int(num_episodes),
+                        progress_callback=update_display
+                    )
+            except Exception as e:
+                result = {"type": "error", "error": str(e)}
+
+            if result.get("type") == "complete" and result.get("success"):
+                print(f"\n{Colors.success('Recording completed!')}")
+            elif result.get("type") == "stopped":
+                print(f"\n{Colors.warning('Recording stopped')}")
             else:
-                print(f"{Colors.muted('No recording sessions.')}")
+                print(f"\n{Colors.warning('Recording ended')}")
 
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
+            print(f"  Message: {result.get('message', 'N/A')}")
+            print(f"  Output: {result.get('output_path', 'N/A')}")
 
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
-
-    def _export_recording(self) -> MenuResult:
-        """Export a recording to dataset format."""
-        show_section_header("Export Recording")
-
-        try:
-            result = self.api.list_recordings()
-            recordings = result.get("recordings", [])
-
-            if not recordings:
-                print(f"{Colors.muted('No recordings to export.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            choices = []
-            for r in recordings[:20]:
-                rec_id = r.get("recording_id", "unknown")
-                project_id = r.get("project_id", "?")
-                episode = r.get("episode_name", "?")
-                frames = r.get("frames", 0)
-                size_mb = r.get("size_mb", 0)
-                choices.append(Choice(
-                    value=rec_id,
-                    name=f"{project_id}/{episode} ({frames} frames, {size_mb:.1f} MB)"
-                ))
-            choices.append(Choice(value="__back__", name="« Cancel"))
-
-            selected = inquirer.select(
-                message="Select recording:",
-                choices=choices,
-                style=hacker_style,
-            ).execute()
-
-            if selected == "__back__":
-                return MenuResult.CONTINUE
-
-            # Export
-            result = self.api.export_recording(selected)
-            print(f"{Colors.success('Recording exported')}")
-            print(f"  Path: {result.get('export_path', 'N/A')}")
-            print(f"  Size: {result.get('size_mb', 0):.1f} MB")
-            print(f"  Message: {result.get('message', '')}")
-
+        except KeyboardInterrupt:
+            print(f"\n{Colors.warning('Recording interrupted.')}")
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")
 
@@ -433,7 +220,7 @@ class RecordingsListMenu(BaseMenu):
         try:
             result = self.api.list_recordings()
             recordings = result.get("recordings", [])
-            for r in recordings[:20]:
+            for r in recordings[:30]:
                 rec_id = r.get("recording_id", "unknown")
                 project_id = r.get("project_id", "?")
                 episode = r.get("episode_name", "?")
@@ -467,12 +254,10 @@ class RecordingsListMenu(BaseMenu):
             print(f"  Project: {recording.get('project_id', 'N/A')}")
             print(f"  Episode: {recording.get('episode_name', 'N/A')}")
             print(f"  Frames: {recording.get('frames', 0)}")
-            print(f"  Duration: {recording.get('duration_seconds', 0):.1f}s")
             print(f"  Size: {recording.get('size_mb', 0):.1f} MB")
             print(f"  Cameras: {', '.join(recording.get('cameras', []))}")
             print(f"  Path: {recording.get('path', 'N/A')}")
             print(f"  Created: {recording.get('created_at', 'N/A')}")
-            print(f"  Valid: {'Yes' if recording.get('is_valid') else 'No'}")
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")
             input(f"\n{Colors.muted('Press Enter to continue...')}")
@@ -483,7 +268,6 @@ class RecordingsListMenu(BaseMenu):
             message="Action:",
             choices=[
                 Choice(value="validate", name="Validate recording"),
-                Choice(value="export", name="Export to dataset"),
                 Choice(value="delete", name="Delete recording"),
                 Choice(value="back", name="« Back"),
             ],
@@ -512,21 +296,6 @@ class RecordingsListMenu(BaseMenu):
                     for warn in warnings:
                         print(f"  {Colors.warning('!')} {warn}")
 
-                stats = result.get("stats", {})
-                if stats:
-                    print(f"\n{Colors.CYAN}Statistics:{Colors.RESET}")
-                    for key, val in stats.items():
-                        print(f"  {key}: {val}")
-
-            except Exception as e:
-                print(f"{Colors.error('Error:')} {e}")
-
-        elif action == "export":
-            try:
-                result = self.api.export_recording(recording_id)
-                print(f"\n{Colors.success('Recording exported')}")
-                print(f"  Path: {result.get('export_path', 'N/A')}")
-                print(f"  Size: {result.get('size_mb', 0):.1f} MB")
             except Exception as e:
                 print(f"{Colors.error('Error:')} {e}")
 

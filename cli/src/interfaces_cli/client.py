@@ -317,6 +317,90 @@ class PhiClient:
     # Recording
     # =========================================================================
 
+    def record(self, project_name: str, num_episodes: int = 1, username: str = None) -> Dict[str, Any]:
+        """POST /api/recording/record - Start recording directly.
+
+        Args:
+            project_name: Name of the project (must exist in data/projects/)
+            num_episodes: Number of episodes to record
+            username: Optional username override
+        """
+        data = {
+            "project_name": project_name,
+            "num_episodes": num_episodes,
+        }
+        if username:
+            data["username"] = username
+        response = self._client.post("/api/recording/record", json=data, timeout=3600)
+        response.raise_for_status()
+        return response.json()
+
+    def record_ws(
+        self,
+        project_name: str,
+        num_episodes: int = 1,
+        username: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Start recording via WebSocket with real-time output streaming.
+
+        Args:
+            project_name: Name of the project
+            num_episodes: Number of episodes to record
+            username: Optional username override
+            progress_callback: Callback for progress updates. Receives dict with:
+                - type: "start", "output", "error_output", "complete", "error"
+                - Additional fields depending on type
+
+        Returns:
+            Final result with type='complete' or type='error'
+        """
+        import websocket
+
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/recording/ws/record"
+
+        result: Dict[str, Any] = {"type": "error", "error": "Unknown error"}
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=None)
+
+            # Send recording request
+            request_data = {
+                "project_name": project_name,
+                "num_episodes": num_episodes,
+            }
+            if username:
+                request_data["username"] = username
+            ws.send(json.dumps(request_data))
+
+            # Receive messages until done
+            while True:
+                message = ws.recv()
+                msg_data = json.loads(message)
+
+                if progress_callback:
+                    progress_callback(msg_data)
+
+                if msg_data.get("type") in ("complete", "error", "stopped"):
+                    result = msg_data
+                    break
+
+            ws.close()
+        except ImportError:
+            if progress_callback:
+                progress_callback({
+                    "type": "error",
+                    "error": "websocket-client not installed"
+                })
+            result = {"type": "error", "error": "websocket-client not installed"}
+        except Exception as e:
+            if progress_callback:
+                progress_callback({"type": "error", "error": str(e)})
+            result = {"type": "error", "error": str(e)}
+
+        return result
+
     def list_recordings(self) -> Dict[str, Any]:
         """GET /api/recording/recordings - List recordings."""
         response = self._client.get("/api/recording/recordings")
@@ -329,45 +413,9 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
-    def list_recording_sessions(self) -> Dict[str, Any]:
-        """GET /api/recording/sessions - List recording sessions."""
-        response = self._client.get("/api/recording/sessions")
-        response.raise_for_status()
-        return response.json()
-
-    def get_recording_status(self, session_id: str) -> Dict[str, Any]:
-        """GET /api/recording/status/{session_id} - Get recording status."""
-        response = self._client.get(f"/api/recording/status/{session_id}")
-        response.raise_for_status()
-        return response.json()
-
-    def start_recording(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """POST /api/recording/start - Start recording session."""
-        response = self._client.post("/api/recording/start", json=data)
-        response.raise_for_status()
-        return response.json()
-
-    def stop_recording(self, session_id: str) -> Dict[str, Any]:
-        """POST /api/recording/stop - Stop recording session."""
-        response = self._client.post("/api/recording/stop", json={"session_id": session_id})
-        response.raise_for_status()
-        return response.json()
-
-    def run_recording(self, session_id: str) -> Dict[str, Any]:
-        """POST /api/recording/{session_id}/run - Run recording."""
-        response = self._client.post(f"/api/recording/{session_id}/run")
-        response.raise_for_status()
-        return response.json()
-
     def delete_recording(self, recording_id: str) -> Dict[str, Any]:
         """DELETE /api/recording/recordings/{recording_id} - Delete recording."""
         response = self._client.delete(f"/api/recording/recordings/{recording_id}")
-        response.raise_for_status()
-        return response.json()
-
-    def export_recording(self, recording_id: str) -> Dict[str, Any]:
-        """POST /api/recording/recordings/{recording_id}/export - Export."""
-        response = self._client.post(f"/api/recording/recordings/{recording_id}/export")
         response.raise_for_status()
         return response.json()
 

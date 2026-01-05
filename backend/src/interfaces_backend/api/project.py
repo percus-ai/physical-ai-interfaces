@@ -15,14 +15,14 @@ from interfaces_backend.models.project import (
     ProjectStatsModel,
     ProjectValidateResponse,
 )
+from interfaces_backend.utils.paths import (
+    get_projects_dir,
+    get_datasets_dir,
+    get_models_dir,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
-
-# Project directories
-PROJECTS_DIR = Path.cwd() / "projects"
-DATASETS_DIR = Path.cwd() / "datasets"
-MODELS_DIR = Path.cwd() / "models"
 
 
 def _get_project_manager():
@@ -66,18 +66,43 @@ def _get_config_loader():
 # --- Project Endpoints ---
 
 
+@router.get("/debug-paths")
+async def debug_paths():
+    """Debug endpoint to check path resolution."""
+    import os
+    projects_dir = get_projects_dir()
+    manager = _get_project_manager()
+    manager_info = None
+    if manager:
+        try:
+            manager_info = {
+                "type": str(type(manager)),
+                "projects_dir": str(getattr(manager, 'projects_dir', 'N/A')),
+                "list_projects": manager.list_projects() if hasattr(manager, 'list_projects') else "N/A",
+            }
+        except Exception as e:
+            manager_info = {"error": str(e)}
+    return {
+        "cwd": str(Path.cwd()),
+        "PHYSICAL_AI_DATA_DIR": os.environ.get("PHYSICAL_AI_DATA_DIR", "NOT SET"),
+        "projects_dir": str(projects_dir),
+        "projects_dir_exists": projects_dir.exists(),
+        "yaml_files": [str(f) for f in projects_dir.glob("*.yaml")] if projects_dir.exists() else [],
+        "manager": manager_info,
+        "manager_is_none": manager is None,
+    }
+
+
 @router.get("", response_model=ProjectListResponse)
 async def list_projects():
     """List all available projects."""
-    manager = _get_project_manager()
-    if manager:
-        projects = manager.list_projects()
+    # Always use direct YAML file listing for reliability
+    # ProjectManager from percus_ai may have different path configuration
+    projects_dir = get_projects_dir()
+    if projects_dir.exists():
+        projects = sorted([f.stem for f in projects_dir.glob("*.yaml")])
     else:
-        # Fallback: list YAML files in projects directory
-        if PROJECTS_DIR.exists():
-            projects = sorted([f.stem for f in PROJECTS_DIR.glob("*.yaml")])
-        else:
-            projects = []
+        projects = []
 
     return ProjectListResponse(projects=projects, total=len(projects))
 
@@ -85,31 +110,42 @@ async def list_projects():
 @router.get("/{project_name}", response_model=ProjectModel)
 async def get_project(project_name: str):
     """Get project details."""
-    manager = _get_project_manager()
-    if not manager:
-        raise HTTPException(
-            status_code=503,
-            detail="ProjectManager not available"
-        )
+    import yaml
 
-    try:
-        project = manager.get_project(project_name)
-        return ProjectModel(
-            name=project.name,
-            display_name=project.display_name,
-            description=project.description,
-            version=project.version,
-            created_at=project.created_at,
-            robot_type=project.robot_type,
-            episode_time_s=project.episode_time_s,
-            reset_time_s=project.reset_time_s,
-            cameras=project.cameras,
-            arms=project.arms,
-        )
-    except FileNotFoundError:
+    # Load directly from YAML file for reliability
+    projects_dir = get_projects_dir()
+    yaml_path = projects_dir / f"{project_name}.yaml"
+
+    if not yaml_path.exists():
         raise HTTPException(
             status_code=404,
             detail=f"Project not found: {project_name}"
+        )
+
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        project_info = config.get("project", {})
+        recording_info = config.get("recording", {})
+
+        return ProjectModel(
+            name=project_info.get("name", project_name),
+            display_name=project_info.get("display_name", project_name),
+            description=project_info.get("description", ""),
+            version=project_info.get("version", "1.0"),
+            created_at=project_info.get("created_at", ""),
+            robot_type=project_info.get("robot_type", "so101"),
+            episode_time_s=recording_info.get("episode_time_s", 60),
+            reset_time_s=recording_info.get("reset_time_s", 10),
+            cameras=config.get("cameras", {}),
+            arms=config.get("arms", {}),
+        )
+    except Exception as e:
+        logger.error(f"Failed to load project {project_name}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load project: {str(e)}"
         )
 
 
@@ -256,15 +292,17 @@ async def delete_project(project_name: str, delete_data: bool = False):
         project_name: Project to delete
         delete_data: If True, also delete associated datasets and models
     """
-    project_yaml = PROJECTS_DIR / f"{project_name}.yaml"
+    import shutil
+
+    # Use dynamic path resolution
+    projects_dir = get_projects_dir()
+    project_yaml = projects_dir / f"{project_name}.yaml"
 
     if not project_yaml.exists():
         raise HTTPException(
             status_code=404,
             detail=f"Project not found: {project_name}"
         )
-
-    import shutil
 
     # Delete project YAML
     project_yaml.unlink()
@@ -273,15 +311,17 @@ async def delete_project(project_name: str, delete_data: bool = False):
 
     if delete_data:
         # Delete dataset directory
-        dataset_dir = DATASETS_DIR / project_name
+        datasets_dir = get_datasets_dir()
+        dataset_dir = datasets_dir / project_name
         if dataset_dir.exists():
             shutil.rmtree(dataset_dir)
             deleted_items.append("datasets")
 
         # Delete models directory
-        models_dir = MODELS_DIR / project_name
-        if models_dir.exists():
-            shutil.rmtree(models_dir)
+        models_dir = get_models_dir()
+        model_dir = models_dir / project_name
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
             deleted_items.append("models")
 
     return {
