@@ -124,3 +124,29 @@ class TrainingConfigDryRunResult(BaseModel):
     estimated_cost_per_hour: Optional[float] = None
     files_to_deploy: List[str]
     remote_command: str
+
+
+# --- R2 Sync Response Models ---
+
+
+class ConfigSyncStatusResponse(BaseModel):
+    """Response for config sync status check."""
+
+    config_name: str = Field(..., description="Config name")
+    status: str = Field(..., description="Sync status: synced, local_only, remote_only, modified, conflict")
+    local_hash: Optional[str] = Field(None, description="Local file hash")
+    remote_hash: Optional[str] = Field(None, description="Remote file hash")
+
+
+class ConfigSyncResponse(BaseModel):
+    """Response for config sync operations (upload/download)."""
+
+    success: bool = Field(..., description="Operation success")
+    message: str = Field(..., description="Result message")
+    config_name: str = Field(..., description="Config name")
+
+
+class RemoteConfigListResponse(BaseModel):
+    """Response for remote config listing."""
+
+    configs: List[str] = Field(default_factory=list, description="List of remote config names")

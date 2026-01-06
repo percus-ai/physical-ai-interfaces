@@ -1252,7 +1252,12 @@ from interfaces_backend.models.training_config import (
     TrainingConfigModel,
     TrainingConfigValidationResult,
     TrainingConfigDryRunResult,
+    # R2 sync models
+    ConfigSyncStatusResponse,
+    ConfigSyncResponse,
+    RemoteConfigListResponse,
 )
+from percus_ai.storage import ManifestManager, R2SyncService
 
 
 @router.get("/configs", response_model=TrainingConfigListResponse)
@@ -1399,3 +1404,127 @@ async def dry_run_training_config(config_id: str):
         ],
         remote_command=f"bash ./setup_env.sh train",
     )
+
+
+# --- R2 Sync for Training Configs ---
+
+_config_manifest_manager: Optional[ManifestManager] = None
+_config_sync_service: Optional[R2SyncService] = None
+
+
+def _get_config_manifest() -> ManifestManager:
+    """Get manifest manager singleton."""
+    global _config_manifest_manager
+    if _config_manifest_manager is None:
+        _config_manifest_manager = ManifestManager()
+    return _config_manifest_manager
+
+
+def _get_config_sync_service() -> R2SyncService:
+    """Get R2 sync service singleton."""
+    global _config_sync_service
+    if _config_sync_service is None:
+        bucket = os.environ.get("R2_BUCKET", "percus-data")
+        version = os.environ.get("R2_VERSION", "v2")
+        _config_sync_service = R2SyncService(_get_config_manifest(), bucket, version=version)
+    return _config_sync_service
+
+
+@router.get("/configs/{config_name}/sync", response_model=ConfigSyncStatusResponse)
+async def get_config_sync_status(config_name: str):
+    """Check sync status of a training config with R2."""
+    try:
+        sync_service = _get_config_sync_service()
+        status = sync_service.check_config_sync(config_name)
+
+        return ConfigSyncStatusResponse(
+            config_name=config_name,
+            status=status.status,
+            local_hash=status.local_hash,
+            remote_hash=status.remote_hash,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check sync status: {e}")
+
+
+@router.post("/configs/{config_name}/upload", response_model=ConfigSyncResponse)
+async def upload_config_to_r2(config_name: str, force: bool = Query(False)):
+    """Upload a training config to R2.
+
+    Args:
+        config_name: Config name (filename without .yaml)
+        force: Force upload even if remote is newer
+    """
+    # Check if local config exists
+    config_file = _get_config_file(config_name)
+    if not config_file.exists():
+        raise HTTPException(status_code=404, detail=f"Config not found: {config_name}")
+
+    try:
+        sync_service = _get_config_sync_service()
+        success, message = sync_service.upload_config(config_name, force=force)
+
+        return ConfigSyncResponse(
+            success=success,
+            message=message,
+            config_name=config_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload config: {e}")
+
+
+@router.post("/configs/{config_name}/download", response_model=ConfigSyncResponse)
+async def download_config_from_r2(config_name: str, force: bool = Query(False)):
+    """Download a training config from R2.
+
+    Args:
+        config_name: Config name (filename without .yaml)
+        force: Force download even if local is newer
+    """
+    try:
+        sync_service = _get_config_sync_service()
+        success, message = sync_service.download_config(config_name, force=force)
+
+        return ConfigSyncResponse(
+            success=success,
+            message=message,
+            config_name=config_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download config: {e}")
+
+
+@router.get("/configs/remote", response_model=RemoteConfigListResponse)
+async def list_remote_configs():
+    """List all training configs available in R2."""
+    try:
+        sync_service = _get_config_sync_service()
+        remote_configs = sync_service.list_remote_configs()
+
+        # Extract config names from the response
+        config_names = [c.get("name", "") for c in remote_configs if c.get("name")]
+
+        return RemoteConfigListResponse(configs=config_names)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list remote configs: {e}")
+
+
+@router.post("/configs/sync-from-r2")
+async def sync_all_configs_from_r2():
+    """Sync all training configs from R2.
+
+    Downloads any configs that exist in R2 but not locally,
+    and updates local manifest with remote metadata.
+    """
+    try:
+        sync_service = _get_config_sync_service()
+        downloaded, updated = sync_service.sync_configs_from_r2()
+
+        return {
+            "success": True,
+            "downloaded": downloaded,
+            "updated": updated,
+            "message": f"Synced {downloaded} new configs, updated {updated} existing",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to sync configs: {e}")

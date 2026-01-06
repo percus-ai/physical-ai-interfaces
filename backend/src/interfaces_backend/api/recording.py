@@ -5,6 +5,7 @@ Simplified version that directly executes lerobot-record using project configura
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -17,7 +18,38 @@ import yaml
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from percus_ai.storage import get_datasets_dir, get_projects_dir, get_user_devices_path, get_user_config_path
+from percus_ai.storage import (
+    get_datasets_dir,
+    get_projects_dir,
+    get_user_devices_path,
+    get_user_config_path,
+    ManifestManager,
+    R2SyncService,
+)
+
+logger = logging.getLogger(__name__)
+
+# Global instances for R2 sync
+_manifest_manager: Optional[ManifestManager] = None
+_sync_service: Optional[R2SyncService] = None
+
+
+def _get_manifest() -> ManifestManager:
+    """Get or create manifest manager."""
+    global _manifest_manager
+    if _manifest_manager is None:
+        _manifest_manager = ManifestManager()
+    return _manifest_manager
+
+
+def _get_sync_service() -> R2SyncService:
+    """Get or create R2 sync service."""
+    global _sync_service
+    if _sync_service is None:
+        bucket = os.getenv("R2_BUCKET", "percus-data")
+        version = os.getenv("R2_VERSION", "v2")
+        _sync_service = R2SyncService(_get_manifest(), bucket, version=version)
+    return _sync_service
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
 
@@ -96,13 +128,27 @@ def _load_user_config() -> dict:
     path = get_user_config_path()
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            raw = yaml.safe_load(f) or {}
+
+        # Handle both flat and structured config formats
+        user = raw.get("user", {})
+        sync = raw.get("sync", {})
+        recording = raw.get("recording", {})
+        environment = raw.get("environment", {})
+
+        return {
+            "username": user.get("username", raw.get("username", "user")),
+            "default_fps": recording.get("default_fps", raw.get("default_fps", 30)),
+            "environment_name": environment.get("environment_name", raw.get("environment_name", "lerobot")),
+            "auto_upload_after_recording": sync.get("auto_upload_after_recording", raw.get("auto_upload_after_recording", True)),
+        }
 
     # Return defaults
     return {
         "username": "user",
         "default_fps": 30,
         "environment_name": "lerobot",
+        "auto_upload_after_recording": True,
     }
 
 
@@ -414,6 +460,19 @@ async def record(request: RecordRequest):
         success = result.returncode == 0
         message = "Recording completed" if success else f"Recording failed (exit code: {result.returncode})"
 
+        # Auto-upload to R2 if enabled and recording succeeded
+        if success and user_config.get("auto_upload_after_recording", True):
+            try:
+                sync_service = _get_sync_service()
+                # Dataset ID is the relative path from datasets dir
+                dataset_id = f"{project_id}/{session_name}"
+                sync_service.upload_dataset(dataset_id)
+                message = "Recording completed and uploaded to R2"
+                logger.info(f"Auto-uploaded dataset {dataset_id} to R2")
+            except Exception as e:
+                logger.error(f"Auto-upload failed for {project_id}/{session_name}: {e}")
+                message = f"Recording completed but upload failed: {e}"
+
         return RecordResponse(
             success=success,
             message=message,
@@ -682,13 +741,36 @@ async def websocket_record(websocket: WebSocket):
 
         _active_recording_process = None
 
+        success = return_code == 0
+        message = "Recording completed" if success else f"Recording failed (exit code: {return_code})"
+
+        # Auto-upload to R2 if enabled and recording succeeded
+        upload_status = None
+        if success and user_config.get("auto_upload_after_recording", True):
+            try:
+                await websocket.send_json({
+                    "type": "uploading",
+                    "message": "Uploading to R2...",
+                })
+                sync_service = _get_sync_service()
+                dataset_id = f"{project_id}/{session_name}"
+                sync_service.upload_dataset(dataset_id)
+                message = "Recording completed and uploaded to R2"
+                upload_status = "success"
+                logger.info(f"Auto-uploaded dataset {dataset_id} to R2")
+            except Exception as e:
+                logger.error(f"Auto-upload failed for {project_id}/{session_name}: {e}")
+                message = f"Recording completed but upload failed: {e}"
+                upload_status = "failed"
+
         # Send completion notification
         await websocket.send_json({
             "type": "complete",
-            "success": return_code == 0,
+            "success": success,
             "return_code": return_code,
             "output_path": str(output_path),
-            "message": "Recording completed" if return_code == 0 else f"Recording failed (exit code: {return_code})",
+            "message": message,
+            "upload_status": upload_status,
         })
 
     except WebSocketDisconnect:

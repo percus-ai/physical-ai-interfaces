@@ -1,6 +1,7 @@
 """Inference API router."""
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -22,7 +23,47 @@ from percus_ai.storage import (
     get_data_dir,
     get_models_dir,
     get_project_root,
+    get_user_config_path,
+    ManifestManager,
+    R2SyncService,
 )
+
+logger = logging.getLogger(__name__)
+
+# Global instances for R2 sync
+_manifest_manager: Optional[ManifestManager] = None
+_sync_service: Optional[R2SyncService] = None
+
+
+def _get_manifest() -> ManifestManager:
+    """Get or create manifest manager."""
+    global _manifest_manager
+    if _manifest_manager is None:
+        _manifest_manager = ManifestManager()
+    return _manifest_manager
+
+
+def _get_sync_service() -> R2SyncService:
+    """Get or create R2 sync service."""
+    global _sync_service
+    if _sync_service is None:
+        bucket = os.getenv("R2_BUCKET", "percus-data")
+        version = os.getenv("R2_VERSION", "v2")
+        _sync_service = R2SyncService(_get_manifest(), bucket, version=version)
+    return _sync_service
+
+
+def _load_user_config() -> dict:
+    """Load user configuration for auto_download_models setting."""
+    path = get_user_config_path()
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        sync = raw.get("sync", {})
+        return {
+            "auto_download_models": sync.get("auto_download_models", raw.get("auto_download_models", True)),
+        }
+    return {"auto_download_models": True}
 
 router = APIRouter(prefix="/api/inference", tags=["inference"])
 
@@ -241,8 +282,12 @@ async def get_device_compatibility():
     )
 
 
-def _find_model_path(model_id: str) -> Optional[Path]:
-    """Find model path in storage directories."""
+def _find_model_path(model_id: str, auto_download: bool = True) -> Optional[Path]:
+    """Find model path in storage directories.
+
+    If model is not found locally and auto_download is enabled,
+    attempts to download from R2.
+    """
     # Check R2 models
     r2_path = MODELS_DIR / "r2" / model_id
     if r2_path.exists():
@@ -257,6 +302,25 @@ def _find_model_path(model_id: str) -> Optional[Path]:
     direct_path = MODELS_DIR / model_id
     if direct_path.exists():
         return direct_path
+
+    # Model not found locally - try R2 fallback download if enabled
+    if auto_download:
+        user_config = _load_user_config()
+        if user_config.get("auto_download_models", True):
+            try:
+                logger.info(f"Model {model_id} not found locally, checking R2...")
+                sync_service = _get_sync_service()
+                remote_models = sync_service.list_remote_models()
+
+                if model_id in remote_models:
+                    logger.info(f"Downloading model {model_id} from R2...")
+                    sync_service.download_model(model_id)
+                    # After download, model should be in r2 directory
+                    if r2_path.exists():
+                        logger.info(f"Successfully downloaded model {model_id} from R2")
+                        return r2_path
+            except Exception as e:
+                logger.warning(f"R2 fallback download failed for {model_id}: {e}")
 
     return None
 
