@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -26,25 +25,6 @@ router = APIRouter(prefix="/api/user", tags=["user"])
 # Config file paths
 USER_CONFIG_PATH = get_user_config_path()
 DEVICES_CONFIG_PATH = get_user_devices_path()
-
-
-def _get_user_config_module():
-    """Import percus_ai.core.config if available."""
-    try:
-        from percus_ai.core.config import UserConfig, DeviceConfig
-        return UserConfig, DeviceConfig
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.core.config import UserConfig, DeviceConfig
-                return UserConfig, DeviceConfig
-            except ImportError:
-                pass
-    return None, None
 
 
 def _load_user_config() -> dict:

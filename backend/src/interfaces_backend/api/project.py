@@ -1,7 +1,6 @@
 """Project management API router."""
 
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +14,7 @@ from interfaces_backend.models.project import (
     ProjectStatsModel,
     ProjectValidateResponse,
 )
+from percus_ai.core.project import ProjectManager, ConfigLoader
 from percus_ai.storage import (
     get_projects_dir,
     get_datasets_dir,
@@ -25,44 +25,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
-def _get_project_manager():
-    """Import ProjectManager from percus_ai if available."""
-    try:
-        from percus_ai.core.project import ProjectManager
-        return ProjectManager()
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.core.project import ProjectManager
-                return ProjectManager()
-            except ImportError:
-                pass
-    return None
-
-
-def _get_config_loader():
-    """Import ConfigLoader from percus_ai if available."""
-    try:
-        from percus_ai.core.project import ConfigLoader
-        return ConfigLoader()
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.core.project import ConfigLoader
-                return ConfigLoader()
-            except ImportError:
-                pass
-    return None
-
-
 # --- Project Endpoints ---
 
 
@@ -71,17 +33,16 @@ async def debug_paths():
     """Debug endpoint to check path resolution."""
     import os
     projects_dir = get_projects_dir()
-    manager = _get_project_manager()
+    manager = ProjectManager()
     manager_info = None
-    if manager:
-        try:
-            manager_info = {
-                "type": str(type(manager)),
-                "projects_dir": str(getattr(manager, 'projects_dir', 'N/A')),
-                "list_projects": manager.list_projects() if hasattr(manager, 'list_projects') else "N/A",
-            }
-        except Exception as e:
-            manager_info = {"error": str(e)}
+    try:
+        manager_info = {
+            "type": str(type(manager)),
+            "projects_dir": str(getattr(manager, 'projects_dir', 'N/A')),
+            "list_projects": manager.list_projects() if hasattr(manager, 'list_projects') else "N/A",
+        }
+    except Exception as e:
+        manager_info = {"error": str(e)}
     return {
         "cwd": str(Path.cwd()),
         "PHYSICAL_AI_DATA_DIR": os.environ.get("PHYSICAL_AI_DATA_DIR", "NOT SET"),
@@ -89,7 +50,6 @@ async def debug_paths():
         "projects_dir_exists": projects_dir.exists(),
         "yaml_files": [str(f) for f in projects_dir.glob("*.yaml")] if projects_dir.exists() else [],
         "manager": manager_info,
-        "manager_is_none": manager is None,
     }
 
 
@@ -152,12 +112,7 @@ async def get_project(project_name: str):
 @router.post("", response_model=ProjectModel)
 async def create_project(request: ProjectCreateRequest):
     """Create a new project."""
-    manager = _get_project_manager()
-    if not manager:
-        raise HTTPException(
-            status_code=503,
-            detail="ProjectManager not available"
-        )
+    manager = ProjectManager()
 
     try:
         # Convert camera models to dicts if provided
@@ -205,12 +160,7 @@ async def create_project(request: ProjectCreateRequest):
 @router.get("/{project_name}/stats", response_model=ProjectStatsModel)
 async def get_project_stats(project_name: str):
     """Get project statistics."""
-    manager = _get_project_manager()
-    if not manager:
-        raise HTTPException(
-            status_code=503,
-            detail="ProjectManager not available"
-        )
+    manager = ProjectManager()
 
     try:
         stats = manager.get_project_stats(project_name)
@@ -235,12 +185,7 @@ async def get_project_stats(project_name: str):
 @router.get("/{project_name}/validate", response_model=ProjectValidateResponse)
 async def validate_project(project_name: str):
     """Validate project dataset."""
-    manager = _get_project_manager()
-    if not manager:
-        raise HTTPException(
-            status_code=503,
-            detail="ProjectManager not available"
-        )
+    manager = ProjectManager()
 
     try:
         is_valid, issues = manager.validate_dataset(project_name)
@@ -260,12 +205,7 @@ async def validate_project(project_name: str):
 @router.get("/{project_name}/validate-devices", response_model=ProjectDeviceValidation)
 async def validate_project_devices(project_name: str, devices_file: Optional[str] = None):
     """Validate that required devices are configured for a project."""
-    loader = _get_config_loader()
-    if not loader:
-        raise HTTPException(
-            status_code=503,
-            detail="ConfigLoader not available"
-        )
+    loader = ConfigLoader()
 
     try:
         project = loader.load_project(project_name)

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -81,30 +80,6 @@ def _get_motor_bus(port: str, arm_type: str = "so101"):
         bus.connect()
         _motor_buses[port] = bus
         return bus
-    except ImportError:
-        # Try alternate import path
-        try:
-            from percus_ai.storage import get_features_path
-
-            features_path = get_features_path()
-            if features_path.exists() and str(features_path) not in sys.path:
-                sys.path.insert(0, str(features_path))
-            from lerobot.common.robot_devices.motors.feetech import FeetechMotorsBus
-
-            arm_base = arm_type.split("_")[0]
-            if arm_base in ("so101", "so100"):
-                motor_ids = SO101_MOTOR_IDS
-            else:
-                motor_ids = SO101_MOTOR_IDS
-
-            motors = {name: (motor_id, "sts3215") for name, motor_id in motor_ids.items()}
-
-            bus = FeetechMotorsBus(port=port, motors=motors)
-            bus.connect()
-            _motor_buses[port] = bus
-            return bus
-        except ImportError:
-            return None
     except Exception:
         return None
 
@@ -164,39 +139,6 @@ def _read_motor_positions(bus, motors: list[str]) -> Dict[str, int]:
     batch_result = _read_motor_positions_batch(bus, motors)
     # Replace None with placeholder
     return {m: (v if v is not None else 2048) for m, v in batch_result.items()}
-
-
-def _get_calibration_module():
-    """Import percus_ai.hardware.calibration if available."""
-    try:
-        from percus_ai.hardware.calibration import (
-            CalibrationData,
-            MotorCalibrationData,
-            load_calibration,
-            save_calibration,
-            list_calibrations,
-            calibrate_arm,
-        )
-        return CalibrationData, MotorCalibrationData, load_calibration, save_calibration, list_calibrations, calibrate_arm
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.hardware.calibration import (
-                    CalibrationData,
-                    MotorCalibrationData,
-                    load_calibration,
-                    save_calibration,
-                    list_calibrations,
-                    calibrate_arm,
-                )
-                return CalibrationData, MotorCalibrationData, load_calibration, save_calibration, list_calibrations, calibrate_arm
-            except ImportError:
-                pass
-    return None, None, None, None, None, None
 
 
 def _list_all_calibrations() -> list[dict]:

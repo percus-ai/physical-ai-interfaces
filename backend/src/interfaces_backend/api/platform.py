@@ -1,35 +1,11 @@
 """Platform detection API."""
 
-import sys
-from pathlib import Path
-
 from fastapi import APIRouter, Query
 
 from interfaces_backend.models.platform import PlatformInfo, PlatformResponse
+from percus_ai.environment import Platform
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
-
-
-def _get_platform_module():
-    """Import percus_ai.environment.Platform if available."""
-    try:
-        from percus_ai.environment import Platform
-
-        return Platform
-    except ImportError:
-        # Try adding features path
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.environment import Platform
-
-                return Platform
-            except ImportError:
-                pass
-    return None
 
 
 @router.get("", response_model=PlatformResponse)
@@ -41,21 +17,6 @@ async def get_platform(
     Detects OS, architecture, GPU, CUDA, and other platform details.
     Results are cached for faster subsequent calls.
     """
-    Platform = _get_platform_module()
-
-    if Platform is None:
-        # Fallback: return minimal info without percus_ai
-        import platform as py_platform
-
-        return PlatformResponse(
-            platform=PlatformInfo(
-                os_type=py_platform.system().lower(),
-                arch=py_platform.machine(),
-            ),
-            cached=False,
-        )
-
-    # Use percus_ai Platform detection
     platform = Platform.detect(use_cache=not refresh)
     platform_dict = platform.to_dict()
 

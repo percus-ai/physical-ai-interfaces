@@ -3,7 +3,6 @@
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -18,16 +17,14 @@ from interfaces_backend.models.inference import (
     InferenceRunRequest,
     InferenceRunResponse,
 )
-
-router = APIRouter(prefix="/api/inference", tags=["inference"])
-
-# Import path utilities
+from percus_ai.inference import PolicyExecutor, detect_device as percus_detect_device
 from percus_ai.storage import (
     get_data_dir,
     get_models_dir,
     get_project_root,
-    get_features_path,
 )
+
+router = APIRouter(prefix="/api/inference", tags=["inference"])
 
 # Models directory (integrated with storage system)
 MODELS_DIR = get_models_dir()
@@ -82,39 +79,19 @@ def _get_env_for_policy(policy_type: str) -> str:
         return "act"
 
 
-def _get_percus_inference():
-    """Import percus_ai.inference if available."""
-    try:
-        from percus_ai.inference import PolicyExecutor, detect_device
-
-        return PolicyExecutor, detect_device
-    except ImportError:
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.inference import PolicyExecutor, detect_device
-
-                return PolicyExecutor, detect_device
-            except ImportError:
-                pass
-    return None, None
-
-
 def _detect_device() -> str:
     """Detect best available compute device."""
-    _, detect_device = _get_percus_inference()
-    if detect_device:
-        return detect_device()
-
-    # Fallback detection (via subprocess to avoid numpy conflicts)
-    from interfaces_backend.utils.torch_info import get_torch_info
-    torch_info = get_torch_info()
-    if torch_info.get("cuda_available"):
-        return "cuda"
-    elif torch_info.get("mps_available"):
-        return "mps"
-    return "cpu"
+    try:
+        return percus_detect_device()
+    except Exception:
+        # Fallback detection (via subprocess to avoid numpy conflicts)
+        from interfaces_backend.utils.torch_info import get_torch_info
+        torch_info = get_torch_info()
+        if torch_info.get("cuda_available"):
+            return "cuda"
+        elif torch_info.get("mps_available"):
+            return "mps"
+        return "cpu"
 
 
 def _list_models() -> list[dict]:

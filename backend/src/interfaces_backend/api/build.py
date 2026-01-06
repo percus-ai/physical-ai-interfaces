@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -10,6 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from interfaces_backend.models.build import BundledTorchStatusResponse
+from percus_ai.environment import TorchBuilder, Platform
 
 logger = logging.getLogger(__name__)
 
@@ -19,49 +19,6 @@ router = APIRouter(prefix="/api/build", tags=["build"])
 _executor = ThreadPoolExecutor(max_workers=1)
 
 
-def _get_torch_builder():
-    """Import TorchBuilder if available."""
-    try:
-        from percus_ai.environment import TorchBuilder
-
-        return TorchBuilder
-    except ImportError:
-        # Try adding features path
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.environment import TorchBuilder
-
-                return TorchBuilder
-            except ImportError:
-                pass
-    return None
-
-
-def _get_platform():
-    """Import Platform if available."""
-    try:
-        from percus_ai.environment import Platform
-
-        return Platform.detect()
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.environment import Platform
-
-                return Platform.detect()
-            except ImportError:
-                pass
-    return None
-
-
 @router.get("/bundled-torch/status", response_model=BundledTorchStatusResponse)
 async def get_bundled_torch_status():
     """Get current bundled-torch status.
@@ -69,16 +26,11 @@ async def get_bundled_torch_status():
     Returns information about the current bundled-torch installation,
     including whether it exists, versions, and validity.
     """
-    TorchBuilder = _get_torch_builder()
-    platform = _get_platform()
-
-    is_jetson = platform.is_jetson if platform else False
-
-    if TorchBuilder is None:
-        return BundledTorchStatusResponse(
-            exists=False,
-            is_jetson=is_jetson,
-        )
+    try:
+        platform = Platform.detect()
+        is_jetson = platform.is_jetson
+    except Exception:
+        is_jetson = False
 
     builder = TorchBuilder()
     status = builder.get_status()
@@ -123,36 +75,23 @@ async def websocket_bundled_torch_build(websocket: WebSocket):
 
             if action == "status":
                 # Return current status
-                TorchBuilder = _get_torch_builder()
-                platform = _get_platform()
-
-                if TorchBuilder is None:
-                    await websocket.send_json({
-                        "type": "status",
-                        "exists": False,
-                        "is_jetson": platform.is_jetson if platform else False,
-                    })
-                    continue
+                try:
+                    platform = Platform.detect()
+                    is_jetson = platform.is_jetson
+                except Exception:
+                    is_jetson = False
 
                 builder = TorchBuilder()
                 status = builder.get_status()
                 await websocket.send_json({
                     "type": "status",
                     **status.to_dict(),
-                    "is_jetson": platform.is_jetson if platform else False,
+                    "is_jetson": is_jetson,
                 })
                 continue
 
             elif action == "clean":
                 # Clean bundled-torch
-                TorchBuilder = _get_torch_builder()
-                if TorchBuilder is None:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "TorchBuilder not available",
-                    })
-                    continue
-
                 builder = TorchBuilder()
 
                 async def send_progress(msg: dict):
@@ -211,23 +150,17 @@ async def websocket_bundled_torch_build(websocket: WebSocket):
 
             elif action == "build":
                 # Check if Jetson
-                platform = _get_platform()
-                if platform and not platform.is_jetson:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "Bundled-torch build is only supported on Jetson. "
-                                 "On other platforms, use pip install torch.",
-                    })
-                    continue
-
-                TorchBuilder = _get_torch_builder()
-                if TorchBuilder is None:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "TorchBuilder not available. "
-                                 "Make sure percus_ai is installed.",
-                    })
-                    continue
+                try:
+                    platform = Platform.detect()
+                    if not platform.is_jetson:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": "Bundled-torch build is only supported on Jetson. "
+                                     "On other platforms, use pip install torch.",
+                        })
+                        continue
+                except Exception:
+                    pass  # Continue with build if platform detection fails
 
                 pytorch_version = data.get("pytorch_version")
                 torchvision_version = data.get("torchvision_version")

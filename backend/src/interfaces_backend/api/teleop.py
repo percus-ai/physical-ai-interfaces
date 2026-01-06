@@ -1,6 +1,5 @@
 """Teleoperation API router."""
 
-import sys
 import uuid
 import asyncio
 import threading
@@ -29,6 +28,13 @@ from interfaces_backend.models.teleop import (
     RemoteFollowerSession,
     RemoteSessionsResponse,
 )
+from percus_ai.teleop import (
+    SimpleTeleoperation,
+    VisualTeleoperation,
+    BimanualTeleoperation,
+    RobotPreset,
+)
+from percus_ai.teleop.common import create_motor_bus, MotorState
 
 router = APIRouter(prefix="/api/teleop", tags=["teleop"])
 
@@ -36,54 +42,6 @@ router = APIRouter(prefix="/api/teleop", tags=["teleop"])
 _local_sessions: Dict[str, dict] = {}
 _remote_leader_sessions: Dict[str, dict] = {}
 _remote_follower_sessions: Dict[str, dict] = {}
-
-
-def _get_teleop_module():
-    """Import percus_ai.teleop if available."""
-    try:
-        from percus_ai.teleop import (
-            SimpleTeleoperation,
-            VisualTeleoperation,
-            BimanualTeleoperation,
-            RobotPreset,
-        )
-        return SimpleTeleoperation, VisualTeleoperation, BimanualTeleoperation, RobotPreset
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.teleop import (
-                    SimpleTeleoperation,
-                    VisualTeleoperation,
-                    BimanualTeleoperation,
-                    RobotPreset,
-                )
-                return SimpleTeleoperation, VisualTeleoperation, BimanualTeleoperation, RobotPreset
-            except ImportError:
-                pass
-    return None, None, None, None
-
-
-def _get_remote_teleop():
-    """Import percus_ai.teleop.remote if available."""
-    try:
-        from percus_ai.teleop.remote import run_leader_server, run_follower_server
-        return run_leader_server, run_follower_server
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.teleop.remote import run_leader_server, run_follower_server
-                return run_leader_server, run_follower_server
-            except ImportError:
-                pass
-    return None, None
 
 
 # --- Local Teleoperation Endpoints ---
@@ -96,25 +54,17 @@ async def start_local_teleop(request: TeleopStartRequest):
     Creates a leader-follower teleoperation session where the follower
     arm mimics the leader arm movements.
     """
-    SimpleTeleop, VisualTeleop, BimanualTeleop, RobotPreset = _get_teleop_module()
-
-    if not SimpleTeleop:
-        raise HTTPException(
-            status_code=503,
-            detail="Teleoperation module not available. Install percus_ai[teleop].",
-        )
-
     session_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
 
     # Select teleop class based on mode
     mode = request.mode.lower()
     if mode == "visual":
-        TeleopClass = VisualTeleop
+        TeleopClass = VisualTeleoperation
     elif mode == "bimanual":
-        TeleopClass = BimanualTeleop
+        TeleopClass = BimanualTeleoperation
     else:
-        TeleopClass = SimpleTeleop
+        TeleopClass = SimpleTeleoperation
 
     # Get robot preset
     preset = RobotPreset.SO101
@@ -297,8 +247,6 @@ async def start_remote_leader(request: RemoteLeaderStartRequest):
     The leader server streams arm positions and optionally camera frames
     to connected followers.
     """
-    run_leader, _ = _get_remote_teleop()
-
     session_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
 
@@ -385,8 +333,6 @@ async def start_remote_follower(request: RemoteFollowerStartRequest):
 
     Connects to a leader server and syncs the follower arm.
     """
-    _, run_follower = _get_remote_teleop()
-
     session_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
 
@@ -493,25 +439,6 @@ async def list_remote_sessions():
 # --- WebSocket Visual Teleoperation ---
 
 
-def _get_motor_bus_module():
-    """Import motor bus utilities."""
-    try:
-        from percus_ai.teleop.common import create_motor_bus, MotorState, RobotPreset
-        return create_motor_bus, MotorState, RobotPreset
-    except ImportError:
-        from percus_ai.storage import get_features_path
-
-        features_path = get_features_path()
-        if features_path.exists() and str(features_path) not in sys.path:
-            sys.path.insert(0, str(features_path))
-            try:
-                from percus_ai.teleop.common import create_motor_bus, MotorState, RobotPreset
-                return create_motor_bus, MotorState, RobotPreset
-            except ImportError:
-                pass
-    return None, None, None
-
-
 @router.websocket("/ws/visual")
 async def websocket_visual_teleop(websocket: WebSocket):
     """WebSocket endpoint for visual teleoperation with real-time motor state streaming.
@@ -530,16 +457,6 @@ async def websocket_visual_teleop(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("Visual teleop WebSocket connected")
-
-    create_motor_bus, MotorState, RobotPreset = _get_motor_bus_module()
-
-    if create_motor_bus is None:
-        await websocket.send_json({
-            "type": "error",
-            "error": "Motor bus module not available. Install percus_ai[teleop].",
-        })
-        await websocket.close()
-        return
 
     leader_bus = None
     follower_bus = None
