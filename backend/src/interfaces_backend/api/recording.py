@@ -657,27 +657,40 @@ async def websocket_record(websocket: WebSocket):
         async def listen_for_stop():
             """Listen for stop command from client."""
             try:
-                while True:
-                    msg = await websocket.receive_json()
-                    if msg.get("action") == "stop":
-                        if process.returncode is None:
-                            process.terminate()
-                        break
+                while process.returncode is None:
+                    try:
+                        msg = await asyncio.wait_for(
+                            websocket.receive_json(),
+                            timeout=1.0
+                        )
+                        if msg.get("action") == "stop":
+                            if process.returncode is None:
+                                process.terminate()
+                            break
+                    except asyncio.TimeoutError:
+                        continue  # Check if process ended, then continue waiting
             except WebSocketDisconnect:
                 if process.returncode is None:
                     process.terminate()
             except Exception:
                 pass
 
-        # Read stdout, stderr, and listen for stop concurrently
-        await asyncio.gather(
-            read_stream(process.stdout, "output"),
-            read_stream(process.stderr, "error_output"),
-            listen_for_stop(),
-            return_exceptions=True,
-        )
+        # Create tasks for concurrent execution
+        stdout_task = asyncio.create_task(read_stream(process.stdout, "output"))
+        stderr_task = asyncio.create_task(read_stream(process.stderr, "error_output"))
+        stop_task = asyncio.create_task(listen_for_stop())
 
-        # Wait for process to complete
+        # Wait for streams to complete (process finished)
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+        # Cancel stop listener since process is done
+        stop_task.cancel()
+        try:
+            await stop_task
+        except asyncio.CancelledError:
+            pass
+
+        # Get return code
         return_code = await process.wait()
 
         _active_recording_process = None
