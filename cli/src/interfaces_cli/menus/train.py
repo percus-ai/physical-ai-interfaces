@@ -1,9 +1,13 @@
 """Train menu - Model training operations."""
 
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
 
 from interfaces_cli.banner import format_size, show_section_header
 from interfaces_cli.menu_system import BaseMenu, MenuResult
@@ -11,6 +15,98 @@ from interfaces_cli.styles import Colors, hacker_style
 
 if TYPE_CHECKING:
     from interfaces_cli.app import PhiApplication
+
+
+def download_dataset_with_progress(
+    api,
+    dataset_id: str,
+) -> Dict[str, Any]:
+    """Download a dataset from R2 with Rich progress display.
+
+    Args:
+        api: API client instance
+        dataset_id: ID of dataset to download
+
+    Returns:
+        Result dict with 'success', 'error' keys
+    """
+    console = Console()
+    current = {"file": "", "done": 0, "total": 0, "size": 0, "transferred": 0, "total_size": 0}
+
+    def make_progress_panel():
+        """Create progress display panel."""
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Label", style="cyan")
+        table.add_column("Value")
+
+        table.add_row("データセット:", dataset_id)
+
+        if current["file"]:
+            # File progress
+            if current["size"] > 0:
+                pct = (current["transferred"] / current["size"]) * 100
+                transferred_str = format_size(current["transferred"])
+                size_str = format_size(current["size"])
+                progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
+            else:
+                progress_str = format_size(current["size"]) if current["size"] else "..."
+            table.add_row("ファイル:", current["file"])
+            table.add_row("転送:", progress_str)
+
+        if current["total"] > 0:
+            table.add_row("ファイル数:", f"{current['done']}/{current['total']}")
+
+        if current["total_size"] > 0:
+            table.add_row("合計サイズ:", format_size(current["total_size"]))
+
+        return Panel(table, title="📥 データセットダウンロード", border_style="cyan")
+
+    def progress_callback(data):
+        """Handle progress updates from WebSocket."""
+        msg_type = data.get("type", "")
+
+        if msg_type == "start":
+            current["total"] = data.get("total_files", 0)
+            current["total_size"] = data.get("total_size", 0)
+            current["done"] = 0
+            current["file"] = ""
+            current["transferred"] = 0
+        elif msg_type == "downloading":
+            current["file"] = data.get("current_file", "")
+            current["size"] = data.get("file_size", 0)
+            current["done"] = data.get("files_done", 0)
+            current["transferred"] = 0
+        elif msg_type == "progress":
+            current["file"] = data.get("current_file", "")
+            current["size"] = data.get("file_size", 0)
+            current["transferred"] = data.get("bytes_transferred", 0)
+        elif msg_type == "downloaded":
+            current["done"] = data.get("files_done", 0)
+            current["transferred"] = current["size"]
+
+    try:
+        with Live(make_progress_panel(), console=console, refresh_per_second=4) as live:
+            def update_display(data):
+                progress_callback(data)
+                live.update(make_progress_panel())
+
+            result = api.sync_with_progress(
+                action="download",
+                entry_type="datasets",
+                item_ids=[dataset_id],
+                progress_callback=update_display,
+            )
+
+        success_count = result.get("success_count", 0)
+        if success_count > 0:
+            return {"success": True}
+        else:
+            results = result.get("results", {})
+            error = results.get(dataset_id, {}).get("error", "Unknown error")
+            return {"success": False, "error": error}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 class TrainMenu(BaseMenu):
@@ -367,9 +463,9 @@ class NewTrainingMenu(BaseMenu):
             # Check if dataset needs to be downloaded
             ds_info = ds_lookup.get(dataset, {})
             if not ds_info.get("is_local", True):
-                print(f"\n{Colors.warning('This dataset is not downloaded locally.')}")
+                print(f"\n{Colors.warning('このデータセットはローカルにダウンロードされていません。')}")
                 should_download = inquirer.confirm(
-                    message="Download from R2?",
+                    message="R2からダウンロードしますか?",
                     default=True,
                     style=hacker_style,
                 ).execute()
@@ -377,18 +473,14 @@ class NewTrainingMenu(BaseMenu):
                 if not should_download:
                     return MenuResult.CONTINUE
 
-                # Download dataset
-                print(f"\n{Colors.CYAN}Downloading dataset from R2...{Colors.RESET}")
-                try:
-                    download_result = self.api.download_dataset(dataset)
-                    if download_result.get("success"):
-                        print(f"{Colors.success('Dataset downloaded successfully.')}")
-                    else:
-                        print(f"{Colors.error('Download failed.')}")
-                        input(f"\n{Colors.muted('Press Enter to continue...')}")
-                        return MenuResult.CONTINUE
-                except Exception as e:
-                    print(f"{Colors.error(f'Download error: {e}')}")
+                # Download dataset with WebSocket progress
+                print()
+                download_result = download_dataset_with_progress(self.api, dataset)
+                if download_result.get("success"):
+                    print(f"\n{Colors.success('データセットのダウンロードが完了しました。')}")
+                else:
+                    error = download_result.get("error", "Unknown error")
+                    print(f"\n{Colors.error(f'ダウンロードエラー: {error}')}")
                     input(f"\n{Colors.muted('Press Enter to continue...')}")
                     return MenuResult.CONTINUE
 
