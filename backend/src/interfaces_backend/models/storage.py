@@ -19,10 +19,25 @@ from percus_ai.storage import (
 # --- API Request/Response Models ---
 
 
+class DatasetInfo(BaseModel):
+    """Dataset information for API responses with local status."""
+
+    id: str = Field(..., description="Dataset ID")
+    name: str = Field(..., description="Dataset name")
+    source: DataSource = Field(..., description="Data source: r2, hub, local")
+    status: DataStatus = Field(..., description="Data status")
+    dataset_type: str = Field("recorded", description="Dataset type")
+    episode_count: int = Field(0, description="Number of episodes")
+    size_bytes: int = Field(0, description="Size in bytes")
+    is_local: bool = Field(True, description="Dataset is downloaded locally")
+    created_at: Optional[str] = Field(None, description="Creation time")
+    updated_at: Optional[str] = Field(None, description="Last update time")
+
+
 class DatasetListResponse(BaseModel):
     """Response for dataset list endpoint."""
 
-    datasets: List[DatasetMetadata]
+    datasets: List[DatasetInfo]
     total: int
 
 

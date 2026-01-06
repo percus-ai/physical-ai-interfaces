@@ -651,30 +651,38 @@ class InferenceMenu(BaseMenu):
         show_section_header("Run Model")
 
         try:
-            # Get available models
+            # Get available models (local + R2 remote)
             result = self.api.list_inference_models()
             models = result.get("models", [])
 
             if not models:
                 print(f"{Colors.warning('No models available.')}")
-                print(f"{Colors.muted('Download a model from R2 or train one first.')}")
+                print(f"{Colors.muted('Train a model or check R2 storage.')}")
                 input(f"\n{Colors.muted('Press Enter to continue...')}")
                 return MenuResult.CONTINUE
 
-            # Select model
+            # Build model lookup for later access
+            model_lookup = {}
+
+            # Select model - show local vs remote status
             model_choices = []
             for m in models:
                 if isinstance(m, dict):
                     model_id = m.get("model_id", m.get("name", "unknown"))
                     policy = m.get("policy_type", "?")
-                    source = m.get("source", "local")
+                    is_local = m.get("is_local", True)
                     size_mb = m.get("size_mb", 0)
+
+                    # Status indicator: ✓ for local, ☁ for remote
+                    status = "✓" if is_local else "☁"
                     model_choices.append(Choice(
                         value=model_id,
-                        name=f"{model_id} [{policy}] ({source}, {size_mb:.0f}MB)"
+                        name=f"{status} {model_id} [{policy}] ({size_mb:.0f}MB)"
                     ))
+                    model_lookup[model_id] = m
                 else:
                     model_choices.append(Choice(value=m, name=m))
+                    model_lookup[m] = {"model_id": m, "is_local": True}
             model_choices.append(Choice(value="__back__", name="« Cancel"))
 
             selected_model = inquirer.select(
@@ -685,6 +693,34 @@ class InferenceMenu(BaseMenu):
 
             if selected_model == "__back__":
                 return MenuResult.CONTINUE
+
+            # Check if model needs to be downloaded
+            model_info = model_lookup.get(selected_model, {})
+            if not model_info.get("is_local", True):
+                print(f"\n{Colors.warning('This model is not downloaded locally.')}")
+                should_download = inquirer.confirm(
+                    message="Download from R2?",
+                    default=True,
+                    style=hacker_style,
+                ).execute()
+
+                if not should_download:
+                    return MenuResult.CONTINUE
+
+                # Download model
+                print(f"\n{Colors.CYAN}Downloading model from R2...{Colors.RESET}")
+                try:
+                    download_result = self.api.download_model(selected_model)
+                    if download_result.get("success"):
+                        print(f"{Colors.success('Model downloaded successfully.')}")
+                    else:
+                        print(f"{Colors.error('Download failed.')}")
+                        input(f"\n{Colors.muted('Press Enter to continue...')}")
+                        return MenuResult.CONTINUE
+                except Exception as e:
+                    print(f"{Colors.error(f'Download error: {e}')}")
+                    input(f"\n{Colors.muted('Press Enter to continue...')}")
+                    return MenuResult.CONTINUE
 
             # Get available projects from storage (./data/projects/)
             try:
@@ -855,23 +891,31 @@ class InferenceMenu(BaseMenu):
             total = result.get("total", len(models))
 
             if models:
-                print(f"{Colors.CYAN}Models ({total}):{Colors.RESET}\n")
-                for m in models:
-                    if isinstance(m, dict):
+                # Separate local and remote models
+                local_models = [m for m in models if isinstance(m, dict) and m.get("is_local", True)]
+                remote_models = [m for m in models if isinstance(m, dict) and not m.get("is_local", True)]
+
+                print(f"{Colors.CYAN}Models ({total}):{Colors.RESET}")
+                print(f"{Colors.muted('  ✓ = downloaded locally, ☁ = R2 remote only')}\n")
+
+                if local_models:
+                    print(f"  {Colors.GREEN}Local ({len(local_models)}):{Colors.RESET}")
+                    for m in local_models:
                         model_id = m.get("model_id", m.get("name", "unknown"))
                         policy = m.get("policy_type", "?")
-                        source = m.get("source", "local")
                         size_mb = m.get("size_mb", 0)
-                        print(f"  - {model_id} [{policy}] ({source})")
-                        if m.get("local_path"):
-                            print(f"      Path: {m.get('local_path')}")
-                        if size_mb:
-                            print(f"      Size: {size_mb:.1f} MB")
-                    else:
-                        print(f"  - {m}")
+                        print(f"    ✓ {model_id} [{policy}] ({size_mb:.1f} MB)")
+
+                if remote_models:
+                    print(f"\n  {Colors.YELLOW}R2 Remote ({len(remote_models)}):{Colors.RESET}")
+                    for m in remote_models:
+                        model_id = m.get("model_id", m.get("name", "unknown"))
+                        policy = m.get("policy_type", "?")
+                        size_mb = m.get("size_mb", 0)
+                        print(f"    ☁ {model_id} [{policy}] ({size_mb:.1f} MB)")
             else:
                 print(f"{Colors.muted('No models available.')}")
-                print(f"{Colors.muted('Download models from R2 Storage menu.')}")
+                print(f"{Colors.muted('Train a model or check R2 storage.')}")
 
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")

@@ -136,70 +136,92 @@ def _detect_device() -> str:
 
 
 def _list_models() -> list[dict]:
-    """List available models for inference from storage directories."""
+    """List available models for inference from local storage and R2.
+
+    Returns models from:
+    1. Local storage (already downloaded)
+    2. R2 remote (not yet downloaded)
+
+    Each model includes an is_local flag to indicate if it's downloaded.
+    """
     import json
 
-    if not MODELS_DIR.exists():
-        return []
-
     models = []
+    seen_model_ids = set()
 
-    # Scan subdirectories: r2/, hub/, and direct models
-    subdirs_to_scan = []
+    # First, scan local directories (models are stored directly in MODELS_DIR/{model_id})
+    if MODELS_DIR.exists():
+        # Skip legacy directories (r2, hub) if they exist
+        subdirs_to_scan = [
+            item for item in MODELS_DIR.iterdir()
+            if item.is_dir() and item.name not in ("r2", "hub")
+        ]
 
-    # Add r2 models
-    r2_dir = MODELS_DIR / "r2"
-    if r2_dir.exists():
-        subdirs_to_scan.extend(r2_dir.iterdir())
+        for model_dir in subdirs_to_scan:
+            if not model_dir.is_dir():
+                continue
 
-    # Add hub models
-    hub_dir = MODELS_DIR / "hub"
-    if hub_dir.exists():
-        subdirs_to_scan.extend(hub_dir.iterdir())
+            config_file = model_dir / "config.json"
+            if not config_file.exists():
+                continue
 
-    # Add direct models (for backward compatibility)
-    for item in MODELS_DIR.iterdir():
-        if item.is_dir() and item.name not in ("r2", "hub"):
-            subdirs_to_scan.append(item)
+            try:
+                with open(config_file) as f:
+                    config = json.load(f)
 
-    for model_dir in subdirs_to_scan:
-        if not model_dir.is_dir():
-            continue
+                # Source is tracked in metadata, not directory structure
+                # All local models are marked as "local" source
+                source = "local"
 
-        config_file = model_dir / "config.json"
-        if not config_file.exists():
-            continue
+                model_id = model_dir.name
+                seen_model_ids.add(model_id)
 
-        try:
-            with open(config_file) as f:
-                config = json.load(f)
+                models.append({
+                    "model_id": model_id,
+                    "name": model_id,
+                    "policy_type": config.get("type", "unknown"),
+                    "local_path": str(model_dir),
+                    "source": source,
+                    "size_mb": sum(
+                        f.stat().st_size for f in model_dir.rglob("*") if f.is_file()
+                    ) / (1024 * 1024),
+                    "is_local": True,
+                })
+            except Exception:
+                continue
 
-            # Determine source from path
-            source = "local"
-            if "r2" in model_dir.parts:
-                source = "r2"
-            elif "hub" in model_dir.parts:
-                source = "hub"
+    # Then, add R2 remote models (not yet downloaded)
+    try:
+        sync_service = _get_sync_service()
+        remote_models = sync_service.list_remote_models()
+
+        for rm in remote_models:
+            model_id = rm.get("id", "")
+            if not model_id or model_id in seen_model_ids:
+                continue
 
             models.append({
-                "model_id": model_dir.name,
-                "name": model_dir.name,
-                "policy_type": config.get("type", "unknown"),
-                "local_path": str(model_dir),
-                "source": source,
-                "size_mb": sum(
-                    f.stat().st_size for f in model_dir.rglob("*") if f.is_file()
-                ) / (1024 * 1024),
+                "model_id": model_id,
+                "name": rm.get("name", model_id),
+                "policy_type": rm.get("policy_type", "unknown"),
+                "local_path": None,
+                "source": "r2",
+                "size_mb": rm.get("size_bytes", 0) / (1024 * 1024),
+                "is_local": False,
             })
-        except Exception:
-            continue
+    except Exception as e:
+        logger.debug(f"Failed to list remote models: {e}")
 
     return models
 
 
 @router.get("/models", response_model=InferenceModelsResponse)
 async def list_inference_models():
-    """List models available for inference."""
+    """List models available for inference.
+
+    Returns both locally downloaded models and R2 remote models.
+    Use is_local to check if a model needs to be downloaded before use.
+    """
     models_data = _list_models()
 
     models = []
@@ -212,6 +234,8 @@ async def list_inference_models():
                 local_path=m.get("local_path"),
                 size_mb=m.get("size_mb", 0.0),
                 is_loaded=False,  # No longer tracking loaded state
+                is_local=m.get("is_local", True),
+                source=m.get("source", "local"),
             )
         )
 
@@ -288,20 +312,10 @@ def _find_model_path(model_id: str, auto_download: bool = True) -> Optional[Path
     If model is not found locally and auto_download is enabled,
     attempts to download from R2.
     """
-    # Check R2 models
-    r2_path = MODELS_DIR / "r2" / model_id
-    if r2_path.exists():
-        return r2_path
-
-    # Check Hub models
-    hub_path = MODELS_DIR / "hub" / model_id
-    if hub_path.exists():
-        return hub_path
-
-    # Check direct models directory
-    direct_path = MODELS_DIR / model_id
-    if direct_path.exists():
-        return direct_path
+    # Check models directory (models are stored directly in MODELS_DIR/{model_id})
+    model_path = MODELS_DIR / model_id
+    if model_path.exists():
+        return model_path
 
     # Model not found locally - try R2 fallback download if enabled
     if auto_download:
@@ -315,10 +329,10 @@ def _find_model_path(model_id: str, auto_download: bool = True) -> Optional[Path
                 if model_id in remote_models:
                     logger.info(f"Downloading model {model_id} from R2...")
                     sync_service.download_model(model_id)
-                    # After download, model should be in r2 directory
-                    if r2_path.exists():
+                    # After download, model should be in models directory
+                    if model_path.exists():
                         logger.info(f"Successfully downloaded model {model_id} from R2")
-                        return r2_path
+                        return model_path
             except Exception as e:
                 logger.warning(f"R2 fallback download failed for {model_id}: {e}")
 

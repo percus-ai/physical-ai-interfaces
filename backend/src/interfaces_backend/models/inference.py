@@ -14,6 +14,8 @@ class InferenceModelInfo(BaseModel):
     local_path: Optional[str] = Field(None, description="Local path")
     size_mb: float = Field(0.0, description="Model size in MB")
     is_loaded: bool = Field(False, description="Model is loaded in memory")
+    is_local: bool = Field(True, description="Model is downloaded locally")
+    source: str = Field("local", description="Model source: r2, hub, local")
 
 
 class InferenceModelsResponse(BaseModel):

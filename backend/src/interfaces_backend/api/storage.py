@@ -20,6 +20,7 @@ from percus_ai.storage import (
 from interfaces_backend.models.storage import (
     ArchiveListResponse,
     ArchiveResponse,
+    DatasetInfo,
     DatasetListResponse,
     DownloadResponse,
     ModelListResponse,
@@ -74,19 +75,76 @@ def _get_hf_service() -> HuggingFaceService:
 async def list_datasets(
     source: Optional[DataSource] = Query(None, description="Filter by source"),
     include_archived: bool = Query(False, description="Include archived datasets"),
+    include_remote: bool = Query(True, description="Include R2 remote datasets"),
 ):
-    """List all datasets."""
+    """List all datasets.
+
+    Returns both locally downloaded datasets and R2 remote datasets.
+    Use is_local to check if a dataset needs to be downloaded before use.
+    """
     manifest = _get_manifest()
     manifest.reload()  # Reload to pick up any external changes
 
+    datasets_info = []
+    seen_ids = set()
+
+    # First, add local datasets (from manifest)
     if include_archived:
         active = manifest.list_datasets(source=source, status=DataStatus.ACTIVE)
         archived = manifest.list_datasets(source=source, status=DataStatus.ARCHIVED)
-        datasets = active + archived
+        local_datasets = active + archived
     else:
-        datasets = manifest.list_datasets(source=source, status=DataStatus.ACTIVE)
+        local_datasets = manifest.list_datasets(source=source, status=DataStatus.ACTIVE)
 
-    return DatasetListResponse(datasets=datasets, total=len(datasets))
+    for ds in local_datasets:
+        # Check if actually downloaded locally
+        entry = manifest.manifest.datasets.get(ds.id)
+        is_local = False
+        if entry:
+            local_path = manifest.base_path / entry.path
+            is_local = local_path.exists()
+
+        seen_ids.add(ds.id)
+        datasets_info.append(DatasetInfo(
+            id=ds.id,
+            name=ds.name,
+            source=ds.source,
+            status=ds.status,
+            dataset_type=ds.dataset_type.value if ds.dataset_type else "recorded",
+            episode_count=ds.episode_count or 0,
+            size_bytes=ds.sync.size_bytes if ds.sync else 0,
+            is_local=is_local,
+            created_at=ds.created_at,
+            updated_at=ds.updated_at,
+        ))
+
+    # Then, add R2 remote datasets (not yet in manifest)
+    if include_remote and (source is None or source == DataSource.R2):
+        try:
+            sync = _get_sync_service()
+            remote_datasets = sync.list_remote_datasets()
+
+            for rd in remote_datasets:
+                dataset_id = rd.get("id", "")
+                if not dataset_id or dataset_id in seen_ids:
+                    continue
+
+                datasets_info.append(DatasetInfo(
+                    id=dataset_id,
+                    name=rd.get("name", dataset_id),
+                    source=DataSource.R2,
+                    status=DataStatus.ACTIVE,
+                    dataset_type=rd.get("dataset_type", "recorded"),
+                    episode_count=rd.get("episode_count", 0),
+                    size_bytes=rd.get("size_bytes", 0),
+                    is_local=False,
+                    created_at=None,
+                    updated_at=None,
+                ))
+        except Exception as e:
+            logger.debug(f"Failed to list remote datasets: {e}")
+
+    return DatasetListResponse(datasets=datasets_info, total=len(datasets_info))
 
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetMetadata)

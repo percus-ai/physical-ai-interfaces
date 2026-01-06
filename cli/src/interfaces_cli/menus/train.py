@@ -328,32 +328,69 @@ class NewTrainingMenu(BaseMenu):
             if policy == "__back__":
                 return MenuResult.CONTINUE
 
-            # Select dataset
+            # Select dataset (local + R2 remote)
             datasets = self.api.list_datasets()
             ds_list = datasets.get("datasets", [])
             if not ds_list:
                 print(f"{Colors.warning('No datasets available.')}")
+                print(f"{Colors.muted('Upload datasets from R2 Storage menu or record new ones.')}")
                 input(f"\n{Colors.muted('Press Enter to continue...')}")
                 return MenuResult.CONTINUE
+
+            # Build dataset lookup
+            ds_lookup = {}
 
             ds_choices = []
             for d in ds_list:
                 if isinstance(d, dict):
-                    name = d.get("id", "unknown")
+                    ds_id = d.get("id", "unknown")
+                    is_local = d.get("is_local", True)
                     size = format_size(d.get("size_bytes", 0))
-                    ds_choices.append(Choice(value=name, name=f"{name} ({size})"))
+                    # Status indicator: ✓ for local, ☁ for remote
+                    status = "✓" if is_local else "☁"
+                    ds_choices.append(Choice(value=ds_id, name=f"{status} {ds_id} ({size})"))
+                    ds_lookup[ds_id] = d
                 else:
                     ds_choices.append(Choice(value=d, name=d))
+                    ds_lookup[d] = {"id": d, "is_local": True}
             ds_choices.append(Choice(value="__back__", name="« Cancel"))
 
             dataset = inquirer.select(
-                message="Dataset:",
+                message="Dataset (✓=local, ☁=R2 remote):",
                 choices=ds_choices,
                 style=hacker_style,
             ).execute()
 
             if dataset == "__back__":
                 return MenuResult.CONTINUE
+
+            # Check if dataset needs to be downloaded
+            ds_info = ds_lookup.get(dataset, {})
+            if not ds_info.get("is_local", True):
+                print(f"\n{Colors.warning('This dataset is not downloaded locally.')}")
+                should_download = inquirer.confirm(
+                    message="Download from R2?",
+                    default=True,
+                    style=hacker_style,
+                ).execute()
+
+                if not should_download:
+                    return MenuResult.CONTINUE
+
+                # Download dataset
+                print(f"\n{Colors.CYAN}Downloading dataset from R2...{Colors.RESET}")
+                try:
+                    download_result = self.api.download_dataset(dataset)
+                    if download_result.get("success"):
+                        print(f"{Colors.success('Dataset downloaded successfully.')}")
+                    else:
+                        print(f"{Colors.error('Download failed.')}")
+                        input(f"\n{Colors.muted('Press Enter to continue...')}")
+                        return MenuResult.CONTINUE
+                except Exception as e:
+                    print(f"{Colors.error(f'Download error: {e}')}")
+                    input(f"\n{Colors.muted('Press Enter to continue...')}")
+                    return MenuResult.CONTINUE
 
             # Get training parameters
             steps = inquirer.number(
