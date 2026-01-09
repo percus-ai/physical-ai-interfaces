@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -200,6 +200,32 @@ def _generate_instance_info_env(job_id: str, instance_id: str, auto_delete: bool
 # --- Verda/DataCrunch API utilities ---
 
 
+def _extract_gpu_count(instance_type: str) -> Optional[int]:
+    """Extract GPU count from instance type name.
+
+    Instance types follow the pattern: <count><model>.<memory><suffix>
+    e.g., "1H100.80S" -> 1, "8A100.80" -> 8
+
+    Args:
+        instance_type: Instance type string (e.g., "1H100.80S")
+
+    Returns:
+        GPU count as integer, or None if extraction fails
+    """
+    digits = []
+    for ch in instance_type:
+        if ch.isdigit():
+            digits.append(ch)
+        else:
+            break
+    if not digits:
+        return None
+    try:
+        return int("".join(digits))
+    except ValueError:
+        return None
+
+
 def _get_verda_client():
     """Get Verda/DataCrunch client (if available)."""
     client_id = os.environ.get("DATACRUNCH_CLIENT_ID")
@@ -299,6 +325,26 @@ def _list_jobs(days: int = 7) -> list[dict]:
 # tmux session name for training jobs (consistent with job startup)
 TMUX_SESSION_NAME = "instance_setup"
 
+# Timeout constants
+IP_WAIT_TIMEOUT_SEC = 900  # 15 minutes to wait for IP assignment
+SSH_WAIT_TIMEOUT_SEC = 300  # 5 minutes to wait for SSH to be ready
+LOG_STREAM_MAX_SEC = 30  # Max time to stream initial logs
+LOG_STREAM_INITIAL_LINES = 10  # Number of log lines to show initially
+
+
+def _get_log_file_path(job_data: dict) -> str:
+    """Get the remote log file path for a job.
+
+    Args:
+        job_data: Job data dict containing remote_base_dir and mode
+
+    Returns:
+        Full path to the log file on the remote instance
+    """
+    mode = job_data.get("mode", "train")
+    remote_base_dir = job_data.get("remote_base_dir", "/root")
+    return f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+
 
 def _get_ssh_connection_for_job(job_data: dict, timeout: int = 30) -> Optional[SSHConnection]:
     """Get SSHConnection for job instance.
@@ -350,9 +396,7 @@ def _get_remote_logs(job_data: dict, lines: int = 100) -> Optional[str]:
         return None
 
     try:
-        mode = job_data.get("mode", "train")
-        remote_base_dir = job_data.get("remote_base_dir", "/root")
-        log_file = f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+        log_file = _get_log_file_path(job_data)
         cmd = f"tail -n {lines} {log_file} 2>/dev/null || echo '[Log file not found]'"
         exit_code, stdout, stderr = conn.exec_command(cmd)
         return stdout
@@ -369,9 +413,7 @@ def _get_remote_progress(job_data: dict) -> Optional[dict]:
         return None
 
     try:
-        mode = job_data.get("mode", "train")
-        remote_base_dir = job_data.get("remote_base_dir", "/root")
-        log_file = f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+        log_file = _get_log_file_path(job_data)
 
         # Get step info
         cmd = f"grep -oE 'step:[0-9]+|Step [0-9]+|optimization_step=[0-9]+' {log_file} 2>/dev/null | tail -1 || true"
@@ -474,18 +516,8 @@ async def get_gpu_availability():
                 # Find matching instance type
                 for t in instance_types:
                     itype = t.instance_type
-                    # Extract GPU count from instance type name (e.g., "1H100.80S" -> 1)
-                    digits = []
-                    for ch in itype:
-                        if ch.isdigit():
-                            digits.append(ch)
-                        else:
-                            break
-                    if not digits:
-                        continue
-                    try:
-                        count = int("".join(digits))
-                    except ValueError:
+                    count = _extract_gpu_count(itype)
+                    if count is None:
                         continue
 
                     if count == gpu_count and gpu_model.upper() in itype.upper():
@@ -495,8 +527,6 @@ async def get_gpu_availability():
 
         # Check availability in parallel using ThreadPoolExecutor
         # Each config needs 2 checks (spot + on-demand), done in parallel
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         results = {}  # key: (gpu_model, gpu_count) -> {"spot_locs": [], "ondemand_locs": []}
 
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -600,17 +630,8 @@ async def websocket_gpu_availability(websocket: WebSocket):
             for gpu_count in GPU_COUNTS_QUICK:
                 for t in instance_types:
                     itype = t.instance_type
-                    digits = []
-                    for ch in itype:
-                        if ch.isdigit():
-                            digits.append(ch)
-                        else:
-                            break
-                    if not digits:
-                        continue
-                    try:
-                        count = int("".join(digits))
-                    except ValueError:
+                    count = _extract_gpu_count(itype)
+                    if count is None:
                         continue
 
                     if count == gpu_count and gpu_model.upper() in itype.upper():
@@ -619,8 +640,6 @@ async def websocket_gpu_availability(websocket: WebSocket):
                         break
 
         # Check each GPU and stream results
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         available = []
         results = {}  # key: (gpu_model, gpu_count) -> {"spot_locs": [], "ondemand_locs": [], ...}
 
@@ -1221,19 +1240,8 @@ def _select_instance_type(client, gpu_model: str, gpus_per_instance: int) -> str
     candidates = []
     for t in types:
         itype = t.instance_type
-        # Extract GPU count
-        digits = []
-        for ch in itype:
-            if ch.isdigit():
-                digits.append(ch)
-            else:
-                break
-        if not digits:
-            continue
-
-        try:
-            count = int("".join(digits))
-        except ValueError:
+        count = _extract_gpu_count(itype)
+        if count is None:
             continue
 
         if count != gpus_per_instance:
@@ -1324,8 +1332,6 @@ def _create_instance(
     hostname: str,
 ) -> str:
     """Create Verda instance."""
-    import time
-
     os_volume = None
     if storage_size:
         vol_name = f"os-{hostname}-{int(time.time())}"[:32]
@@ -1515,7 +1521,7 @@ def _create_job_with_progress(
         emit_progress({"type": "waiting_ip", "message": "IPアドレス割り当て待機中...", "elapsed": 0, "timeout": 900})
         ip = None
         start_time = time.time()
-        deadline = start_time + 900
+        deadline = start_time + IP_WAIT_TIMEOUT_SEC
         while time.time() < deadline:
             try:
                 instance = client.instances.get_by_id(instance_id)
@@ -1557,7 +1563,7 @@ def _create_job_with_progress(
         emit_progress({"type": "connecting_ssh", "message": "SSH接続中...", "attempt": 0, "max_attempts": 30})
         conn: Optional[SSHConnection] = None
         start_time = time.time()
-        ssh_deadline = start_time + 300
+        ssh_deadline = start_time + SSH_WAIT_TIMEOUT_SEC
         attempt = 0
         while time.time() < ssh_deadline:
             attempt += 1
@@ -1646,9 +1652,9 @@ def _create_job_with_progress(
                 emit_progress({"type": "training_log", "message": "警告: tmuxセッションの開始を確認できませんでした"})
 
             # Stream log file in real-time using tail -f
-            log_file = f"{remote_run_dir}/setup_env_train.log"
-            max_stream_time = 30  # seconds (increased for real-time feedback)
-            lines_to_show = 10  # Show more lines before completing
+            log_file = _get_log_file_path(job_data)
+            max_stream_time = LOG_STREAM_MAX_SEC
+            lines_to_show = LOG_STREAM_INITIAL_LINES
             lines_received = 0
             start_time = time.time()
             log_file_found = False
@@ -1853,9 +1859,8 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
     """Background task to deploy and start training.
 
     This waits for the instance IP, uploads files, and starts training.
+    Uses SSHConnection and RemoteExecutor for consistency with other code paths.
     """
-    import time
-
     job_data = _load_job(job_id)
     if not job_data:
         return
@@ -1872,7 +1877,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
     try:
         # Wait for IP (up to 15 minutes)
         ip = None
-        deadline = time.time() + 900
+        deadline = time.time() + IP_WAIT_TIMEOUT_SEC
         while time.time() < deadline:
             try:
                 instance = client.instances.get_by_id(instance_id)
@@ -1894,23 +1899,23 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
         job_data["status"] = "deploying"
         _save_job(job_data)
 
-        # SSH deployment
+        # SSH deployment using SSHConnection
         ssh_user = job_data.get("ssh_user", "root")
         ssh_private_key = job_data.get("ssh_private_key", "~/.ssh/id_rsa")
         remote_base_dir = job_data.get("remote_base_dir", "/root")
         remote_run_dir = f"{remote_base_dir}/lerobot_run"
 
         # Wait for SSH to be ready (up to 5 minutes)
-        ssh_client = None
-        ssh_deadline = time.time() + 300
+        conn: Optional[SSHConnection] = None
+        ssh_deadline = time.time() + SSH_WAIT_TIMEOUT_SEC
         while time.time() < ssh_deadline:
             try:
-                ssh_client = _connect_ssh(ip, ssh_user, ssh_private_key)
+                conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
                 break
             except Exception:
                 time.sleep(10)
 
-        if not ssh_client:
+        if not conn:
             job_data["status"] = "failed"
             job_data["error_message"] = "SSH connection failed"
             job_data["completed_at"] = datetime.now().isoformat()
@@ -1919,7 +1924,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
 
         try:
             # Create remote directory
-            _run_ssh_command(ssh_client, f"mkdir -p {remote_run_dir}")
+            conn.mkdir_p(remote_run_dir)
 
             # Upload remote scripts
             setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
@@ -1927,35 +1932,31 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
             entry_path = REMOTE_SCRIPTS_DIR / "entry.py"
 
             if setup_env_path.exists():
-                _upload_file_via_sftp(ssh_client, setup_env_path, f"{remote_run_dir}/setup_env.sh")
+                conn.upload_file(setup_env_path, f"{remote_run_dir}/setup_env.sh")
             if read_config_path.exists():
-                _upload_file_via_sftp(ssh_client, read_config_path, f"{remote_run_dir}/read_train_config.py")
+                conn.upload_file(read_config_path, f"{remote_run_dir}/read_train_config.py")
             if entry_path.exists():
-                _upload_file_via_sftp(ssh_client, entry_path, f"{remote_run_dir}/entry.py")
+                conn.upload_file(entry_path, f"{remote_run_dir}/entry.py")
 
             # Generate and upload training config YAML
             config_yaml = _generate_training_config_yaml(request, job_id)
-            _upload_content_via_sftp(ssh_client, config_yaml, f"{remote_run_dir}/train.remote.yaml")
+            conn.upload_content(config_yaml, f"{remote_run_dir}/train.remote.yaml")
 
             # Generate and upload .env file
             instance_id = job_data["instance_id"]
             env_content = _generate_env_file(job_id, instance_id)
-            _upload_content_via_sftp(ssh_client, env_content, f"{remote_run_dir}/.env")
+            conn.upload_content(env_content, f"{remote_run_dir}/.env")
 
             # Generate and upload instance_info.env
             instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
-            _upload_content_via_sftp(ssh_client, instance_info, f"{remote_run_dir}/instance_info.env")
+            conn.upload_content(instance_info, f"{remote_run_dir}/instance_info.env")
 
             # Make setup script executable
-            _run_ssh_command(ssh_client, f"chmod +x {remote_run_dir}/setup_env.sh")
+            conn.exec_command(f"chmod +x {remote_run_dir}/setup_env.sh")
 
-            # Start training in background with nohup
-            # The script will handle its own logging to setup_env_train.log
-            start_cmd = (
-                f"cd {remote_run_dir} && "
-                f"nohup bash setup_env.sh train > /dev/null 2>&1 &"
-            )
-            _run_ssh_command(ssh_client, start_cmd)
+            # Start training using RemoteExecutor with tmux
+            executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
+            executor.run_background("bash setup_env.sh train", session_name=TMUX_SESSION_NAME)
 
             # Update status to running
             job_data["status"] = "running"
@@ -1963,7 +1964,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
             _save_job(job_data)
 
         finally:
-            ssh_client.close()
+            conn.disconnect()
 
     except Exception as e:
         job_data["status"] = "failed"
@@ -2475,11 +2476,6 @@ def _list_configs() -> list[dict]:
         return []
 
     configs = []
-    try:
-        import yaml
-    except ImportError:
-        return []
-
     for config_file in CONFIGS_DIR.glob("*.yaml"):
         try:
             with open(config_file, encoding="utf-8") as f:
@@ -2507,11 +2503,6 @@ def _list_configs() -> list[dict]:
 
 def _load_config(config_id: str) -> Optional[dict]:
     """Load config from file."""
-    try:
-        import yaml
-    except ImportError:
-        return None
-
     config_file = _get_config_file(config_id)
     if not config_file.exists():
         return None
@@ -2522,11 +2513,6 @@ def _load_config(config_id: str) -> Optional[dict]:
 
 def _save_config(config_id: str, config_data: dict) -> Path:
     """Save config to file."""
-    try:
-        import yaml
-    except ImportError:
-        raise HTTPException(status_code=500, detail="PyYAML not installed")
-
     CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     config_file = _get_config_file(config_id)
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2963,9 +2949,7 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
         await websocket.send_json({"type": "connected", "message": "SSH接続完了"})
 
         # Determine log file path
-        mode = job_data.get("mode", "train")
-        remote_base_dir = job_data.get("remote_base_dir", "/root")
-        log_file = f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+        log_file = _get_log_file_path(job_data)
 
         # Start tail -f in a channel
         transport = ssh_conn.client.get_transport()
@@ -3123,9 +3107,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
         await _send_progress(websocket, ssh_conn.client, job_data)
 
         # Determine log file path for later use
-        mode = job_data.get("mode", "train")
-        remote_base_dir = job_data.get("remote_base_dir", "/root")
-        log_file = f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+        log_file = _get_log_file_path(job_data)
 
         last_heartbeat = asyncio.get_event_loop().time()
         last_progress_update = asyncio.get_event_loop().time()
@@ -3304,9 +3286,7 @@ async def _send_remote_status(websocket: WebSocket, ssh_client) -> None:
 async def _send_progress(websocket: WebSocket, ssh_client, job_data: dict) -> None:
     """Send training progress via existing SSH connection."""
     try:
-        mode = job_data.get("mode", "train")
-        remote_base_dir = job_data.get("remote_base_dir", "/root")
-        log_file = f"{remote_base_dir}/lerobot_run/setup_env_{mode}.log"
+        log_file = _get_log_file_path(job_data)
 
         loop = asyncio.get_event_loop()
 
