@@ -23,6 +23,7 @@ class DatasetInfo(BaseModel):
     """Dataset information for API responses with local status."""
 
     id: str = Field(..., description="Dataset ID")
+    short_id: Optional[str] = Field(None, description="6-char alphanumeric short ID for job naming")
     name: str = Field(..., description="Dataset name")
     source: DataSource = Field(..., description="Data source: r2, hub, local")
     status: DataStatus = Field(..., description="Data status")

@@ -158,6 +158,7 @@ class NewTrainingState:
 
     # Step 3: Dataset
     dataset_id: Optional[str] = None
+    dataset_short_id: Optional[str] = None  # 6-char alphanumeric ID for job naming
 
     # Step 4: Training params
     steps: int = 100000
@@ -177,18 +178,21 @@ class NewTrainingState:
     job_name: Optional[str] = None
 
     def generate_job_name(self) -> str:
-        """Generate job name from state."""
+        """Generate job name from state.
+
+        Format: {policy}_{dataset_short_id}_{author}_{YYMMDD_HHMMSS}_{comment}
+        Example: pi05_a1b2c3_kinoue_260109_143052
+        """
         parts = []
         if self.policy_type:
             parts.append(self.policy_type)
-        if self.dataset_id:
-            # Use first part of dataset ID
-            ds_short = self.dataset_id.split("/")[-1][:20]
-            parts.append(ds_short)
+        if self.dataset_short_id:
+            parts.append(self.dataset_short_id)  # 6-char short ID
         if self.author:
             parts.append(self.author)
-        date_str = datetime.now().strftime("%Y%m%d")
-        parts.append(date_str)
+        # Use 2-digit year and include time (YYMMDD_HHMMSS)
+        datetime_str = datetime.now().strftime("%y%m%d_%H%M%S")
+        parts.append(datetime_str)
         if self.comment:
             parts.append(self.comment)
         return "_".join(parts)
@@ -559,6 +563,8 @@ class TrainingWizard(BaseMenu):
                 return "back"
 
         self.state.dataset_id = dataset
+        # Get short_id from dataset info for job naming
+        self.state.dataset_short_id = ds_info.get("short_id")
         return "next"
 
     def _step4_training_params(self) -> str:
@@ -937,8 +943,20 @@ class TrainingWizard(BaseMenu):
 
         # Progress state for Rich Live display
         console = Console()
+        # Progress phases for visual feedback
+        PHASES = [
+            ("validating", "1. 設定検証"),
+            ("selecting", "2. インスタンス選択"),
+            ("creating", "3. インスタンス作成"),
+            ("waiting_ip", "4. IP割り当て待機"),
+            ("connecting", "5. SSH接続"),
+            ("deploying", "6. ファイル転送"),
+            ("starting", "7. 学習開始"),
+        ]
+
         current = {
-            "phase": "",
+            "phase_index": 0,
+            "phase_name": "",
             "message": "",
             "elapsed": 0,
             "timeout": 0,
@@ -949,17 +967,36 @@ class TrainingWizard(BaseMenu):
             "instance_id": "",
             "ip": "",
             "file": "",
+            "files_uploaded": 0,
+            "training_logs": [],  # Recent log lines from training startup
         }
 
         def make_progress_panel():
             """Create progress panel for Live display."""
             table = Table(show_header=False, box=None, padding=(0, 1))
-            table.add_column("Label", style="cyan")
+            table.add_column("Label", style="cyan", width=14)
             table.add_column("Value")
 
             table.add_row("ジョブ名:", self.state.job_name or "")
-            table.add_row("状態:", current["message"])
 
+            # Show phase progress bar
+            phase_idx = current["phase_index"]
+            phase_bar = ""
+            for i, (_, name) in enumerate(PHASES):
+                if i < phase_idx:
+                    phase_bar += "✓ "
+                elif i == phase_idx:
+                    phase_bar += "● "
+                else:
+                    phase_bar += "○ "
+            table.add_row("進捗:", phase_bar.strip())
+
+            # Current phase and message
+            if current["phase_name"]:
+                table.add_row("フェーズ:", current["phase_name"])
+            table.add_row("状態:", current["message"] or "...")
+
+            # Instance info
             if current.get("instance_type"):
                 table.add_row("インスタンス:", current["instance_type"])
             if current.get("location"):
@@ -967,18 +1004,40 @@ class TrainingWizard(BaseMenu):
             if current.get("instance_id"):
                 table.add_row("インスタンスID:", current["instance_id"][:16] + "...")
 
+            # Waiting indicator with progress bar
             if current.get("elapsed") and current.get("timeout"):
-                pct = (current["elapsed"] / current["timeout"]) * 100
-                table.add_row("待機:", f"{current['elapsed']}s / {current['timeout']}s ({pct:.0f}%)")
+                elapsed = current["elapsed"]
+                timeout = current["timeout"]
+                pct = min((elapsed / timeout) * 100, 100)
+                bar_len = 20
+                filled = int(bar_len * pct / 100)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                table.add_row("待機:", f"[{bar}] {elapsed}s/{timeout}s")
 
+            # SSH attempts
             if current.get("attempt") and current.get("max_attempts"):
-                table.add_row("試行:", f"{current['attempt']}/{current['max_attempts']}")
+                attempt = current["attempt"]
+                max_attempts = current["max_attempts"]
+                table.add_row("SSH試行:", f"{attempt}/{max_attempts}")
 
+            # IP
             if current.get("ip"):
                 table.add_row("IP:", current["ip"])
 
+            # File upload progress
             if current.get("file"):
-                table.add_row("ファイル:", current["file"])
+                table.add_row("転送中:", current["file"])
+            if current.get("files_uploaded"):
+                table.add_row("転送済み:", f"{current['files_uploaded']}ファイル")
+
+            # Training startup logs (real-time)
+            if current.get("training_logs"):
+                table.add_row("", "")  # Spacer
+                table.add_row("ログ:", "[dim]リアルタイム[/dim]")
+                for log_line in current["training_logs"][-3:]:  # Show last 3 lines
+                    # Truncate long lines
+                    display_line = log_line[:60] + "..." if len(log_line) > 60 else log_line
+                    table.add_row("", f"[dim]{display_line}[/dim]")
 
             return Panel(table, title="🚀 ジョブ作成中", border_style="cyan")
 
@@ -987,6 +1046,30 @@ class TrainingWizard(BaseMenu):
             msg_type = data.get("type", "")
             current["message"] = data.get("message", "")
 
+            # Update phase based on message type
+            if msg_type in ("start", "validating", "validated"):
+                current["phase_index"] = 0
+                current["phase_name"] = "設定検証"
+            elif msg_type in ("selecting_instance", "instance_selected", "getting_ssh_key", "finding_location", "location_found"):
+                current["phase_index"] = 1
+                current["phase_name"] = "インスタンス選択"
+            elif msg_type in ("creating_instance", "instance_created"):
+                current["phase_index"] = 2
+                current["phase_name"] = "インスタンス作成"
+            elif msg_type in ("waiting_ip", "ip_assigned"):
+                current["phase_index"] = 3
+                current["phase_name"] = "IP割り当て待機"
+            elif msg_type in ("connecting_ssh", "ssh_ready"):
+                current["phase_index"] = 4
+                current["phase_name"] = "SSH接続"
+            elif msg_type == "deploying":
+                current["phase_index"] = 5
+                current["phase_name"] = "ファイル転送"
+            elif msg_type == "starting_training":
+                current["phase_index"] = 6
+                current["phase_name"] = "学習開始"
+
+            # Handle specific data
             if msg_type == "instance_selected":
                 current["instance_type"] = data.get("instance_type", "")
             elif msg_type == "location_found":
@@ -1013,6 +1096,14 @@ class TrainingWizard(BaseMenu):
                 current["timeout"] = 0
             elif msg_type == "deploying":
                 current["file"] = data.get("file", "")
+                current["files_uploaded"] += 1
+            elif msg_type == "starting_training":
+                current["file"] = ""  # Clear file info
+            elif msg_type == "training_log":
+                # Append log line (keep last 10 for memory efficiency)
+                current["training_logs"].append(data.get("message", ""))
+                if len(current["training_logs"]) > 10:
+                    current["training_logs"] = current["training_logs"][-10:]
 
         try:
             with Live(make_progress_panel(), console=console, refresh_per_second=4) as live:
@@ -1278,6 +1369,16 @@ class ContinueTrainingWizard(BaseMenu):
         if selection == "original":
             self.state.use_original_dataset = True
             self.state.dataset_id = self.state.original_dataset_id
+            # Get short_id for original dataset from API
+            try:
+                datasets = self.api.list_datasets()
+                ds_list = datasets.get("datasets", [])
+                for d in ds_list:
+                    if isinstance(d, dict) and d.get("id") == self.state.original_dataset_id:
+                        self.state.dataset_short_id = d.get("short_id")
+                        break
+            except Exception:
+                pass  # Will use None if not found
             return "next"
 
         # New dataset selection
@@ -1380,6 +1481,8 @@ class ContinueTrainingWizard(BaseMenu):
                 return "back"
 
         self.state.dataset_id = dataset
+        # Get short_id from dataset info for job naming
+        self.state.dataset_short_id = ds_info.get("short_id")
         return "next"
 
     def _step4_training_params(self) -> str:

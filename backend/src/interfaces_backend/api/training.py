@@ -1696,6 +1696,68 @@ def _create_job_with_progress(
             )
             _run_ssh_command(ssh_client, start_cmd)
 
+            # Stream log file in real-time using tail -f
+            log_file = f"{remote_run_dir}/setup_env_train.log"
+            max_stream_time = 15  # seconds
+            lines_to_show = 5  # Show at least this many lines before completing
+            lines_received = 0
+            start_time = time.time()
+            log_file_found = False
+
+            try:
+                # Wait for log file to exist (max 5 seconds)
+                emit_progress({"type": "training_log", "message": "ログファイル待機中..."})
+                for i in range(10):
+                    check_result = _run_ssh_command(
+                        ssh_client,
+                        f"test -f {log_file} && echo 'exists' || echo 'not_exists'",
+                        timeout=2
+                    )
+                    if "exists" in check_result:
+                        log_file_found = True
+                        emit_progress({"type": "training_log", "message": "ログストリーミング開始..."})
+                        break
+                    time.sleep(0.5)
+
+                if not log_file_found:
+                    emit_progress({"type": "training_log", "message": "ログファイル作成待ち (バックグラウンドで起動中)..."})
+
+                # Use tail -f to stream logs in real-time
+                transport = ssh_client.get_transport()
+                channel = transport.open_session()
+                # Use tail -F (capital F) to handle file that doesn't exist yet
+                channel.exec_command(f"tail -F {log_file} 2>/dev/null")
+                channel.setblocking(0)  # Non-blocking mode
+
+                buffer = ""
+                while time.time() - start_time < max_stream_time:
+                    # Check if data is available
+                    if channel.recv_ready():
+                        chunk = channel.recv(4096).decode("utf-8", errors="replace")
+                        buffer += chunk
+
+                        # Process complete lines
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            if line.strip():
+                                emit_progress({
+                                    "type": "training_log",
+                                    "message": line.strip(),
+                                })
+                                lines_received += 1
+
+                        # Exit once we have enough lines
+                        if lines_received >= lines_to_show:
+                            break
+                    else:
+                        time.sleep(0.1)
+
+                channel.close()
+
+            except Exception as e:
+                logger.warning(f"Log streaming error (non-fatal): {e}")
+                emit_progress({"type": "training_log", "message": f"ログ取得エラー: {e}"})
+
             # Update status to running
             job_data["status"] = "running"
             job_data["updated_at"] = datetime.now().isoformat()

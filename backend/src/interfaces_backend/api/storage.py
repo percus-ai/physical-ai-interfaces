@@ -107,6 +107,7 @@ async def list_datasets(
         seen_ids.add(ds.id)
         datasets_info.append(DatasetInfo(
             id=ds.id,
+            short_id=ds.short_id,
             name=ds.name,
             source=ds.source,
             status=ds.status,
