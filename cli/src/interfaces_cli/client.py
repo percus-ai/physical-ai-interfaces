@@ -1073,6 +1073,46 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
+    # =========================================================================
+    # Verda Storage
+    # =========================================================================
+
+    def list_verda_storage(self) -> Dict[str, Any]:
+        """GET /api/training/verda/storage - List Verda storage volumes."""
+        response = self._client.get("/api/training/verda/storage")
+        response.raise_for_status()
+        return response.json()
+
+    def delete_verda_storage(self, volume_ids: List[str]) -> Dict[str, Any]:
+        """POST /api/training/verda/storage/delete - Logical delete volumes."""
+        response = self._client.post(
+            "/api/training/verda/storage/delete",
+            json={"volume_ids": volume_ids},
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def restore_verda_storage(self, volume_ids: List[str]) -> Dict[str, Any]:
+        """POST /api/training/verda/storage/restore - Restore volumes from trash."""
+        response = self._client.post(
+            "/api/training/verda/storage/restore",
+            json={"volume_ids": volume_ids},
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def purge_verda_storage(self, volume_ids: List[str]) -> Dict[str, Any]:
+        """POST /api/training/verda/storage/purge - Permanently delete volumes."""
+        response = self._client.post(
+            "/api/training/verda/storage/purge",
+            json={"volume_ids": volume_ids},
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def get_gpu_availability_ws(
         self,
         on_checking: Optional[Callable[[str], None]] = None,
@@ -1278,6 +1318,65 @@ class PhiClient:
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url}/api/training/ws/jobs/{job_id}/session"
         return JobSessionWebSocket(ws_url, job_id)
+
+    # =========================================================================
+    # Verda Storage (WebSocket)
+    # =========================================================================
+
+    def verda_storage_action_ws(
+        self,
+        action: str,
+        volume_ids: List[str],
+        on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run Verda storage action via WebSocket with progress."""
+        try:
+            import websocket
+        except ImportError:
+            error_msg = "websocket-client not installed. Run: pip install websocket-client"
+            if on_error:
+                on_error(error_msg)
+            return {"error": error_msg}
+
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/training/ws/verda/storage"
+        result: Dict[str, Any] = {}
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=None)
+            ws.send(json.dumps({"action": action, "volume_ids": volume_ids}))
+
+            while True:
+                message = ws.recv()
+                data = json.loads(message)
+                if on_message:
+                    on_message(data)
+
+                if data.get("type") == "error":
+                    error_msg = data.get("error", "Unknown error")
+                    if on_error:
+                        on_error(error_msg)
+                    result = {"error": error_msg}
+                    break
+
+                if data.get("type") == "complete":
+                    result = data.get("result", {})
+                    break
+
+            ws.close()
+        except websocket.WebSocketConnectionClosedException:
+            error_msg = "WebSocket connection closed"
+            if on_error:
+                on_error(error_msg)
+            result = {"error": error_msg}
+        except Exception as e:
+            error_msg = str(e)
+            if on_error:
+                on_error(error_msg)
+            result = {"error": error_msg}
+
+        return result
 
     def get_training_job_progress(self, job_id: str) -> Dict[str, Any]:
         """GET /api/training/jobs/{job_id}/progress - Get progress."""

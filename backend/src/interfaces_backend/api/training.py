@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,11 @@ from interfaces_backend.models.training import (
     # GPU availability
     GpuAvailabilityInfo,
     GpuAvailabilityResponse,
+    VerdaStorageActionFailure,
+    VerdaStorageActionRequest,
+    VerdaStorageActionResult,
+    VerdaStorageItem,
+    VerdaStorageListResponse,
 )
 from percus_ai.storage import get_jobs_dir, get_configs_dir, get_project_root, get_models_dir
 from percus_ai.training.ssh.client import SSHConnection
@@ -236,6 +242,90 @@ def _get_verda_client():
         return None
 
     return DataCrunchClient(client_id, client_secret)
+
+
+def _build_verda_storage_item(volume: object, state: str) -> VerdaStorageItem:
+    """Convert Verda volume to API response model."""
+    return VerdaStorageItem(
+        id=getattr(volume, "id", ""),
+        name=getattr(volume, "name", None),
+        size_gb=int(getattr(volume, "size", 0) or 0),
+        status=getattr(volume, "status", "unknown"),
+        state=state,
+        is_os_volume=bool(getattr(volume, "is_os_volume", False)),
+        volume_type=getattr(volume, "type", None),
+        location=getattr(volume, "location", None),
+        instance_id=getattr(volume, "instance_id", None),
+        created_at=getattr(volume, "created_at", None),
+        deleted_at=getattr(volume, "deleted_at", None),
+    )
+
+
+def _collect_verda_volumes(client: DataCrunchClient) -> dict[str, tuple[str, object]]:
+    """Collect Verda volumes and map by ID."""
+    volumes_by_id: dict[str, tuple[str, object]] = {}
+    active_volumes = client.volumes.get()
+    for volume in active_volumes:
+        volumes_by_id[getattr(volume, "id", "")] = ("active", volume)
+    trash_volumes = client.volumes.get_in_trash()
+    for volume in trash_volumes:
+        volumes_by_id[getattr(volume, "id", "")] = ("deleted", volume)
+    return volumes_by_id
+
+
+def _restore_verda_volumes(client: DataCrunchClient, volume_ids: list[str]) -> None:
+    """Restore volumes from trash via Verda API."""
+    payload = {"action": "restore", "id": volume_ids}
+    client._http_client.put("/volumes", json=payload)
+
+
+def _chunk_list(items: list[str], chunk_size: int = 20) -> list[list[str]]:
+    """Split items into smaller chunks."""
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+_verda_client_local = threading.local()
+
+
+def _get_thread_verda_client() -> Optional[DataCrunchClient]:
+    """Get thread-local Verda client."""
+    client = getattr(_verda_client_local, "client", None)
+    if client is None:
+        client = _get_verda_client()
+        _verda_client_local.client = client
+    return client
+
+
+def _perform_verda_volume_action(action: str, volume_id: str, is_permanent: bool) -> None:
+    """Perform a Verda volume action for a single volume."""
+    client = _get_thread_verda_client()
+    if not client:
+        raise RuntimeError("Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)")
+
+    if action == "delete":
+        client.volumes.delete(volume_id, is_permanent=is_permanent)
+    elif action == "restore":
+        _restore_verda_volumes(client, [volume_id])
+    else:
+        raise ValueError(f"Unsupported action: {action}")
+
+
+def _perform_verda_volume_action_batch(
+    action: str,
+    volume_ids: list[str],
+    is_permanent: bool,
+) -> None:
+    """Perform a Verda volume action for a batch of volumes."""
+    client = _get_thread_verda_client()
+    if not client:
+        raise RuntimeError("Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)")
+
+    if action == "delete":
+        client.volumes.delete(volume_ids, is_permanent=is_permanent)
+    elif action == "restore":
+        _restore_verda_volumes(client, volume_ids)
+    else:
+        raise ValueError(f"Unsupported action: {action}")
 
 
 def _check_instance_via_api(instance_id: str) -> Optional[str]:
@@ -575,6 +665,226 @@ async def get_gpu_availability():
     return GpuAvailabilityResponse(available=available)
 
 
+@router.get("/verda/storage", response_model=VerdaStorageListResponse)
+async def list_verda_storage():
+    """List Verda storage volumes (active + deleted)."""
+    client = _get_verda_client()
+    if not client:
+        raise HTTPException(
+            status_code=503,
+            detail="Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)",
+        )
+
+    try:
+        volumes_by_id = _collect_verda_volumes(client)
+    except Exception as e:
+        logger.exception("Failed to list Verda volumes")
+        raise HTTPException(status_code=502, detail=f"Verda APIに接続できません: {e}") from e
+
+    items = [
+        _build_verda_storage_item(volume, state)
+        for _, (state, volume) in volumes_by_id.items()
+        if getattr(volume, "id", "")
+    ]
+    items.sort(key=lambda item: (item.state != "deleted", item.created_at or ""))
+    return VerdaStorageListResponse(items=items, total=len(items))
+
+
+@router.post("/verda/storage/delete", response_model=VerdaStorageActionResult)
+async def delete_verda_storage(request: VerdaStorageActionRequest):
+    """Delete Verda storage volumes (logical delete)."""
+    client = _get_verda_client()
+    if not client:
+        raise HTTPException(
+            status_code=503,
+            detail="Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)",
+        )
+
+    logger.info(f"Verda storage delete requested: {request.volume_ids}")
+    result = VerdaStorageActionResult()
+    try:
+        volumes_by_id = _collect_verda_volumes(client)
+    except Exception as e:
+        logger.exception("Failed to list Verda volumes for delete")
+        raise HTTPException(status_code=502, detail=f"Verda APIに接続できません: {e}") from e
+
+    eligible_ids: list[str] = []
+    for volume_id in request.volume_ids:
+        state_volume = volumes_by_id.get(volume_id)
+        if not state_volume:
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="対象が見つかりません（既に削除済みの可能性）",
+                )
+            )
+            continue
+
+        state, _ = state_volume
+        if state != "active":
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="既に削除済みのストレージです",
+                )
+            )
+            continue
+
+        eligible_ids.append(volume_id)
+
+    for chunk in _chunk_list(eligible_ids):
+        try:
+            client.volumes.delete(chunk, is_permanent=False)
+            result.success_ids.extend(chunk)
+        except Exception as e:
+            logger.exception(f"Failed to delete volume chunk: {chunk}")
+            for volume_id in chunk:
+                result.failed.append(
+                    VerdaStorageActionFailure(
+                        id=volume_id,
+                        reason=str(e),
+                    )
+                )
+
+    logger.info(
+        "Verda storage delete result: success=%s failed=%s skipped=%s",
+        len(result.success_ids),
+        len(result.failed),
+        len(result.skipped),
+    )
+    return result
+
+
+@router.post("/verda/storage/restore", response_model=VerdaStorageActionResult)
+async def restore_verda_storage(request: VerdaStorageActionRequest):
+    """Restore Verda storage volumes from trash."""
+    client = _get_verda_client()
+    if not client:
+        raise HTTPException(
+            status_code=503,
+            detail="Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)",
+        )
+
+    logger.info(f"Verda storage restore requested: {request.volume_ids}")
+    result = VerdaStorageActionResult()
+    try:
+        volumes_by_id = _collect_verda_volumes(client)
+    except Exception as e:
+        logger.exception("Failed to list Verda volumes for restore")
+        raise HTTPException(status_code=502, detail=f"Verda APIに接続できません: {e}") from e
+
+    eligible_ids: list[str] = []
+    for volume_id in request.volume_ids:
+        state_volume = volumes_by_id.get(volume_id)
+        if not state_volume:
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="対象が見つかりません（既に削除済みの可能性）",
+                )
+            )
+            continue
+
+        state, _ = state_volume
+        if state != "deleted":
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="削除済みではありません",
+                )
+            )
+            continue
+
+        eligible_ids.append(volume_id)
+
+    for chunk in _chunk_list(eligible_ids):
+        try:
+            _restore_verda_volumes(client, chunk)
+            result.success_ids.extend(chunk)
+        except Exception as e:
+            logger.exception(f"Failed to restore volume chunk: {chunk}")
+            for volume_id in chunk:
+                result.failed.append(
+                    VerdaStorageActionFailure(
+                        id=volume_id,
+                        reason=str(e),
+                    )
+                )
+
+    logger.info(
+        "Verda storage restore result: success=%s failed=%s skipped=%s",
+        len(result.success_ids),
+        len(result.failed),
+        len(result.skipped),
+    )
+    return result
+
+
+@router.post("/verda/storage/purge", response_model=VerdaStorageActionResult)
+async def purge_verda_storage(request: VerdaStorageActionRequest):
+    """Permanently delete Verda storage volumes from trash."""
+    client = _get_verda_client()
+    if not client:
+        raise HTTPException(
+            status_code=503,
+            detail="Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)",
+        )
+
+    logger.info(f"Verda storage purge requested: {request.volume_ids}")
+    result = VerdaStorageActionResult()
+    try:
+        volumes_by_id = _collect_verda_volumes(client)
+    except Exception as e:
+        logger.exception("Failed to list Verda volumes for purge")
+        raise HTTPException(status_code=502, detail=f"Verda APIに接続できません: {e}") from e
+
+    eligible_ids: list[str] = []
+    for volume_id in request.volume_ids:
+        state_volume = volumes_by_id.get(volume_id)
+        if not state_volume:
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="対象が見つかりません（既に削除済みの可能性）",
+                )
+            )
+            continue
+
+        state, _ = state_volume
+        if state != "deleted":
+            result.skipped.append(
+                VerdaStorageActionFailure(
+                    id=volume_id,
+                    reason="削除済みではありません",
+                )
+            )
+            continue
+
+        eligible_ids.append(volume_id)
+
+    for chunk in _chunk_list(eligible_ids):
+        try:
+            client.volumes.delete(chunk, is_permanent=True)
+            result.success_ids.extend(chunk)
+        except Exception as e:
+            logger.exception(f"Failed to purge volume chunk: {chunk}")
+            for volume_id in chunk:
+                result.failed.append(
+                    VerdaStorageActionFailure(
+                        id=volume_id,
+                        reason=str(e),
+                    )
+                )
+
+    logger.info(
+        "Verda storage purge result: success=%s failed=%s skipped=%s",
+        len(result.success_ids),
+        len(result.failed),
+        len(result.skipped),
+    )
+    return result
+
+
 @router.websocket("/ws/gpu-availability")
 async def websocket_gpu_availability(websocket: WebSocket):
     """Stream GPU availability check results in real-time.
@@ -715,6 +1025,145 @@ async def websocket_gpu_availability(websocket: WebSocket):
         await websocket.send_json({"type": "error", "error": str(e)})
 
     await websocket.close()
+
+
+@router.websocket("/ws/verda/storage")
+async def websocket_verda_storage(websocket: WebSocket):
+    """Run Verda storage actions with progress via WebSocket."""
+    await websocket.accept()
+
+    try:
+        request = await websocket.receive_json()
+    except Exception:
+        await websocket.send_json({"type": "error", "error": "Invalid request"})
+        await websocket.close()
+        return
+
+    action = request.get("action")
+    volume_ids = request.get("volume_ids", [])
+    if action not in ("delete", "restore", "purge"):
+        await websocket.send_json({"type": "error", "error": "Unsupported action"})
+        await websocket.close()
+        return
+
+    client = _get_verda_client()
+    if not client:
+        await websocket.send_json(
+            {"type": "error", "error": "Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)"}
+        )
+        await websocket.close()
+        return
+
+    try:
+        volumes_by_id = _collect_verda_volumes(client)
+    except Exception as e:
+        logger.exception("Failed to list Verda volumes for WS action")
+        await websocket.send_json({"type": "error", "error": f"Verda APIに接続できません: {e}"})
+        await websocket.close()
+        return
+
+    required_state = "active" if action == "delete" else "deleted"
+    is_permanent = action == "purge"
+
+    skipped: list[dict] = []
+    eligible_ids: list[str] = []
+    for volume_id in volume_ids:
+        state_volume = volumes_by_id.get(volume_id)
+        if not state_volume:
+            skipped.append(
+                {"id": volume_id, "reason": "対象が見つかりません（既に削除済みの可能性）"}
+            )
+            continue
+        state, _ = state_volume
+        if state != required_state:
+            skipped.append(
+                {
+                    "id": volume_id,
+                    "reason": "削除済みではありません"
+                    if required_state == "deleted"
+                    else "既に削除済みのストレージです",
+                }
+            )
+            continue
+        eligible_ids.append(volume_id)
+
+    total = len(volume_ids)
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    done_count = {"value": 0}
+    done_lock = threading.Lock()
+
+    def emit_progress(volume_id: str, status: str, reason: Optional[str] = None) -> None:
+        with done_lock:
+            done_count["value"] += 1
+            current = done_count["value"]
+        payload = {
+            "type": "progress",
+            "id": volume_id,
+            "status": status,
+            "done": current,
+            "total": total,
+        }
+        if reason:
+            payload["reason"] = reason
+        loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+    loop.call_soon_threadsafe(
+        queue.put_nowait,
+        {"type": "start", "total": total, "eligible": len(eligible_ids)},
+    )
+
+    for item in skipped:
+        emit_progress(item["id"], "skipped", item["reason"])
+
+    def worker() -> None:
+        result = {
+            "success_ids": [],
+            "failed": [],
+            "skipped": skipped,
+        }
+        try:
+            batch_action = "delete" if action == "purge" else action
+            chunks = _chunk_list(eligible_ids, chunk_size=5)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {
+                    executor.submit(
+                        _perform_verda_volume_action_batch,
+                        batch_action,
+                        chunk,
+                        is_permanent,
+                    ): chunk
+                    for chunk in chunks
+                }
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    try:
+                        future.result()
+                        result["success_ids"].extend(chunk)
+                        for volume_id in chunk:
+                            emit_progress(volume_id, "success")
+                    except Exception as e:
+                        reason = str(e)
+                        for volume_id in chunk:
+                            result["failed"].append({"id": volume_id, "reason": reason})
+                            emit_progress(volume_id, "failed", reason)
+        finally:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, {"type": "complete", "result": result}
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    try:
+        while True:
+            message = await queue.get()
+            await websocket.send_json(message)
+            if message.get("type") == "complete":
+                break
+    except WebSocketDisconnect:
+        return
+    finally:
+        await websocket.close()
 
 
 @router.get("/jobs", response_model=JobListResponse)

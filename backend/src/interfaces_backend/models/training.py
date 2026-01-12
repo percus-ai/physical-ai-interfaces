@@ -266,6 +266,53 @@ class CheckpointDownloadResponse(BaseModel):
     message: str
 
 
+# --- Verda Storage Models ---
+
+
+class VerdaStorageItem(BaseModel):
+    """Verda storage volume summary."""
+
+    id: str
+    name: Optional[str] = None
+    size_gb: int = 0
+    status: str = "unknown"
+    state: str = "active"  # active or deleted
+    is_os_volume: bool = False
+    volume_type: Optional[str] = None
+    location: Optional[str] = None
+    instance_id: Optional[str] = None
+    created_at: Optional[str] = None
+    deleted_at: Optional[str] = None
+
+
+class VerdaStorageListResponse(BaseModel):
+    """Response for Verda storage list."""
+
+    items: list[VerdaStorageItem]
+    total: int
+
+
+class VerdaStorageActionRequest(BaseModel):
+    """Request for Verda storage actions."""
+
+    volume_ids: list[str]
+
+
+class VerdaStorageActionFailure(BaseModel):
+    """Failure detail for Verda storage actions."""
+
+    id: str
+    reason: str
+
+
+class VerdaStorageActionResult(BaseModel):
+    """Result for Verda storage actions."""
+
+    success_ids: list[str] = Field(default_factory=list)
+    failed: list[VerdaStorageActionFailure] = Field(default_factory=list)
+    skipped: list[VerdaStorageActionFailure] = Field(default_factory=list)
+
+
 class DatasetCompatibilityCheckRequest(BaseModel):
     """Request for dataset compatibility check."""
 

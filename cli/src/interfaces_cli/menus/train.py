@@ -16,6 +16,7 @@ from InquirerPy.base.control import Choice
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
 from interfaces_cli.banner import format_size, show_section_header
@@ -342,6 +343,7 @@ class TrainMenu(BaseMenu):
             Choice(value="new", name="🚀 [NEW] 新規学習"),
             Choice(value="continue", name="🔄 [CONTINUE] 継続学習"),
             Choice(value="configs", name="⚙️  [CONFIGS] 学習設定管理"),
+            Choice(value="verda_storage", name="🗄️  Verdaストレージ管理"),
         ]
 
     def handle_choice(self, choice: Any) -> MenuResult:
@@ -353,12 +355,313 @@ class TrainMenu(BaseMenu):
             return self.submenu(ContinueTrainingWizard)
         if choice == "configs":
             return self.submenu(TrainingConfigsMenu)
+        if choice == "verda_storage":
+            return self.submenu(VerdaStorageMenu)
         return MenuResult.CONTINUE
 
 
 # =============================================================================
 # Training Wizard (7 Steps) - 新規学習
 # =============================================================================
+
+
+class VerdaStorageMenu(BaseMenu):
+    """Verda storage management menu."""
+
+    title = "Verdaストレージ管理"
+
+    def get_choices(self) -> List[Choice]:
+        return [
+            Choice(value="list", name="📄 ストレージ一覧"),
+            Choice(
+                value="delete",
+                name="🗑️  ストレージ削除（論理削除・96時間で自動完全削除）",
+            ),
+            Choice(value="restore", name="♻️  ストレージ復活（Trashから復元）"),
+            Choice(value="purge", name="🔥 ストレージ完全削除（Trashから物理削除）"),
+        ]
+
+    def handle_choice(self, choice: Any) -> MenuResult:
+        if choice == "list":
+            return self._show_storage_list()
+        if choice == "delete":
+            return self._delete_storage()
+        if choice == "restore":
+            return self._restore_storage()
+        if choice == "purge":
+            return self._purge_storage()
+        return MenuResult.CONTINUE
+
+    def _fetch_storage_items(self) -> List[Dict[str, Any]]:
+        """Fetch storage items from backend."""
+        result = self.api.list_verda_storage()
+        return result.get("items", [])
+
+    def _show_storage_list(self) -> MenuResult:
+        """Show Verda storage list."""
+        show_section_header("Verdaストレージ一覧")
+
+        try:
+            items = self._fetch_storage_items()
+        except Exception as e:
+            self.print_error(f"取得に失敗しました: {e}")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        if not items:
+            self.print_info("ストレージがありません")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        filter_choice = inquirer.select(
+            message="表示フィルタ:",
+            choices=[
+                Choice(value="all", name="全件"),
+                Choice(value="active", name="有効のみ"),
+                Choice(value="deleted", name="削除済みのみ"),
+            ],
+            style=hacker_style,
+        ).execute()
+
+        if filter_choice != "all":
+            items = [item for item in items if item.get("state") == filter_choice]
+
+        if not items:
+            self.print_info("対象のストレージがありません")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("ID", style="white")
+        table.add_column("名前", style="white")
+        table.add_column("サイズ", style="white", justify="right")
+        table.add_column("状態", style="white")
+        table.add_column("削除日時", style="white")
+
+        for item in items:
+            state = item.get("state", "active")
+            state_label = "削除済み" if state == "deleted" else "有効"
+            status = item.get("status", "")
+            status_label = f"{state_label} ({status})" if status else state_label
+            table.add_row(
+                item.get("id", "-"),
+                item.get("name") or "-",
+                f"{item.get('size_gb', 0)}GB",
+                status_label,
+                item.get("deleted_at") or "-",
+            )
+
+        Console().print(table)
+        self.wait_for_enter()
+        return MenuResult.CONTINUE
+
+    def _select_storage_ids(self, items: List[Dict[str, Any]], state: str) -> List[str]:
+        """Select storage IDs filtered by state."""
+        filtered = [item for item in items if item.get("state") == state]
+        if not filtered:
+            return []
+
+        choices = []
+        for item in filtered:
+            name = item.get("name") or item.get("id", "-")
+            size = item.get("size_gb", 0)
+            status = item.get("status", "")
+            deleted_at = item.get("deleted_at")
+            label_parts = [name, f"{size}GB"]
+            if status:
+                label_parts.append(status)
+            if deleted_at:
+                label_parts.append(f"deleted:{deleted_at}")
+            label = " | ".join(label_parts)
+            choices.append(Choice(value=item.get("id"), name=label))
+
+        selected = inquirer.checkbox(
+            message="対象を選択:",
+            choices=choices,
+            style=hacker_style,
+            instruction="(Spaceで選択/解除、Enterで確定)",
+            keybindings={"toggle": [{"key": "space"}]},
+        ).execute()
+        return [s for s in selected if s]
+
+    def _print_action_result(self, result: Dict[str, Any]) -> None:
+        """Print action result summary."""
+        success_ids = result.get("success_ids", [])
+        failed = result.get("failed", [])
+        skipped = result.get("skipped", [])
+
+        if success_ids:
+            self.print_success(f"成功: {len(success_ids)}件")
+        if failed:
+            self.print_error(f"失敗: {len(failed)}件")
+            for item in failed:
+                print(f"  - {item.get('id')}: {item.get('reason')}")
+        if skipped:
+            self.print_warning(f"スキップ: {len(skipped)}件")
+            for item in skipped:
+                print(f"  - {item.get('id')}: {item.get('reason')}")
+
+    def _run_storage_action_ws(self, action: str, volume_ids: List[str]) -> Dict[str, Any]:
+        """Run storage action via WebSocket and show progress."""
+        total = len(volume_ids)
+        result: Dict[str, Any] = {}
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+        )
+        task_id = progress.add_task("処理中...", total=total)
+
+        def on_message(message: Dict[str, Any]) -> None:
+            msg_type = message.get("type")
+            if msg_type == "start":
+                progress.update(task_id, total=message.get("total", total))
+            elif msg_type == "progress":
+                done = message.get("done", 0)
+                progress.update(task_id, completed=done)
+            elif msg_type == "complete":
+                progress.update(task_id, completed=message.get("total", total))
+
+        def on_error(error: str) -> None:
+            self.print_error(error)
+
+        with progress:
+            result = self.api.verda_storage_action_ws(
+                action=action,
+                volume_ids=volume_ids,
+                on_message=on_message,
+                on_error=on_error,
+            )
+
+        return result
+
+    def _delete_storage(self) -> MenuResult:
+        """Logical delete Verda storage."""
+        show_section_header("ストレージ削除（論理削除・96時間で自動完全削除）")
+
+        try:
+            items = self._fetch_storage_items()
+        except Exception as e:
+            self.print_error(f"取得に失敗しました: {e}")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        selected = self._select_storage_ids(items, "active")
+        if not selected:
+            self.print_info("対象がありません")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        print(f"{Colors.CYAN}注意:{Colors.RESET}")
+        print("  - 削除済み領域（Trash）へ移動します（96時間以内なら復元可能）")
+        print("  - Trashの間はストレージ枠は解放されません")
+
+        confirm = inquirer.confirm(
+            message=f"{len(selected)}件のストレージを削除しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            self.print_info("キャンセルしました")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        result = self._run_storage_action_ws("delete", selected)
+        if "error" in result:
+            self.print_error(f"削除に失敗しました: {result['error']}")
+        else:
+            self._print_action_result(result)
+
+        self.wait_for_enter()
+        return MenuResult.CONTINUE
+
+    def _restore_storage(self) -> MenuResult:
+        """Restore Verda storage from trash."""
+        show_section_header("ストレージ復活（Trashから復元）")
+
+        try:
+            items = self._fetch_storage_items()
+        except Exception as e:
+            self.print_error(f"取得に失敗しました: {e}")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        selected = self._select_storage_ids(items, "deleted")
+        if not selected:
+            self.print_info("対象がありません")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        print(f"{Colors.CYAN}注意:{Colors.RESET}")
+        print("  - 復元にはPay As You Go料金が発生します")
+
+        confirm = inquirer.confirm(
+            message=f"{len(selected)}件のストレージを復活しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            self.print_info("キャンセルしました")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        result = self._run_storage_action_ws("restore", selected)
+        if "error" in result:
+            self.print_error(f"復活に失敗しました: {result['error']}")
+        else:
+            self._print_action_result(result)
+
+        self.wait_for_enter()
+        return MenuResult.CONTINUE
+
+    def _purge_storage(self) -> MenuResult:
+        """Permanently delete Verda storage from trash."""
+        show_section_header("ストレージ完全削除（Trashから物理削除）")
+
+        try:
+            items = self._fetch_storage_items()
+        except Exception as e:
+            self.print_error(f"取得に失敗しました: {e}")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        selected = self._select_storage_ids(items, "deleted")
+        if not selected:
+            self.print_info("対象がありません")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        confirm = inquirer.confirm(
+            message="完全削除は取り消しできません。続行しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            self.print_info("キャンセルしました")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        confirm = inquirer.confirm(
+            message=f"{len(selected)}件のストレージを完全削除しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            self.print_info("キャンセルしました")
+            self.wait_for_enter()
+            return MenuResult.CONTINUE
+
+        result = self._run_storage_action_ws("purge", selected)
+        if "error" in result:
+            self.print_error(f"完全削除に失敗しました: {result['error']}")
+        else:
+            self._print_action_result(result)
+
+        self.wait_for_enter()
+        return MenuResult.CONTINUE
 
 
 class TrainingWizard(BaseMenu):
