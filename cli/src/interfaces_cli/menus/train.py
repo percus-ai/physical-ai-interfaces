@@ -240,7 +240,7 @@ def download_dataset_with_progress(
     api,
     dataset_id: str,
 ) -> Dict[str, Any]:
-    """Download a dataset from R2 with Rich progress display.
+    """Download a dataset with progress display.
 
     Args:
         api: API client instance
@@ -249,82 +249,10 @@ def download_dataset_with_progress(
     Returns:
         Result dict with 'success', 'error' keys
     """
-    console = Console()
-    current = {"file": "", "done": 0, "total": 0, "size": 0, "transferred": 0, "total_size": 0}
-
-    def make_progress_panel():
-        """Create progress display panel."""
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_column("Label", style="cyan")
-        table.add_column("Value")
-
-        table.add_row("データセット:", dataset_id)
-
-        if current["file"]:
-            if current["size"] > 0:
-                pct = (current["transferred"] / current["size"]) * 100
-                transferred_str = format_size(current["transferred"])
-                size_str = format_size(current["size"])
-                progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
-            else:
-                progress_str = format_size(current["size"]) if current["size"] else "..."
-            table.add_row("ファイル:", current["file"])
-            table.add_row("転送:", progress_str)
-
-        if current["total"] > 0:
-            table.add_row("ファイル数:", f"{current['done']}/{current['total']}")
-
-        if current["total_size"] > 0:
-            table.add_row("合計サイズ:", format_size(current["total_size"]))
-
-        return Panel(table, title="📥 データセットダウンロード", border_style="cyan")
-
-    def progress_callback(data):
-        """Handle progress updates from WebSocket."""
-        msg_type = data.get("type", "")
-
-        if msg_type == "start":
-            current["total"] = data.get("total_files", 0)
-            current["total_size"] = data.get("total_size", 0)
-            current["done"] = 0
-            current["file"] = ""
-            current["transferred"] = 0
-        elif msg_type == "downloading":
-            current["file"] = data.get("current_file", "")
-            current["size"] = data.get("file_size", 0)
-            current["done"] = data.get("files_done", 0)
-            current["transferred"] = 0
-        elif msg_type == "progress":
-            current["file"] = data.get("current_file", "")
-            current["size"] = data.get("file_size", 0)
-            current["transferred"] = data.get("bytes_transferred", 0)
-        elif msg_type == "downloaded":
-            current["done"] = data.get("files_done", 0)
-            current["transferred"] = current["size"]
-
-    try:
-        with Live(make_progress_panel(), console=console, refresh_per_second=4) as live:
-            def update_display(data):
-                progress_callback(data)
-                live.update(make_progress_panel())
-
-            result = api.sync_with_progress(
-                action="download",
-                entry_type="datasets",
-                item_ids=[dataset_id],
-                progress_callback=update_display,
-            )
-
-        success_count = result.get("success_count", 0)
-        if success_count > 0:
-            return {"success": True}
-        else:
-            results = result.get("results", {})
-            error = results.get(dataset_id, {}).get("error", "Unknown error")
-            return {"success": False, "error": error}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return {
+        "success": False,
+        "error": "自動同期は無効です。ローカルにデータが存在する前提で実行してください。",
+    }
 
 
 # =============================================================================
@@ -844,7 +772,7 @@ class TrainingWizard(BaseMenu):
     def _step3_dataset(self) -> str:
         """Step 3: Select dataset (2-stage: project -> session).
 
-        Uses R2 as the source of truth for available datasets.
+        Uses DB as the source of truth for available datasets.
         Stage 1: Select a project (top-level directory)
         Stage 2: Select a session within that project
         """
@@ -864,33 +792,40 @@ class TrainingWizard(BaseMenu):
         return session_result
 
     def _step3a_select_project(self) -> str:
-        """Step 3a: Select dataset project from R2."""
-        print(f"{Colors.muted('R2からプロジェクト一覧を取得中...')}")
+        """Step 3a: Select dataset project from DB."""
+        print(f"{Colors.muted('DBからプロジェクト一覧を取得中...')}")
 
         try:
-            result = self.api.list_dataset_projects()
-            projects = result.get("projects", [])
+            result = self.api.list_datasets()
+            datasets = result.get("datasets", [])
         except Exception as e:
             print(f"{Colors.error('プロジェクト取得エラー:')} {e}")
             input(f"\n{Colors.muted('Press Enter to continue...')}")
             return "back"
 
-        if not projects:
-            print(f"{Colors.warning('R2に利用可能なデータセットがありません。')}")
+        if not datasets:
+            print(f"{Colors.warning('利用可能なデータセットがありません。')}")
             print(f"{Colors.muted('データを収録してR2にアップロードしてください。')}")
             input(f"\n{Colors.muted('Press Enter to continue...')}")
             return "back"
 
+        project_stats = {}
+        for d in datasets:
+            if d.get("status") == "archived":
+                continue
+            project_id = d.get("project_id") or "unknown"
+            stats = project_stats.setdefault(project_id, {"count": 0, "size": 0})
+            stats["count"] += 1
+            stats["size"] += d.get("size_bytes", 0)
+
         choices = []
-        for p in projects:
-            proj_id = p.get("id", "unknown")
-            proj_name = p.get("name", proj_id)
-            session_count = p.get("session_count", 0)
-            total_size = format_size(p.get("total_size_bytes", 0))
+        for project_id, stats in sorted(project_stats.items()):
+            session_count = stats["count"]
+            total_size = format_size(stats["size"])
 
             # Display format: project_name (N sessions, size)
-            display = f"  {proj_name} ({session_count} sessions, {total_size})"
-            choices.append(Choice(value=proj_id, name=display))
+            display = f"  {project_id} ({session_count} sessions, {total_size})"
+            choices.append(Choice(value=project_id, name=display))
 
         choices.append(Choice(value="__back__", name="← 戻る"))
 
@@ -914,16 +849,24 @@ class TrainingWizard(BaseMenu):
         print(f"{Colors.muted(f'プロジェクト {self.state.project_id} のセッション一覧を取得中...')}")
 
         try:
-            result = self.api.list_project_sessions(
-                project_id=self.state.project_id,
-                exclude_eval=True,  # Exclude eval_* sessions by default
-                sort="date_desc",   # Newest first
-            )
-            sessions = result.get("sessions", [])
+            result = self.api.list_datasets()
+            datasets = result.get("datasets", [])
         except Exception as e:
             print(f"{Colors.error('セッション取得エラー:')} {e}")
             input(f"\n{Colors.muted('Press Enter to continue...')}")
             return "back"
+
+        sessions = []
+        for d in datasets:
+            if d.get("status") == "archived":
+                continue
+            if d.get("project_id") != self.state.project_id:
+                continue
+            dataset_id = d.get("id") or ""
+            dataset_type = d.get("dataset_type") or ""
+            if dataset_type == "eval" or "/eval_" in dataset_id:
+                continue
+            sessions.append(d)
 
         if not sessions:
             print(f"{Colors.warning('このプロジェクトには利用可能なセッションがありません。')}")
@@ -932,29 +875,20 @@ class TrainingWizard(BaseMenu):
 
         session_lookup = {}
         choices = []
+        sessions = sorted(sessions, key=lambda s: s.get("created_at") or "", reverse=True)
         for s in sessions:
-            session_id = s.get("id", "unknown")
-            session_name = s.get("session_name", "")
-            author = s.get("author", "")
+            dataset_id = s.get("id", "unknown")
+            session_name = dataset_id.split("/")[-1] if "/" in dataset_id else dataset_id
             size = format_size(s.get("size_bytes", 0))
             episode_count = s.get("episode_count", 0)
-            is_local = s.get("is_local", False)
 
-            # Status icon: ✓=local, ☁=remote
-            status = "✓" if is_local else "☁"
+            display = f"  {session_name} ({episode_count} eps, {size})"
 
-            # Display format: status session_name (author, episodes, size)
-            if author:
-                display = f"  {status} {session_name} ({author}, {episode_count} eps, {size})"
-            else:
-                display = f"  {status} {session_name} ({episode_count} eps, {size})"
-
-            choices.append(Choice(value=session_id, name=display))
-            session_lookup[session_id] = s
+            choices.append(Choice(value=dataset_id, name=display))
+            session_lookup[dataset_id] = s
 
         choices.append(Choice(value="__back__", name="← 戻る (プロジェクト選択へ)"))
 
-        print(f"{Colors.muted('✓=ローカル, ☁=R2リモート (新しい順)')}")
         session = inquirer.select(
             message="セッションを選択:",
             choices=choices,
@@ -965,35 +899,10 @@ class TrainingWizard(BaseMenu):
             self.state.project_id = None
             return "back"
 
-        # Get session info
-        session_info = session_lookup.get(session, {})
-
-        # Check if dataset needs download
-        if not session_info.get("is_local", False):
-            print(f"\n{Colors.warning('このデータセットはローカルにダウンロードされていません。')}")
-            should_download = inquirer.confirm(
-                message="R2からダウンロードしますか?",
-                default=True,
-                style=hacker_style,
-            ).execute()
-
-            if not should_download:
-                return "back"
-
-            print()
-            download_result = download_dataset_with_progress(self.api, session)
-            if download_result.get("success"):
-                print(f"\n{Colors.success('データセットのダウンロードが完了しました。')}")
-            else:
-                error = download_result.get("error", "Unknown error")
-                print(f"\n{Colors.error(f'ダウンロードエラー: {error}')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return "back"
-
         # Store selected dataset info
         self.state.dataset_id = session
-        self.state.session_name = session_info.get("session_name")
-        self.state.dataset_short_id = session_info.get("short_id")
+        self.state.session_name = session.split("/")[-1] if "/" in session else session
+        self.state.dataset_short_id = None
 
         return "next"
 
@@ -1834,15 +1743,12 @@ class ContinueTrainingWizard(BaseMenu):
         for d in ds_list:
             if isinstance(d, dict):
                 ds_id = d.get("id", "unknown")
-                is_local = d.get("is_local", True)
                 size = format_size(d.get("size_bytes", 0))
-                status = "✓" if is_local else "☁"
-                ds_choices.append(Choice(value=ds_id, name=f"  {status} {ds_id} ({size})"))
+                ds_choices.append(Choice(value=ds_id, name=f"  {ds_id} ({size})"))
                 ds_lookup[ds_id] = d
 
         ds_choices.append(Choice(value="__back__", name="← 戻る"))
 
-        print(f"{Colors.muted('✓=ローカル, ☁=R2リモート')}")
         dataset = inquirer.select(
             message="データセットを選択:",
             choices=ds_choices,
@@ -1891,29 +1797,9 @@ class ContinueTrainingWizard(BaseMenu):
         except Exception as e:
             print(f"{Colors.warning('⚠ 互換性チェックをスキップします:')} {e}")
 
-        # Check if dataset needs download
-        ds_info = ds_lookup.get(dataset, {})
-        if not ds_info.get("is_local", True):
-            print(f"\n{Colors.warning('このデータセットはローカルにダウンロードされていません。')}")
-            should_download = inquirer.confirm(
-                message="R2からダウンロードしますか?",
-                default=True,
-                style=hacker_style,
-            ).execute()
-
-            if not should_download:
-                return "back"
-
-            print()
-            download_result = download_dataset_with_progress(self.api, dataset)
-            if not download_result.get("success"):
-                error = download_result.get("error", "Unknown error")
-                print(f"\n{Colors.error(f'ダウンロードエラー: {error}')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return "back"
-
         self.state.dataset_id = dataset
         # Get short_id from dataset info for job naming
+        ds_info = ds_lookup.get(dataset, {})
         self.state.dataset_short_id = ds_info.get("short_id")
         return "next"
 

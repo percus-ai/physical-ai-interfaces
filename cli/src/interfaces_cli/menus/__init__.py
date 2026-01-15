@@ -6,9 +6,7 @@ from interfaces_cli.menus.record import RecordMenu
 from interfaces_cli.menus.train import TrainMenu, TrainingJobsMenu
 from interfaces_cli.menus.storage import (
     DatasetsMenu,
-    HuggingFaceMenu,
     ModelsMenu,
-    R2SyncMenu,
     StorageMenu,
 )
 from interfaces_cli.menus.setup import (
@@ -36,8 +34,6 @@ __all__ = [
     "StorageMenu",
     "DatasetsMenu",
     "ModelsMenu",
-    "R2SyncMenu",
-    "HuggingFaceMenu",
     # Setup
     "SetupMenu",
     "ProjectMenu",

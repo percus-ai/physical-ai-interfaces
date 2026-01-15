@@ -1,36 +1,26 @@
-"""Storage API request/response models.
-
-Core data models are in percus_ai.storage.
-This module only contains API-specific request/response models.
-"""
+"""Storage API request/response models (DB-backed)."""
 
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
-
-from percus_ai.storage import (
-    DataSource,
-    DataStatus,
-    DatasetMetadata,
-    ModelMetadata,
-)
 
 
 # --- API Request/Response Models ---
 
 
 class DatasetInfo(BaseModel):
-    """Dataset information for API responses with local status."""
+    """Dataset information for API responses."""
 
     id: str = Field(..., description="Dataset ID")
-    short_id: Optional[str] = Field(None, description="6-char alphanumeric short ID for job naming")
     name: str = Field(..., description="Dataset name")
-    source: DataSource = Field(..., description="Data source: r2, hub, local")
-    status: DataStatus = Field(..., description="Data status")
+    project_id: str = Field(..., description="Project ID")
+    environment_id: Optional[str] = Field(None, description="Environment ID")
+    source: str = Field("r2", description="Data source")
+    status: str = Field("active", description="Data status")
     dataset_type: str = Field("recorded", description="Dataset type")
     episode_count: int = Field(0, description="Number of episodes")
     size_bytes: int = Field(0, description="Size in bytes")
-    is_local: bool = Field(True, description="Dataset is downloaded locally")
+    is_local: bool = Field(False, description="Dataset is downloaded locally")
     created_at: Optional[str] = Field(None, description="Creation time")
     updated_at: Optional[str] = Field(None, description="Last update time")
 
@@ -42,68 +32,28 @@ class DatasetListResponse(BaseModel):
     total: int
 
 
+class ModelInfo(BaseModel):
+    """Model information for API responses."""
+
+    id: str = Field(..., description="Model ID")
+    name: str = Field(..., description="Model name")
+    project_id: str = Field(..., description="Project ID")
+    dataset_id: Optional[str] = Field(None, description="Dataset ID")
+    policy_type: Optional[str] = Field(None, description="Policy type")
+    training_steps: Optional[int] = Field(None, description="Training steps")
+    batch_size: Optional[int] = Field(None, description="Batch size")
+    size_bytes: int = Field(0, description="Size in bytes")
+    source: str = Field("r2", description="Data source")
+    status: str = Field("active", description="Data status")
+    created_at: Optional[str] = Field(None, description="Creation time")
+    updated_at: Optional[str] = Field(None, description="Last update time")
+
+
 class ModelListResponse(BaseModel):
     """Response for model list endpoint."""
 
-    models: List[ModelMetadata]
+    models: List[ModelInfo]
     total: int
-
-
-class SyncRequest(BaseModel):
-    """Request for sync operations."""
-
-    mode: str = Field("full", description="Sync mode: full or partial")
-    episodes: Optional[List[int]] = Field(None, description="Episode indices for partial sync")
-    include_videos: bool = Field(True, description="Include video files")
-
-
-class SyncStatusResponse(BaseModel):
-    """Response for sync status check."""
-
-    id: str
-    source: DataSource
-    local_hash: Optional[str] = None
-    remote_hash: Optional[str] = None
-    is_synced: bool = False
-    local_size_bytes: int = 0
-    remote_size_bytes: int = 0
-
-
-class UploadResponse(BaseModel):
-    """Response for upload operations."""
-
-    id: str
-    success: bool
-    message: str
-    size_bytes: int = 0
-    hash: Optional[str] = None
-
-
-class DownloadResponse(BaseModel):
-    """Response for download operations."""
-
-    id: str
-    success: bool
-    message: str
-    size_bytes: int = 0
-    hash: Optional[str] = None
-
-
-class PublishRequest(BaseModel):
-    """Request to publish to HuggingFace."""
-
-    repo_id: str = Field(..., description="Target HuggingFace repo ID")
-    private: bool = Field(False, description="Make repo private")
-    commit_message: Optional[str] = Field(None, description="Commit message")
-
-
-class PublishResponse(BaseModel):
-    """Response for publish operations."""
-
-    id: str
-    success: bool
-    message: str
-    repo_url: Optional[str] = None
 
 
 class ArchiveResponse(BaseModel):
@@ -112,13 +62,12 @@ class ArchiveResponse(BaseModel):
     id: str
     success: bool
     message: str
-    status: DataStatus
+    status: str
 
 
 class StorageUsageResponse(BaseModel):
     """Response for storage usage endpoint."""
 
-    # Local storage (downloaded to disk)
     datasets_count: int = 0
     datasets_size_bytes: int = 0
     models_count: int = 0
@@ -126,58 +75,65 @@ class StorageUsageResponse(BaseModel):
     archive_count: int = 0
     archive_size_bytes: int = 0
     total_size_bytes: int = 0
-    # Remote storage (on R2, not downloaded)
-    remote_datasets_count: int = 0
-    remote_datasets_size_bytes: int = 0
-    remote_models_count: int = 0
-    remote_models_size_bytes: int = 0
-    remote_total_size_bytes: int = 0
 
 
 class ArchiveListResponse(BaseModel):
     """Response for archived items list."""
 
-    datasets: List[DatasetMetadata] = Field(default_factory=list)
-    models: List[ModelMetadata] = Field(default_factory=list)
+    datasets: List[DatasetInfo] = Field(default_factory=list)
+    models: List[ModelInfo] = Field(default_factory=list)
     total: int = 0
 
 
-# --- Dataset Projects and Sessions (R2 as source of truth) ---
+class ArchiveBulkRequest(BaseModel):
+    """Request for bulk archive operations."""
+
+    dataset_ids: List[str] = Field(default_factory=list)
+    model_ids: List[str] = Field(default_factory=list)
 
 
-class DatasetProjectInfo(BaseModel):
-    """Dataset project (top-level directory) information."""
+class ArchiveBulkResponse(BaseModel):
+    """Response for bulk archive operations."""
 
-    id: str = Field(..., description="Project ID (e.g., '0001_black_cube_to_tray')")
-    name: str = Field(..., description="Project name")
-    session_count: int = Field(0, description="Number of sessions in this project")
-    total_size_bytes: int = Field(0, description="Total size in bytes")
-
-
-class DatasetProjectListResponse(BaseModel):
-    """Response for dataset project list endpoint."""
-
-    projects: List[DatasetProjectInfo]
-    total: int
+    success: bool
+    restored: List[str] = Field(default_factory=list)
+    deleted: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
 
 
-class DatasetSessionInfo(BaseModel):
-    """Dataset session information."""
+class HuggingFaceDatasetImportRequest(BaseModel):
+    """Request to import a dataset from HuggingFace."""
 
-    id: str = Field(..., description="Full session ID (e.g., 'project/session_name')")
-    session_name: str = Field(..., description="Session name (e.g., '20260107_180132_watanabe')")
-    project_id: str = Field(..., description="Parent project ID")
-    author: Optional[str] = Field(None, description="Author (extracted from session name)")
-    created_at: Optional[str] = Field(None, description="Creation timestamp (extracted from session name)")
-    size_bytes: int = Field(0, description="Size in bytes")
-    episode_count: int = Field(0, description="Number of episodes")
-    is_local: bool = Field(False, description="Session is downloaded locally")
-    is_eval: bool = Field(False, description="Session is an evaluation session (eval_*)")
+    repo_id: str = Field(..., description="HuggingFace repo ID")
+    project_id: str = Field(..., description="Project ID")
+    dataset_id: str = Field(..., description="Dataset ID to store")
+    name: Optional[str] = Field(None, description="Dataset display name")
+    force: bool = Field(False, description="Overwrite local data if exists")
 
 
-class DatasetSessionListResponse(BaseModel):
-    """Response for dataset session list endpoint."""
+class HuggingFaceModelImportRequest(BaseModel):
+    """Request to import a model from HuggingFace."""
 
-    project_id: str
-    sessions: List[DatasetSessionInfo]
-    total: int
+    repo_id: str = Field(..., description="HuggingFace repo ID")
+    project_id: str = Field(..., description="Project ID")
+    model_id: str = Field(..., description="Model ID to store")
+    dataset_id: Optional[str] = Field(None, description="Associated dataset ID")
+    name: Optional[str] = Field(None, description="Model display name")
+    force: bool = Field(False, description="Overwrite local data if exists")
+
+
+class HuggingFaceExportRequest(BaseModel):
+    """Request to export a dataset or model to HuggingFace."""
+
+    repo_id: str = Field(..., description="HuggingFace repo ID")
+    private: bool = Field(False, description="Create private repository")
+    commit_message: Optional[str] = Field(None, description="Commit message")
+
+
+class HuggingFaceTransferResponse(BaseModel):
+    """Response for HuggingFace import/export."""
+
+    success: bool
+    message: str
+    item_id: str
+    repo_url: Optional[str] = None

@@ -46,164 +46,73 @@ class ProjectMenu(BaseMenu):
 
     def get_choices(self) -> List[Choice]:
         return [
-            Choice(value="list", name="📋 [LIST] プロジェクト一覧"),
-            Choice(value="create", name="➕ [NEW] 新規プロジェクト作成"),
-            Choice(value="select", name="📌 [SELECT] アクティブプロジェクト設定"),
-            Choice(value="delete", name="🗑️  [DELETE] プロジェクト削除"),
+            Choice(value="import", name="📥 [IMPORT] YAMLからインポート"),
         ]
 
     def handle_choice(self, choice: Any) -> MenuResult:
-        if choice == "list":
-            return self._list_projects()
-        if choice == "create":
-            return self._create_project()
-        if choice == "select":
-            return self._select_project()
-        if choice == "delete":
-            return self._delete_project()
+        if choice == "import":
+            return self._import_project()
         return MenuResult.CONTINUE
 
-    def _list_projects(self) -> MenuResult:
-        """List all projects."""
-        show_section_header("Projects")
+    def _import_project(self) -> MenuResult:
+        """Import a project from YAML file."""
+        from pathlib import Path
+
+        show_section_header("Import Project")
+
+        base_dir = Path("data/projects")
+        yaml_files = sorted(base_dir.glob("*.yaml")) if base_dir.exists() else []
+
+        choices: List[Choice] = []
+        for path in yaml_files:
+            choices.append(Choice(value=str(path), name=path.name))
+        choices.append(Choice(value="__path__", name="パスを入力"))
+        choices.append(Choice(value="__back__", name="« 戻る"))
+
+        selected = inquirer.select(
+            message="YAMLを選択:",
+            choices=choices,
+            style=hacker_style,
+        ).execute()
+
+        if selected == "__back__":
+            return MenuResult.CONTINUE
+
+        if selected == "__path__":
+            selected = inquirer.text(
+                message="YAMLファイルのパス:",
+                default=str(base_dir) + "/",
+                style=hacker_style,
+            ).execute()
+
+        if not selected:
+            return MenuResult.CONTINUE
+
+        yaml_path = Path(selected).expanduser()
+        if not yaml_path.exists():
+            print(f"{Colors.error('Error:')} File not found: {yaml_path}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
 
         try:
-            result = self.api.list_projects()
-            projects = result.get("projects", [])
-            if projects:
-                for p in projects:
-                    current = " (current)" if p == self.app.current_project else ""
-                    print(f"  - {p}{Colors.success(current)}")
-            else:
-                print(f"{Colors.muted('No projects found.')}")
+            content = yaml_path.read_text(encoding="utf-8")
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
 
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
+        force = inquirer.confirm(
+            message="既存プロジェクトを上書きしますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
 
-    def _create_project(self) -> MenuResult:
-        """Create a new project."""
-        show_section_header("New Project")
+        payload = {"yaml_content": content, "force": force}
 
         try:
-            display_name = inquirer.text(
-                message="Project name:",
-                style=hacker_style,
-            ).execute()
-
-            if not display_name:
-                return MenuResult.CONTINUE
-
-            description = inquirer.text(
-                message="Description (optional):",
-                default="",
-                style=hacker_style,
-            ).execute()
-
-            robot_type = inquirer.select(
-                message="Robot type:",
-                choices=[
-                    Choice(value="so101", name="SO-101"),
-                    Choice(value="so100", name="SO-100"),
-                    Choice(value="koch", name="Koch"),
-                ],
-                style=hacker_style,
-            ).execute()
-
-            result = self.api.create_project({
-                "display_name": display_name,
-                "description": description,
-                "robot_type": robot_type,
-            })
-
-            print(f"\n{Colors.success('Project created!')}")
-            print(f"  Name: {result.get('name', display_name)}")
-
-        except KeyboardInterrupt:
-            pass
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
-
-    def _select_project(self) -> MenuResult:
-        """Select active project."""
-        try:
-            result = self.api.list_projects()
-            projects = result.get("projects", [])
-            if not projects:
-                print(f"{Colors.warning('No projects found.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            choices = [Choice(value=p, name=p) for p in projects]
-            choices.append(Choice(value="__none__", name="(Clear selection)"))
-            choices.append(Choice(value="__back__", name="« Cancel"))
-
-            selected = inquirer.select(
-                message="Select project:",
-                choices=choices,
-                style=hacker_style,
-            ).execute()
-
-            if selected == "__back__":
-                return MenuResult.CONTINUE
-
-            if selected == "__none__":
-                self.app.current_project = None
-                print(f"{Colors.muted('Project selection cleared.')}")
-            else:
-                self.app.current_project = selected
-                print(f"{Colors.success('Selected:')} {selected}")
-
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
-
-    def _delete_project(self) -> MenuResult:
-        """Delete a project."""
-        try:
-            result = self.api.list_projects()
-            projects = result.get("projects", [])
-            if not projects:
-                print(f"{Colors.warning('No projects found.')}")
-                input(f"\n{Colors.muted('Press Enter to continue...')}")
-                return MenuResult.CONTINUE
-
-            choices = [Choice(value=p, name=p) for p in projects]
-            choices.append(Choice(value="__back__", name="« Cancel"))
-
-            selected = inquirer.select(
-                message="Select project to delete:",
-                choices=choices,
-                style=hacker_style,
-            ).execute()
-
-            if selected == "__back__":
-                return MenuResult.CONTINUE
-
-            delete_data = inquirer.confirm(
-                message="Also delete datasets and models?",
-                default=False,
-                style=hacker_style,
-            ).execute()
-
-            confirm = inquirer.confirm(
-                message=f"Delete project '{selected}'?",
-                default=False,
-                style=hacker_style,
-            ).execute()
-
-            if confirm:
-                self.api.delete_project(selected, delete_data=delete_data)
-                print(f"{Colors.success('Project deleted.')}")
-                if self.app.current_project == selected:
-                    self.app.current_project = None
-
+            result = self.api.import_project(payload)
+            print(f"\n{Colors.success('Project imported!')}")
+            print(f"  Name: {result.get('name', '')}")
         except Exception as e:
             print(f"{Colors.error('Error:')} {e}")
 

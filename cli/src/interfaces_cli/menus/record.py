@@ -43,7 +43,7 @@ class RecordMenu(BaseMenu):
             projects = result.get("projects", [])
             if not projects:
                 print(f"{Colors.warning('No projects found.')}")
-                print(f"{Colors.muted('Project YAML files should be in data/projects/')}")
+                print(f"{Colors.muted('DBにプロジェクトがありません。YAMLからインポートしてください。')}")
                 input(f"\n{Colors.muted('Press Enter to continue...')}")
                 return None
 

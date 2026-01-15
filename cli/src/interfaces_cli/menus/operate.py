@@ -31,102 +31,6 @@ if TYPE_CHECKING:
     from interfaces_cli.app import PhiApplication
 
 
-def download_with_progress(
-    api,
-    entry_type: str,
-    item_id: str,
-    item_label: str = "アイテム",
-) -> Dict[str, Any]:
-    """Download an item from R2 with Rich progress display.
-
-    Args:
-        api: API client instance
-        entry_type: 'models' or 'datasets'
-        item_id: ID of item to download
-        item_label: Display label (e.g., "モデル", "データセット")
-
-    Returns:
-        Result dict with 'success', 'error' keys
-    """
-    console = Console()
-    current = {"file": "", "done": 0, "total": 0, "size": 0, "transferred": 0, "total_size": 0}
-
-    def make_progress_panel():
-        """Create progress display panel."""
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_column("Label", style="cyan")
-        table.add_column("Value")
-
-        table.add_row(f"{item_label}:", item_id)
-
-        if current["file"]:
-            # File progress
-            if current["size"] > 0:
-                pct = (current["transferred"] / current["size"]) * 100
-                transferred_str = format_size(current["transferred"])
-                size_str = format_size(current["size"])
-                progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
-            else:
-                progress_str = format_size(current["size"]) if current["size"] else "..."
-            table.add_row("ファイル:", current["file"])
-            table.add_row("転送:", progress_str)
-
-        if current["total"] > 0:
-            table.add_row("ファイル数:", f"{current['done']}/{current['total']}")
-
-        if current["total_size"] > 0:
-            table.add_row("合計サイズ:", format_size(current["total_size"]))
-
-        return Panel(table, title=f"📥 {item_label}ダウンロード", border_style="cyan")
-
-    def progress_callback(data):
-        """Handle progress updates from WebSocket."""
-        msg_type = data.get("type", "")
-
-        if msg_type == "start":
-            current["total"] = data.get("total_files", 0)
-            current["total_size"] = data.get("total_size", 0)
-            current["done"] = 0
-            current["file"] = ""
-            current["transferred"] = 0
-        elif msg_type == "downloading":
-            current["file"] = data.get("current_file", "")
-            current["size"] = data.get("file_size", 0)
-            current["done"] = data.get("files_done", 0)
-            current["transferred"] = 0
-        elif msg_type == "progress":
-            current["file"] = data.get("current_file", "")
-            current["size"] = data.get("file_size", 0)
-            current["transferred"] = data.get("bytes_transferred", 0)
-        elif msg_type == "downloaded":
-            current["done"] = data.get("files_done", 0)
-            current["transferred"] = current["size"]
-
-    try:
-        with Live(make_progress_panel(), console=console, refresh_per_second=4) as live:
-            def update_display(data):
-                progress_callback(data)
-                live.update(make_progress_panel())
-
-            result = api.sync_with_progress(
-                action="download",
-                entry_type=entry_type,
-                item_ids=[item_id],
-                progress_callback=update_display,
-            )
-
-        success_count = result.get("success_count", 0)
-        if success_count > 0:
-            return {"success": True}
-        else:
-            results = result.get("results", {})
-            error = results.get(item_id, {}).get("error", "Unknown error")
-            return {"success": False, "error": error}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
 class OperateMenu(BaseMenu):
     """Operate menu - Teleop and Inference operations."""
 
@@ -790,54 +694,32 @@ class InferenceMenu(BaseMenu):
             if selected_model == "__back__":
                 return MenuResult.CONTINUE
 
-            # Check if model needs to be downloaded
+            # Auto-download model on inference start if needed
             model_info = model_lookup.get(selected_model, {})
             if not model_info.get("is_local", True):
-                print(f"\n{Colors.warning('このモデルはローカルにダウンロードされていません。')}")
-                should_download = inquirer.confirm(
-                    message="R2からダウンロードしますか?",
-                    default=True,
-                    style=hacker_style,
-                ).execute()
+                print(f"\n{Colors.muted('推論開始時にモデルを自動ダウンロードします。')}")
 
-                if not should_download:
-                    return MenuResult.CONTINUE
-
-                # Download model with WebSocket progress
-                print()
-                download_result = download_with_progress(
-                    self.api,
-                    entry_type="models",
-                    item_id=selected_model,
-                    item_label="モデル",
-                )
-                if download_result.get("success"):
-                    print(f"\n{Colors.success('モデルのダウンロードが完了しました。')}")
-                else:
-                    error = download_result.get("error", "Unknown error")
-                    print(f"\n{Colors.error(f'ダウンロードエラー: {error}')}")
-                    input(f"\n{Colors.muted('Press Enter to continue...')}")
-                    return MenuResult.CONTINUE
-
-            # Get available projects from storage (./data/projects/)
+            # Get available projects from DB
             try:
-                projects_result = self.api.list_storage_projects()
-                projects = projects_result.get("projects", [])
+                projects_result = self.api.list_projects()
+                project_ids = projects_result.get("projects", [])
             except Exception:
-                projects = []
+                project_ids = []
 
-            if not projects:
+            if not project_ids:
                 print(f"{Colors.warning('プロジェクトが見つかりません')}")
-                print(f"{Colors.muted('R2 Sync > プロジェクトをダウンロード でプロジェクトを取得してください')}")
                 input(f"\n{Colors.muted('Press Enter to continue...')}")
                 return MenuResult.CONTINUE
 
             # Show projects with robot_type info
             project_choices = []
-            for p in projects:
-                project_id = p.get("id", "unknown")
-                display_name = p.get("display_name", project_id)
-                robot_type_hint = p.get("robot_type", "?")
+            for project_id in project_ids:
+                try:
+                    project_info = self.api.get_project(project_id)
+                except Exception:
+                    project_info = {"display_name": project_id, "robot_type": "?"}
+                display_name = project_info.get("display_name", project_id)
+                robot_type_hint = project_info.get("robot_type", "?")
                 project_choices.append(Choice(
                     value=project_id,
                     name=f"{display_name} [{robot_type_hint}]"
@@ -857,7 +739,7 @@ class InferenceMenu(BaseMenu):
             project_info = None
             robot_type = "so101"  # default
             try:
-                project_info = self.api.get_storage_project(selected_project)
+                project_info = self.api.get_project(selected_project)
                 robot_type = project_info.get("robot_type", "so101")
             except Exception:
                 pass

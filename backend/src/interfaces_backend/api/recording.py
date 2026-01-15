@@ -19,40 +19,29 @@ import yaml
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from percus_ai.db import get_supabase_client
 from percus_ai.storage import (
     get_datasets_dir,
     get_projects_dir,
     get_user_devices_path,
     get_user_config_path,
-    ManifestManager,
-    R2SyncService,
 )
+from percus_ai.storage.r2_db_sync import R2DBSyncService
 
 logger = logging.getLogger(__name__)
 
 # Thread pool for R2 sync operations
 _upload_executor = ThreadPoolExecutor(max_workers=2)
 
-# Global instances for R2 sync
-_manifest_manager: Optional[ManifestManager] = None
-_sync_service: Optional[R2SyncService] = None
+# Global instance for R2 sync
+_sync_service: Optional[R2DBSyncService] = None
 
 
-def _get_manifest() -> ManifestManager:
-    """Get or create manifest manager."""
-    global _manifest_manager
-    if _manifest_manager is None:
-        _manifest_manager = ManifestManager()
-    return _manifest_manager
-
-
-def _get_sync_service() -> R2SyncService:
-    """Get or create R2 sync service."""
+def _get_sync_service() -> R2DBSyncService:
+    """Get or create DB-backed R2 sync service."""
     global _sync_service
     if _sync_service is None:
-        bucket = os.getenv("R2_BUCKET", "percus-data")
-        version = os.getenv("R2_VERSION", "v2")
-        _sync_service = R2SyncService(_get_manifest(), bucket, version=version)
+        _sync_service = R2DBSyncService()
     return _sync_service
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
@@ -154,6 +143,27 @@ def _load_user_config() -> dict:
         "environment_name": "lerobot",
         "auto_upload_after_recording": True,
     }
+
+
+def _upsert_dataset_record(
+    dataset_id: str,
+    project_id: str,
+    name: str,
+    episode_count: int,
+    task_detail: str,
+) -> None:
+    client = get_supabase_client()
+    payload = {
+        "id": dataset_id,
+        "project_id": project_id,
+        "name": name,
+        "episode_count": episode_count,
+        "dataset_type": "recorded",
+        "source": "r2",
+        "status": "active",
+        "task_detail": task_detail,
+    }
+    client.table("datasets").upsert(payload, on_conflict="id").execute()
 
 
 def _build_camera_entry(
@@ -277,11 +287,12 @@ def _list_recordings(project_id: Optional[str] = None) -> List[dict]:
             # Check for recording data
             parquet_files = list(episode_dir.glob("*.parquet"))
             meta_file = episode_dir / "meta.json"
+            meta_info = episode_dir / "meta" / "info.json"
             data_dir = episode_dir / "data"
             if data_dir.exists():
                 parquet_files.extend(list(data_dir.glob("*.parquet")))
 
-            if not parquet_files and not meta_file.exists():
+            if not parquet_files and not meta_file.exists() and not meta_info.exists():
                 continue
 
             try:
@@ -296,7 +307,15 @@ def _list_recordings(project_id: Optional[str] = None) -> List[dict]:
 
                 # Count frames
                 frames = 0
-                if parquet_files:
+                if meta_info.exists():
+                    try:
+                        with open(meta_info, "r", encoding="utf-8") as f:
+                            info = json.load(f)
+                        frames = int(info.get("total_frames") or 0)
+                    except Exception:
+                        frames = 0
+
+                if frames == 0 and parquet_files:
                     try:
                         import pyarrow.parquet as pq
                         for pf in parquet_files:
@@ -464,15 +483,28 @@ async def record(request: RecordRequest):
         success = result.returncode == 0
         message = "Recording completed" if success else f"Recording failed (exit code: {result.returncode})"
 
+        dataset_id = None
+        if success:
+            dataset_id = f"{project_id}/{session_name}"
+            _upsert_dataset_record(
+                dataset_id=dataset_id,
+                project_id=project_id,
+                name=session_name,
+                episode_count=int(num_episodes),
+                task_detail=description,
+            )
+
         # Auto-upload to R2 if enabled and recording succeeded
         if success and user_config.get("auto_upload_after_recording", True):
             try:
                 sync_service = _get_sync_service()
-                # Dataset ID is the relative path from datasets dir
-                dataset_id = f"{project_id}/{session_name}"
-                sync_service.upload_dataset(dataset_id)
-                message = "Recording completed and uploaded to R2"
-                logger.info(f"Auto-uploaded dataset {dataset_id} to R2")
+                ok, error = sync_service.upload_dataset_with_progress(dataset_id, None)
+                if ok:
+                    message = "Recording completed and uploaded to R2"
+                    logger.info(f"Auto-uploaded dataset {dataset_id} to R2")
+                else:
+                    message = f"Recording completed but upload failed: {error}"
+                    logger.error(f"Auto-upload failed for {dataset_id}: {error}")
             except Exception as e:
                 logger.error(f"Auto-upload failed for {project_id}/{session_name}: {e}")
                 message = f"Recording completed but upload failed: {e}"
@@ -769,6 +801,17 @@ async def websocket_record(websocket: WebSocket):
         message = "Recording completed" if success else f"Recording failed (exit code: {return_code})"
         logger.info(f"Recording finished with return_code={return_code}, success={success}")
 
+        dataset_id = None
+        if success:
+            dataset_id = f"{project_id}/{session_name}"
+            _upsert_dataset_record(
+                dataset_id=dataset_id,
+                project_id=project_id,
+                name=session_name,
+                episode_count=int(num_episodes),
+                task_detail=description,
+            )
+
         # Auto-upload to R2 if enabled and recording succeeded
         upload_status = None
         auto_upload_enabled = user_config.get("auto_upload_after_recording", True)
@@ -778,7 +821,6 @@ async def websocket_record(websocket: WebSocket):
             try:
                 logger.info("Starting auto-upload to R2...")
                 sync_service = _get_sync_service()
-                dataset_id = f"{project_id}/{session_name}"
                 logger.info(f"Uploading dataset: {dataset_id}")
 
                 # Queue for progress updates from thread
@@ -1009,4 +1051,3 @@ async def delete_recording(recording_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete recording: {e}")
 
     return {"recording_id": recording_id, "message": "Recording deleted"}
-

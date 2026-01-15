@@ -47,7 +47,8 @@ from interfaces_backend.models.training import (
     VerdaStorageItem,
     VerdaStorageListResponse,
 )
-from percus_ai.storage import get_jobs_dir, get_configs_dir, get_project_root, get_models_dir
+from percus_ai.storage import get_configs_dir, get_project_root, get_models_dir
+from percus_ai.db import get_supabase_client
 from percus_ai.training.ssh.client import SSHConnection
 from percus_ai.training.ssh.executor import RemoteExecutor
 
@@ -57,8 +58,7 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 # Thread pool for WebSocket operations
 _executor = ThreadPoolExecutor(max_workers=2)
 
-# Jobs directory
-JOBS_DIR = get_jobs_dir()
+DB_TABLE = "training_jobs"
 
 # Remote scripts directory - contains setup_env.sh, entry.py, etc.
 # These scripts are deployed to remote instances for training
@@ -345,65 +345,96 @@ def _check_instance_via_api(instance_id: str) -> Optional[str]:
         return None
 
 
-def _get_job_file(job_id: str) -> Path:
-    """Get job file path."""
-    return JOBS_DIR / f"{job_id}.json"
-
-
 def _load_job(job_id: str) -> Optional[dict]:
-    """Load job from file."""
-    job_file = _get_job_file(job_id)
-    if not job_file.exists():
+    """Load job from DB."""
+    client = get_supabase_client()
+    response = client.table(DB_TABLE).select("*").eq("job_id", job_id).execute()
+    records = response.data or []
+    if not records:
         return None
-    with open(job_file, encoding="utf-8") as f:
-        return json.load(f)
+    record = records[0]
+    metadata = record.get("job_metadata") or {}
+    if isinstance(metadata, dict):
+        record.update(metadata)
+    return record
 
 
 def _save_job(job_data: dict) -> None:
-    """Save job to file."""
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    """Upsert job into DB."""
+    client = get_supabase_client()
     job_data["updated_at"] = datetime.now().isoformat()
-    with open(_get_job_file(job_data["job_id"]), "w", encoding="utf-8") as f:
-        json.dump(job_data, f, indent=2, ensure_ascii=False)
+
+    fixed_fields = {
+        "job_id",
+        "project_id",
+        "model_id",
+        "policy_type",
+        "dataset_id",
+        "status",
+        "training_config",
+        "compute_profile",
+        "author",
+        "base_checkpoint",
+        "notes",
+        "instance_id",
+        "ip",
+        "config_name",
+        "mode",
+        "ssh_user",
+        "ssh_private_key",
+        "remote_base_dir",
+        "checkpoint_repo_id",
+        "gpu_model",
+        "gpus_per_instance",
+        "exit_code",
+        "completed_at",
+        "created_at",
+        "updated_at",
+        "job_metadata",
+    }
+    record = {k: job_data.get(k) for k in fixed_fields if k in job_data}
+    metadata = {k: v for k, v in job_data.items() if k not in fixed_fields}
+    if metadata:
+        record["job_metadata"] = metadata
+
+    client.table(DB_TABLE).upsert(record, on_conflict="job_id").execute()
 
 
 def _list_jobs(days: int = 7) -> list[dict]:
-    """List jobs from files.
+    """List jobs from DB.
 
     Args:
         days: Return jobs from past N days.
               Running/starting jobs are always included.
     """
-    if not JOBS_DIR.exists():
-        return []
+    client = get_supabase_client()
+    response = client.table(DB_TABLE).select("*").execute()
+    jobs = response.data or []
 
-    jobs = []
     cutoff_date = datetime.now() - timedelta(days=days)
-
-    for job_file in JOBS_DIR.glob("*.json"):
+    filtered = []
+    for job in jobs:
+        metadata = job.get("job_metadata") or {}
+        if isinstance(metadata, dict):
+            job.update(metadata)
+        status = job.get("status")
+        if status in ("running", "starting"):
+            filtered.append(job)
+            continue
+        created_at = job.get("created_at")
+        if not created_at:
+            continue
         try:
-            with open(job_file, encoding="utf-8") as f:
-                data = json.load(f)
-
-            # Always include running/starting jobs
-            if data.get("status") in ("running", "starting"):
-                jobs.append(data)
-                continue
-
-            # Filter by date for others
-            created_at = data.get("created_at")
-            if created_at:
-                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                if created.tzinfo:
-                    created = created.replace(tzinfo=None)
-                if created >= cutoff_date:
-                    jobs.append(data)
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if created.tzinfo:
+                created = created.replace(tzinfo=None)
+            if created >= cutoff_date:
+                filtered.append(job)
         except Exception:
             continue
 
-    # Sort by created_at descending
-    jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
-    return jobs
+    filtered.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+    return filtered
 
 
 # --- SSH utilities for job monitoring (uses SSHConnection) ---
@@ -1684,6 +1715,16 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             "updated_at": now,
             "gpu_model": request.cloud.gpu_model,
             "gpus_per_instance": request.cloud.gpus_per_instance,
+            "policy_type": request.policy.type if request.policy else None,
+            "dataset_id": request.dataset.id if request.dataset else None,
+            "training_config": {
+                "dataset": request.dataset.model_dump() if request.dataset else {},
+                "policy": request.policy.model_dump() if request.policy else {},
+                "training": request.training.model_dump(),
+                "wandb_enable": request.wandb_enable,
+                "checkpoint_repo_id": request.checkpoint_repo_id,
+            },
+            "compute_profile": request.cloud.model_dump(),
         }
         _save_job(job_data)
 
@@ -2004,6 +2045,16 @@ def _create_job_with_progress(
             "updated_at": now,
             "gpu_model": cloud.gpu_model,
             "gpus_per_instance": cloud.gpus_per_instance,
+            "policy_type": policy.type,
+            "dataset_id": dataset.id,
+            "training_config": {
+                "dataset": dataset.model_dump(),
+                "policy": policy.model_dump(),
+                "training": training.model_dump(),
+                "wandb_enable": wandb_enable,
+                "checkpoint_repo_id": checkpoint_repo_id,
+            },
+            "compute_profile": cloud.model_dump(),
         }
         _save_job(job_data)
 
@@ -2943,6 +2994,15 @@ async def create_continue_job(
             "total_steps": total_steps,
             "additional_steps": training_config.additional_steps,
             "author": author,
+            "training_config": {
+                "dataset": request.dataset.model_dump(),
+                "training": training_config.model_dump(),
+                "checkpoint": {
+                    "job_name": checkpoint_config.job_name,
+                    "step": step,
+                },
+            },
+            "compute_profile": request.cloud.model_dump(),
         }
         _save_job(job_data)
 

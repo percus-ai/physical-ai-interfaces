@@ -1,25 +1,22 @@
 """Project management API router."""
 
 import logging
-from pathlib import Path
+from datetime import datetime
 from typing import Optional
 
+import yaml
 from fastapi import APIRouter, HTTPException
-
 from interfaces_backend.models.project import (
     ProjectCreateRequest,
     ProjectDeviceValidation,
+    ProjectImportRequest,
     ProjectListResponse,
     ProjectModel,
     ProjectStatsModel,
     ProjectValidateResponse,
 )
 from percus_ai.core.project import ProjectManager, ConfigLoader
-from percus_ai.storage import (
-    get_projects_dir,
-    get_datasets_dir,
-    get_models_dir,
-)
+from percus_ai.db import get_supabase_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -30,83 +27,47 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 @router.get("/debug-paths")
 async def debug_paths():
-    """Debug endpoint to check path resolution."""
-    import os
-    projects_dir = get_projects_dir()
+    """Debug endpoint to check DB connectivity."""
     manager = ProjectManager()
-    manager_info = None
-    try:
-        manager_info = {
-            "type": str(type(manager)),
-            "projects_dir": str(getattr(manager, 'projects_dir', 'N/A')),
-            "list_projects": manager.list_projects() if hasattr(manager, 'list_projects') else "N/A",
-        }
-    except Exception as e:
-        manager_info = {"error": str(e)}
+    client = get_supabase_client()
+    projects = client.table("projects").select("id").limit(5).execute().data or []
     return {
-        "cwd": str(Path.cwd()),
-        "PHYSICAL_AI_DATA_DIR": os.environ.get("PHYSICAL_AI_DATA_DIR", "NOT SET"),
-        "projects_dir": str(projects_dir),
-        "projects_dir_exists": projects_dir.exists(),
-        "yaml_files": [str(f) for f in projects_dir.glob("*.yaml")] if projects_dir.exists() else [],
-        "manager": manager_info,
+        "projects_sample": [p.get("id") for p in projects],
+        "manager_projects": manager.list_projects(),
     }
 
 
 @router.get("", response_model=ProjectListResponse)
 async def list_projects():
     """List all available projects."""
-    # Always use direct YAML file listing for reliability
-    # ProjectManager from percus_ai may have different path configuration
-    projects_dir = get_projects_dir()
-    if projects_dir.exists():
-        projects = sorted([f.stem for f in projects_dir.glob("*.yaml")])
-    else:
-        projects = []
-
+    projects = ProjectManager().list_projects()
     return ProjectListResponse(projects=projects, total=len(projects))
 
 
 @router.get("/{project_name}", response_model=ProjectModel)
 async def get_project(project_name: str):
     """Get project details."""
-    import yaml
-
-    # Load directly from YAML file for reliability
-    projects_dir = get_projects_dir()
-    yaml_path = projects_dir / f"{project_name}.yaml"
-
-    if not yaml_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Project not found: {project_name}"
-        )
-
+    manager = ProjectManager()
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-
-        project_info = config.get("project", {})
-        recording_info = config.get("recording", {})
-
-        return ProjectModel(
-            name=project_info.get("name", project_name),
-            display_name=project_info.get("display_name", project_name),
-            description=project_info.get("description", ""),
-            version=project_info.get("version", "1.0"),
-            created_at=project_info.get("created_at", ""),
-            robot_type=project_info.get("robot_type", "so101"),
-            episode_time_s=recording_info.get("episode_time_s", 60),
-            reset_time_s=recording_info.get("reset_time_s", 10),
-            cameras=config.get("cameras", {}),
-            arms=config.get("arms", {}),
-        )
+        project = manager.get_project(project_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_name}")
     except Exception as e:
         logger.error(f"Failed to load project {project_name}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to load project: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to load project: {str(e)}")
+
+    return ProjectModel(
+        name=project.name,
+        display_name=project.display_name,
+        description=project.description,
+        version=project.version,
+        created_at=project.created_at,
+        robot_type=project.robot_type,
+        episode_time_s=project.episode_time_s,
+        reset_time_s=project.reset_time_s,
+        cameras=project.cameras,
+        arms=project.arms,
+    )
 
 
 @router.post("", response_model=ProjectModel)
@@ -157,6 +118,66 @@ async def create_project(request: ProjectCreateRequest):
         )
 
 
+def _build_project_record_from_yaml(content: str) -> dict:
+    data = yaml.safe_load(content) or {}
+    project = data.get("project", {}) or {}
+    recording = data.get("recording", {}) or {}
+    cameras = data.get("cameras", {}) or {}
+    arms = data.get("arms", {}) or {}
+
+    project_id = project.get("name")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project.name is required")
+
+    created_at = project.get("created_at") or datetime.now().isoformat()
+    updated_at = datetime.now().isoformat()
+
+    return {
+        "id": project_id,
+        "name": project_id,
+        "display_name": project.get("display_name") or project_id,
+        "description": project.get("description") or "",
+        "version": project.get("version") or "1.0",
+        "robot_type": project.get("robot_type") or "so101",
+        "episode_time_s": recording.get("episode_time_s", 20),
+        "reset_time_s": recording.get("reset_time_s", 10),
+        "cameras": cameras,
+        "arms": arms,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+@router.post("/import", response_model=ProjectModel)
+async def import_project(request: ProjectImportRequest):
+    """Import a project from YAML content."""
+    try:
+        record = _build_project_record_from_yaml(request.yaml_content)
+    except yaml.YAMLError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+
+    client = get_supabase_client()
+    project_id = record["id"]
+    existing = client.table("projects").select("id").eq("id", project_id).execute().data or []
+    if existing and not request.force:
+        raise HTTPException(status_code=409, detail=f"Project already exists: {project_id}")
+
+    client.table("projects").upsert(record, on_conflict="id").execute()
+
+    return ProjectModel(
+        name=record["id"],
+        display_name=record["display_name"],
+        description=record["description"],
+        version=record["version"],
+        created_at=record["created_at"],
+        robot_type=record["robot_type"],
+        episode_time_s=record["episode_time_s"],
+        reset_time_s=record["reset_time_s"],
+        cameras=record["cameras"],
+        arms=record["arms"],
+    )
+
+
 @router.get("/{project_name}/stats", response_model=ProjectStatsModel)
 async def get_project_stats(project_name: str):
     """Get project statistics."""
@@ -172,8 +193,8 @@ async def get_project_stats(project_name: str):
             dataset_size_bytes=stats["dataset_size"],
             models_size_bytes=stats["models_size"],
             user_stats=stats["user_stats"],
-            episodes=[ep.name for ep in stats["episodes"]],
-            models=stats["models"],
+            episodes=stats.get("episodes", []),
+            models=stats.get("models", []),
         )
     except FileNotFoundError:
         raise HTTPException(
@@ -232,37 +253,19 @@ async def delete_project(project_name: str, delete_data: bool = False):
         project_name: Project to delete
         delete_data: If True, also delete associated datasets and models
     """
-    import shutil
+    client = get_supabase_client()
+    existing = client.table("projects").select("id").eq("id", project_name).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_name}")
 
-    # Use dynamic path resolution
-    projects_dir = get_projects_dir()
-    project_yaml = projects_dir / f"{project_name}.yaml"
-
-    if not project_yaml.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Project not found: {project_name}"
-        )
-
-    # Delete project YAML
-    project_yaml.unlink()
-
-    deleted_items = ["project config"]
-
+    deleted_items = ["project"]
     if delete_data:
-        # Delete dataset directory
-        datasets_dir = get_datasets_dir()
-        dataset_dir = datasets_dir / project_name
-        if dataset_dir.exists():
-            shutil.rmtree(dataset_dir)
-            deleted_items.append("datasets")
+        client.table("datasets").delete().eq("project_id", project_name).execute()
+        client.table("models").delete().eq("project_id", project_name).execute()
+        client.table("training_jobs").delete().eq("project_id", project_name).execute()
+        deleted_items.extend(["datasets", "models", "training_jobs"])
 
-        # Delete models directory
-        models_dir = get_models_dir()
-        model_dir = models_dir / project_name
-        if model_dir.exists():
-            shutil.rmtree(model_dir)
-            deleted_items.append("models")
+    client.table("projects").delete().eq("id", project_name).execute()
 
     return {
         "success": True,

@@ -286,6 +286,12 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
+    def import_project(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/projects/import - Import project from YAML content."""
+        response = self._client.post("/api/projects/import", json=data)
+        response.raise_for_status()
+        return response.json()
+
     def delete_project(self, project_name: str, delete_data: bool = False) -> Dict[str, Any]:
         """DELETE /api/projects/{project_name} - Delete a project."""
         response = self._client.delete(
@@ -472,42 +478,6 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
-    def list_dataset_projects(self) -> Dict[str, Any]:
-        """GET /api/storage/dataset-projects - List dataset projects from R2.
-
-        Returns top-level directories under datasets/ in R2.
-        Each project contains multiple recording sessions.
-
-        Returns:
-            Dict with "projects" list and "total" count
-        """
-        response = self._client.get("/api/storage/dataset-projects")
-        response.raise_for_status()
-        return response.json()
-
-    def list_project_sessions(
-        self,
-        project_id: str,
-        exclude_eval: bool = True,
-        sort: str = "date_desc",
-    ) -> Dict[str, Any]:
-        """GET /api/storage/dataset-projects/{project_id}/sessions - List sessions in a project.
-
-        Args:
-            project_id: Project ID (e.g., '0001_black_cube_to_tray')
-            exclude_eval: If True, exclude evaluation sessions (eval_* prefix)
-            sort: Sort order by date - 'date_asc' (oldest first) or 'date_desc' (newest first)
-
-        Returns:
-            Dict with "project_id", "sessions" list, and "total" count
-        """
-        response = self._client.get(
-            f"/api/storage/dataset-projects/{project_id}/sessions",
-            params={"exclude_eval": exclude_eval, "sort": sort},
-        )
-        response.raise_for_status()
-        return response.json()
-
     def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
         """GET /api/storage/datasets/{dataset_id} - Get dataset."""
         response = self._client.get(f"/api/storage/datasets/{dataset_id}")
@@ -517,33 +487,6 @@ class PhiClient:
     def delete_dataset(self, dataset_id: str) -> Dict[str, Any]:
         """DELETE /api/storage/datasets/{dataset_id} - Delete (archive)."""
         response = self._client.delete(f"/api/storage/datasets/{dataset_id}")
-        response.raise_for_status()
-        return response.json()
-
-    def get_dataset_sync_status(self, dataset_id: str) -> Dict[str, Any]:
-        """GET /api/storage/datasets/{dataset_id}/sync - Get sync status."""
-        response = self._client.get(f"/api/storage/datasets/{dataset_id}/sync")
-        response.raise_for_status()
-        return response.json()
-
-    def upload_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """POST /api/storage/datasets/{dataset_id}/upload - Upload to R2."""
-        response = self._client.post(f"/api/storage/datasets/{dataset_id}/upload")
-        response.raise_for_status()
-        return response.json()
-
-    def download_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """POST /api/storage/datasets/{dataset_id}/download - Download from R2."""
-        response = self._client.post(f"/api/storage/datasets/{dataset_id}/download")
-        response.raise_for_status()
-        return response.json()
-
-    def publish_dataset(self, dataset_id: str, repo_id: str, private: bool = False, commit_message: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/storage/datasets/{dataset_id}/publish - Publish to Hub."""
-        data = {"repo_id": repo_id, "private": private}
-        if commit_message:
-            data["commit_message"] = commit_message
-        response = self._client.post(f"/api/storage/datasets/{dataset_id}/publish", json=data)
         response.raise_for_status()
         return response.json()
 
@@ -571,36 +514,33 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
-    def get_model_sync_status(self, model_id: str) -> Dict[str, Any]:
-        """GET /api/storage/models/{model_id}/sync - Get sync status."""
-        response = self._client.get(f"/api/storage/models/{model_id}/sync")
-        response.raise_for_status()
-        return response.json()
-
-    def upload_model(self, model_id: str) -> Dict[str, Any]:
-        """POST /api/storage/models/{model_id}/upload - Upload to R2."""
-        response = self._client.post(f"/api/storage/models/{model_id}/upload")
-        response.raise_for_status()
-        return response.json()
-
-    def download_model(self, model_id: str) -> Dict[str, Any]:
-        """POST /api/storage/models/{model_id}/download - Download from R2."""
-        response = self._client.post(f"/api/storage/models/{model_id}/download")
-        response.raise_for_status()
-        return response.json()
-
-    def publish_model(self, model_id: str, repo_id: str, private: bool = False, commit_message: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/storage/models/{model_id}/publish - Publish to Hub."""
-        data = {"repo_id": repo_id, "private": private}
-        if commit_message:
-            data["commit_message"] = commit_message
-        response = self._client.post(f"/api/storage/models/{model_id}/publish", json=data)
-        response.raise_for_status()
-        return response.json()
-
     def restore_model(self, model_id: str) -> Dict[str, Any]:
         """POST /api/storage/models/{model_id}/restore - Restore."""
         response = self._client.post(f"/api/storage/models/{model_id}/restore")
+        response.raise_for_status()
+        return response.json()
+
+    def import_hf_dataset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/huggingface/datasets/import - Import dataset from HF."""
+        response = self._client.post("/api/storage/huggingface/datasets/import", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def import_hf_model(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/huggingface/models/import - Import model from HF."""
+        response = self._client.post("/api/storage/huggingface/models/import", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def export_hf_dataset(self, dataset_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/huggingface/datasets/{dataset_id}/export - Export dataset to HF."""
+        response = self._client.post(f"/api/storage/huggingface/datasets/{dataset_id}/export", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def export_hf_model(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/huggingface/models/{model_id}/export - Export model to HF."""
+        response = self._client.post(f"/api/storage/huggingface/models/{model_id}/export", json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -616,302 +556,29 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
-    # Storage Projects
-
-    def list_storage_projects(self) -> Dict[str, Any]:
-        """GET /api/storage/projects - List projects."""
-        response = self._client.get("/api/storage/projects")
+    def restore_archives(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/archive/restore - Bulk restore archived items."""
+        response = self._client.post("/api/storage/archive/restore", json=payload)
         response.raise_for_status()
         return response.json()
 
-    def get_storage_project(self, project_id: str) -> Dict[str, Any]:
-        """GET /api/storage/projects/{project_id} - Get project details."""
-        response = self._client.get(f"/api/storage/projects/{project_id}")
+    def delete_archives(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/storage/archive/delete - Bulk delete archived items."""
+        response = self._client.post("/api/storage/archive/delete", json=payload)
         response.raise_for_status()
         return response.json()
 
-    def upload_storage_project(self, project_id: str) -> Dict[str, Any]:
-        """POST /api/storage/projects/{project_id}/upload - Upload project to R2."""
-        response = self._client.post(f"/api/storage/projects/{project_id}/upload")
+    def delete_archived_dataset(self, dataset_id: str) -> Dict[str, Any]:
+        """DELETE /api/storage/archive/datasets/{dataset_id} - Delete archived dataset."""
+        response = self._client.delete(f"/api/storage/archive/datasets/{dataset_id}")
         response.raise_for_status()
         return response.json()
 
-    def download_storage_project(self, project_id: str) -> Dict[str, Any]:
-        """POST /api/storage/projects/{project_id}/download - Download project from R2."""
-        response = self._client.post(f"/api/storage/projects/{project_id}/download")
+    def delete_archived_model(self, model_id: str) -> Dict[str, Any]:
+        """DELETE /api/storage/archive/models/{model_id} - Delete archived model."""
+        response = self._client.delete(f"/api/storage/archive/models/{model_id}")
         response.raise_for_status()
         return response.json()
-
-    def list_remote_projects(self) -> Dict[str, Any]:
-        """GET /api/storage/projects/remote/list - List projects on R2."""
-        response = self._client.get("/api/storage/projects/remote/list")
-        response.raise_for_status()
-        return response.json()
-
-    def sync_storage_projects(self) -> Dict[str, Any]:
-        """POST /api/storage/projects/sync - Sync projects from R2."""
-        response = self._client.post("/api/storage/projects/sync")
-        response.raise_for_status()
-        return response.json()
-
-    def search_datasets(self, query: str, limit: int = 20) -> Dict[str, Any]:
-        """GET /api/storage/search/datasets - Search datasets."""
-        response = self._client.get("/api/storage/search/datasets", params={"query": query, "limit": limit})
-        response.raise_for_status()
-        return response.json()
-
-    def search_models(self, query: str, limit: int = 20) -> Dict[str, Any]:
-        """GET /api/storage/search/models - Search models."""
-        response = self._client.get("/api/storage/search/models", params={"query": query, "limit": limit})
-        response.raise_for_status()
-        return response.json()
-
-    def import_dataset(self, repo_id: str, force: bool = False) -> Dict[str, Any]:
-        """POST /api/storage/import/dataset - Import dataset from Hub."""
-        response = self._client.post("/api/storage/import/dataset", params={"repo_id": repo_id, "force": force})
-        response.raise_for_status()
-        return response.json()
-
-    def import_model(self, repo_id: str, force: bool = False) -> Dict[str, Any]:
-        """POST /api/storage/import/model - Import model from Hub."""
-        response = self._client.post("/api/storage/import/model", params={"repo_id": repo_id, "force": force})
-        response.raise_for_status()
-        return response.json()
-
-    def push_manifest(self) -> Dict[str, Any]:
-        """POST /api/storage/sync/manifest/push - Push manifest to R2."""
-        response = self._client.post("/api/storage/sync/manifest/push")
-        response.raise_for_status()
-        return response.json()
-
-    def pull_manifest(self) -> Dict[str, Any]:
-        """POST /api/storage/sync/manifest/pull - Pull manifest from R2."""
-        response = self._client.post("/api/storage/sync/manifest/pull")
-        response.raise_for_status()
-        return response.json()
-
-    def regenerate_manifest(self) -> Dict[str, Any]:
-        """POST /api/storage/sync/manifest/regenerate - Regenerate manifest from R2 and local."""
-        response = self._client.post("/api/storage/sync/manifest/regenerate", timeout=120.0)
-        response.raise_for_status()
-        return response.json()
-
-    def list_legacy_models(self) -> Dict[str, Any]:
-        """GET /api/storage/migration/legacy/models - List legacy models."""
-        response = self._client.get("/api/storage/migration/legacy/models")
-        response.raise_for_status()
-        return response.json()
-
-    def list_legacy_datasets(self) -> Dict[str, Any]:
-        """GET /api/storage/migration/legacy/datasets - List legacy datasets."""
-        response = self._client.get("/api/storage/migration/legacy/datasets")
-        response.raise_for_status()
-        return response.json()
-
-    def migrate_models(self, item_ids: List[str], delete_legacy: bool = False) -> Dict[str, Any]:
-        """POST /api/storage/migration/models - Migrate models to new version."""
-        response = self._client.post(
-            "/api/storage/migration/models",
-            json={"item_ids": item_ids, "delete_legacy": delete_legacy},
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def migrate_datasets(self, item_ids: List[str], delete_legacy: bool = False) -> Dict[str, Any]:
-        """POST /api/storage/migration/datasets - Migrate datasets to new version."""
-        response = self._client.post(
-            "/api/storage/migration/datasets",
-            json={"item_ids": item_ids, "delete_legacy": delete_legacy},
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def migrate_single_model(self, item_id: str, delete_legacy: bool = False, timeout: float = 600.0) -> Dict[str, Any]:
-        """Migrate a single model with extended timeout for large files."""
-        with httpx.Client(base_url=self.base_url, timeout=timeout) as client:
-            response = client.post(
-                "/api/storage/migration/models",
-                json={"item_ids": [item_id], "delete_legacy": delete_legacy},
-            )
-            response.raise_for_status()
-            return response.json()
-
-    def migrate_single_dataset(self, item_id: str, delete_legacy: bool = False, timeout: float = 600.0) -> Dict[str, Any]:
-        """Migrate a single dataset with extended timeout for large files."""
-        with httpx.Client(base_url=self.base_url, timeout=timeout) as client:
-            response = client.post(
-                "/api/storage/migration/datasets",
-                json={"item_ids": [item_id], "delete_legacy": delete_legacy},
-            )
-            response.raise_for_status()
-            return response.json()
-
-    def migrate_with_progress(
-        self,
-        entry_type: str,
-        item_ids: List[str],
-        delete_legacy: bool = False,
-        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> Dict[str, Any]:
-        """Migrate items with real-time progress via WebSocket.
-
-        Args:
-            entry_type: 'models' or 'datasets'
-            item_ids: List of item IDs to migrate
-            delete_legacy: Delete legacy items after migration
-            progress_callback: Called with progress updates
-
-        Returns:
-            Final result with success_count, failed_count, results
-        """
-        import websocket
-
-        # Convert http URL to ws URL
-        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = f"{ws_url}/api/storage/ws/migration"
-
-        result = {"success_count": 0, "failed_count": 0, "results": {}}
-
-        try:
-            ws = websocket.create_connection(ws_url)
-
-            # Send migration request
-            ws.send(json.dumps({
-                "action": "migrate",
-                "entry_type": entry_type,
-                "item_ids": item_ids,
-                "delete_legacy": delete_legacy,
-            }))
-
-            # Receive progress updates until done
-            while True:
-                message = ws.recv()
-                data = json.loads(message)
-
-                if progress_callback:
-                    progress_callback(data)
-
-                if data.get("type") == "done":
-                    result = data
-                    break
-                elif data.get("type") == "error" and "item_id" not in data:
-                    # Global error
-                    raise Exception(data.get("error", "Unknown error"))
-
-            ws.close()
-        except ImportError:
-            # websocket-client not installed, fall back to HTTP
-            if progress_callback:
-                progress_callback({"type": "fallback", "message": "WebSocket not available, using HTTP"})
-            for item_id in item_ids:
-                if progress_callback:
-                    progress_callback({"type": "start", "item_id": item_id})
-                try:
-                    if entry_type == "models":
-                        res = self.migrate_single_model(item_id, delete_legacy)
-                    else:
-                        res = self.migrate_single_dataset(item_id, delete_legacy)
-                    item_result = res.get("results", {}).get(item_id, {})
-                    result["results"][item_id] = item_result
-                    if item_result.get("success"):
-                        result["success_count"] += 1
-                    else:
-                        result["failed_count"] += 1
-                    if progress_callback:
-                        progress_callback({"type": "complete", "item_id": item_id})
-                except Exception as e:
-                    result["results"][item_id] = {"success": False, "error": str(e)}
-                    result["failed_count"] += 1
-                    if progress_callback:
-                        progress_callback({"type": "error", "item_id": item_id, "error": str(e)})
-        except Exception as e:
-            raise Exception(f"Migration failed: {e}")
-
-        return result
-
-    def sync_with_progress(
-        self,
-        action: str,
-        entry_type: str,
-        item_ids: List[str],
-        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> Dict[str, Any]:
-        """Sync items (download/upload) with real-time progress via WebSocket.
-
-        Args:
-            action: 'download' or 'upload'
-            entry_type: 'models' or 'datasets'
-            item_ids: List of item IDs to sync
-            progress_callback: Called with progress updates
-
-        Returns:
-            Final result with success_count, failed_count, results
-        """
-        import websocket
-
-        # Convert http URL to ws URL
-        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = f"{ws_url}/api/storage/ws/sync"
-
-        result = {"success_count": 0, "failed_count": 0, "results": {}}
-
-        try:
-            ws = websocket.create_connection(ws_url)
-
-            # Send sync request
-            ws.send(json.dumps({
-                "action": action,
-                "entry_type": entry_type,
-                "item_ids": item_ids,
-            }))
-
-            # Receive progress updates until done
-            while True:
-                message = ws.recv()
-                data = json.loads(message)
-
-                if progress_callback:
-                    progress_callback(data)
-
-                if data.get("type") == "done":
-                    result = data
-                    break
-                elif data.get("type") == "error" and "item_id" not in data:
-                    # Global error
-                    raise Exception(data.get("error", "Unknown error"))
-
-            ws.close()
-        except ImportError:
-            # websocket-client not installed, fall back to HTTP
-            if progress_callback:
-                progress_callback({"type": "fallback", "message": "WebSocket not available, using HTTP"})
-            for item_id in item_ids:
-                if progress_callback:
-                    progress_callback({"type": "start", "item_id": item_id})
-                try:
-                    if action == "download":
-                        if entry_type == "models":
-                            self.download_model(item_id)
-                        else:
-                            self.download_dataset(item_id)
-                    else:  # upload
-                        if entry_type == "models":
-                            self.upload_model(item_id)
-                        else:
-                            self.upload_dataset(item_id)
-                    result["results"][item_id] = {"success": True, "error": ""}
-                    result["success_count"] += 1
-                    if progress_callback:
-                        progress_callback({"type": "complete", "item_id": item_id})
-                except Exception as e:
-                    result["results"][item_id] = {"success": False, "error": str(e)}
-                    result["failed_count"] += 1
-                    if progress_callback:
-                        progress_callback({"type": "error", "item_id": item_id, "error": str(e)})
-        except Exception as e:
-            raise Exception(f"Sync failed: {e}")
-
-        return result
 
     # =========================================================================
     # System

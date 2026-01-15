@@ -28,6 +28,13 @@ class ProjectCreateRequest(BaseModel):
     robot_type: str = Field("so101", description="Robot type (so101, so100, koch)")
 
 
+class ProjectImportRequest(BaseModel):
+    """Request to import a project from YAML content."""
+
+    yaml_content: str = Field(..., description="YAML content")
+    force: bool = Field(False, description="Overwrite if project already exists")
+
+
 class ProjectModel(BaseModel):
     """Project information."""
 
