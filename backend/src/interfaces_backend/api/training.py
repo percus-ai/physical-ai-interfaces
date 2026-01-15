@@ -3524,6 +3524,7 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
         channel.setblocking(0)
 
         last_heartbeat = asyncio.get_event_loop().time()
+        last_status_check = last_heartbeat
 
         while True:
             # Check for incoming data from SSH
@@ -3555,16 +3556,18 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
                 last_heartbeat = now
 
             # Check job status periodically
-            job_data = _load_job(job_id)
-            if job_data:
-                status = job_data.get("status", "")
-                if status not in ("running", "starting", "deploying"):
-                    await websocket.send_json({
-                        "type": "status",
-                        "status": status,
-                        "message": f"ジョブ状態: {status}"
-                    })
-                    break
+            if now - last_status_check > 2:
+                job_data = _load_job(job_id)
+                last_status_check = now
+                if job_data:
+                    status = job_data.get("status", "")
+                    if status not in ("running", "starting", "deploying"):
+                        await websocket.send_json({
+                            "type": "status",
+                            "status": status,
+                            "message": f"ジョブ状態: {status}"
+                        })
+                        break
 
             # Small delay to avoid busy loop
             await asyncio.sleep(0.1)
@@ -3676,6 +3679,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
         log_file = _get_log_file_path(job_data)
 
         last_heartbeat = asyncio.get_event_loop().time()
+        last_status_check = last_heartbeat
         last_progress_update = asyncio.get_event_loop().time()
 
         while True:
@@ -3750,15 +3754,17 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
                 last_progress_update = now
 
             # Check job status periodically
-            job_data = _load_job(job_id)
-            if job_data:
-                status = job_data.get("status", "")
-                if status not in ("running", "starting", "deploying"):
-                    await websocket.send_json({
-                        "type": "job_status_changed",
-                        "status": status
-                    })
-                    break
+            if now - last_status_check > 2:
+                job_data = _load_job(job_id)
+                last_status_check = now
+                if job_data:
+                    status = job_data.get("status", "")
+                    if status not in ("running", "starting", "deploying"):
+                        await websocket.send_json({
+                            "type": "job_status_changed",
+                            "status": status
+                        })
+                        break
 
             await asyncio.sleep(0.05)
 
@@ -3786,6 +3792,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
 async def _run_session_loop_no_ssh(websocket: WebSocket, job_id: str):
     """Run session loop without SSH connection (local data only)."""
     last_heartbeat = asyncio.get_event_loop().time()
+    last_status_check = last_heartbeat
 
     try:
         while True:
@@ -3814,15 +3821,17 @@ async def _run_session_loop_no_ssh(websocket: WebSocket, job_id: str):
                 last_heartbeat = now
 
             # Check job status
-            job_data = _load_job(job_id)
-            if job_data:
-                status = job_data.get("status", "")
-                if status not in ("running", "starting", "deploying", "pending"):
-                    await websocket.send_json({
-                        "type": "job_status_changed",
-                        "status": status
-                    })
-                    break
+            if now - last_status_check > 2:
+                job_data = _load_job(job_id)
+                last_status_check = now
+                if job_data:
+                    status = job_data.get("status", "")
+                    if status not in ("running", "starting", "deploying", "pending"):
+                        await websocket.send_json({
+                            "type": "job_status_changed",
+                            "status": status
+                        })
+                        break
 
             await asyncio.sleep(0.1)
 
