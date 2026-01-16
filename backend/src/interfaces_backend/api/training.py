@@ -397,6 +397,16 @@ def _generate_env_file(job_id: str, instance_id: str, auto_delete: bool = True) 
     if gh_token:
         lines.append(f"GH_TOKEN={gh_token}")
 
+    # Supabase credentials for remote status updates
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    if supabase_url and supabase_key:
+        lines.append(f"SUPABASE_URL={supabase_url}")
+        if os.environ.get("SUPABASE_SERVICE_ROLE_KEY"):
+            lines.append(f"SUPABASE_SERVICE_ROLE_KEY={supabase_key}")
+        else:
+            lines.append(f"SUPABASE_ANON_KEY={supabase_key}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -2540,18 +2550,13 @@ def _create_job_with_progress(
                 logger.warning(f"Log streaming error (non-fatal): {e}")
                 emit_progress({"type": "training_log", "message": f"ログ取得エラー: {e}"})
 
-            # Update status to running
-            job_data["status"] = "running"
-            job_data["updated_at"] = datetime.now().isoformat()
-            _save_job(job_data)
-
             emit_progress({
                 "type": "complete",
-                "message": "学習ジョブを開始しました!",
+                "message": "学習プロセスを起動しました。リモート側の開始確認待ちです。",
                 "job_id": job_id,
                 "instance_id": instance_id,
                 "ip": ip,
-                "status": "running",
+                "status": "deploying",
             })
 
             return {
@@ -2559,7 +2564,7 @@ def _create_job_with_progress(
                 "job_id": job_id,
                 "instance_id": instance_id,
                 "ip": ip,
-                "status": "running",
+                "status": "deploying",
             }
 
         finally:
@@ -2814,11 +2819,6 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
             # Start training using RemoteExecutor with tmux
             executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
             executor.run_background("bash setup_env.sh train", session_name=TMUX_SESSION_NAME)
-
-            # Update status to running
-            job_data["status"] = "running"
-            job_data["updated_at"] = datetime.now().isoformat()
-            _save_job(job_data)
 
         finally:
             conn.disconnect()
