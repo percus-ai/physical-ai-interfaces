@@ -91,36 +91,35 @@ def _load_user_config() -> dict:
 
 def _save_user_config(config: dict) -> None:
     """Save user configuration to file."""
-    try:
-        # Create directory if needed
-        USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Create directory if needed
+    USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        # Convert to YAML structure
-        data = {
-            "user": {
-                "username": config.get("username", "unknown"),
-                "email": config.get("email", ""),
-            },
-            "environment": {
-                "preferred_tool": config.get("preferred_tool", "uv"),
-                "gpu_available": config.get("gpu_available", False),
-                "cuda_version": config.get("cuda_version"),
-            },
-            "sync": {
-                "auto_upload_after_recording": config.get("auto_upload_after_recording", True),
-                "auto_download_models": config.get("auto_download_models", True),
-                "sync_on_startup": config.get("sync_on_startup", False),
-            },
-            "recording": {
-                "default_fps": config.get("default_fps", 30),
-                "preview_window": config.get("preview_window", True),
-                "save_raw_video": config.get("save_raw_video", True),
-            },
-            "devices_file": config.get("devices_file", "user_devices.json"),
-        }
+    # Convert to YAML structure
+    data = {
+        "user": {
+            "username": config.get("username", "unknown"),
+            "email": config.get("email", ""),
+        },
+        "environment": {
+            "preferred_tool": config.get("preferred_tool", "uv"),
+            "gpu_available": config.get("gpu_available", False),
+            "cuda_version": config.get("cuda_version"),
+        },
+        "sync": {
+            "auto_upload_after_recording": config.get("auto_upload_after_recording", True),
+            "auto_download_models": config.get("auto_download_models", True),
+            "sync_on_startup": config.get("sync_on_startup", False),
+        },
+        "recording": {
+            "default_fps": config.get("default_fps", 30),
+            "preview_window": config.get("preview_window", True),
+            "save_raw_video": config.get("save_raw_video", True),
+        },
+        "devices_file": config.get("devices_file", "user_devices.json"),
+    }
 
-        with open(USER_CONFIG_PATH, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+    with open(USER_CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
 def _load_device_config() -> dict:
     """Load device configuration from file."""
