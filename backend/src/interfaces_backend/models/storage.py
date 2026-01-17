@@ -32,6 +32,24 @@ class DatasetListResponse(BaseModel):
     total: int
 
 
+class DatasetMergeRequest(BaseModel):
+    """Request to merge multiple datasets into one."""
+
+    project_id: str = Field(..., description="Project ID")
+    dataset_name: str = Field(..., description="Merged dataset name")
+    source_dataset_ids: List[str] = Field(..., description="Source dataset IDs (>=2)")
+
+
+class DatasetMergeResponse(BaseModel):
+    """Response for dataset merge."""
+
+    success: bool
+    dataset_id: str
+    message: str
+    size_bytes: int = 0
+    episode_count: int = 0
+
+
 class ModelInfo(BaseModel):
     """Model information for API responses."""
 

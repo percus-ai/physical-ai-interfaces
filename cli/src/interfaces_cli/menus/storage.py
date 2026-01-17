@@ -9,6 +9,11 @@ from InquirerPy.separator import Separator
 from interfaces_cli.banner import format_size, show_section_header
 from interfaces_cli.menu_system import BaseMenu, MenuResult
 from interfaces_cli.styles import Colors, hacker_style
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 class StorageMenu(BaseMenu):
     """Storage menu - Data management operations."""
@@ -76,7 +81,7 @@ class DatasetsMenu(BaseMenu):
     title = "データセット"
 
     def get_choices(self) -> List[Choice]:
-        choices = []
+        choices = [Choice(value="__bulk__", name="🧰 一括メニュー（マージ・アーカイブ）")]
         try:
             result = self.api.list_datasets()
             datasets = result.get("datasets", [])
@@ -88,16 +93,255 @@ class DatasetsMenu(BaseMenu):
         except Exception:
             pass
 
-        if not choices:
+        if len(choices) == 1:
             choices.append(Choice(value="__none__", name="(No datasets)"))
 
         return choices
 
     def handle_choice(self, choice: Any) -> MenuResult:
+        if choice == "__bulk__":
+            return self._show_bulk_actions()
         if choice == "__none__":
             return MenuResult.BACK
 
         return self._show_dataset_actions(choice)
+
+    def _show_bulk_actions(self) -> MenuResult:
+        """Show bulk actions for datasets."""
+        show_section_header("Datasets: Bulk Actions")
+
+        try:
+            result = self.api.list_datasets()
+            datasets = [d for d in result.get("datasets", []) if d.get("status") == "active"]
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
+
+        if not datasets:
+            print(f"{Colors.warning('No active datasets')}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
+
+        selections = inquirer.checkbox(
+            message="Select datasets:",
+            choices=[
+                Choice(
+                    value=d.get("id"),
+                    name=f"{d.get('id')} ({format_size(d.get('size_bytes', 0))})",
+                )
+                for d in datasets
+            ],
+            style=hacker_style,
+        ).execute()
+
+        if not selections:
+            print(f"{Colors.warning('No datasets selected')}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
+
+        action = inquirer.select(
+            message="Bulk action:",
+            choices=[
+                Choice(value="merge", name="Merge"),
+                Choice(value="archive", name="Archive"),
+                Choice(value="back", name="« Back"),
+            ],
+            style=hacker_style,
+        ).execute()
+
+        if action == "merge":
+            if len(selections) < 2:
+                print(f"{Colors.warning('Select at least two datasets')}")
+            else:
+                selected_map = {d.get("id"): d for d in datasets}
+                selected_rows = [selected_map.get(dataset_id) for dataset_id in selections]
+                selected_rows = [row for row in selected_rows if row is not None]
+                project_ids = {row.get("project_id") for row in selected_rows}
+                if len(project_ids) != 1:
+                    print(f"{Colors.error('Project mismatch in selections')}")
+                else:
+                    project_id = next(iter(project_ids))
+                    first_id = selections[0]
+                    default_name = f"{first_id.split('/')[-1]}_merged"
+                    dataset_name = inquirer.text(
+                        message="New dataset name:",
+                        default=default_name,
+                        style=hacker_style,
+                    ).execute()
+                    confirm = inquirer.confirm(
+                        message=f"Merge {len(selections)} datasets into {project_id}/{dataset_name}?",
+                        default=False,
+                        style=hacker_style,
+                    ).execute()
+                    if confirm:
+                        payload = {
+                            "project_id": project_id,
+                            "dataset_name": dataset_name,
+                            "source_dataset_ids": selections,
+                        }
+                        self._merge_datasets_with_progress(payload)
+
+        elif action == "archive":
+            confirm = inquirer.confirm(
+                message=f"Archive {len(selections)} datasets?",
+                default=False,
+                style=hacker_style,
+            ).execute()
+            if confirm:
+                errors = []
+                for dataset_id in selections:
+                    try:
+                        self.api.delete_dataset(dataset_id)
+                    except Exception as e:
+                        errors.append(f"{dataset_id}: {e}")
+                if errors:
+                    print(f"{Colors.error('Some errors occurred')}")
+                    for err in errors:
+                        print(f"  {err}")
+                else:
+                    print(f"{Colors.success('Datasets archived')}")
+
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+    def _merge_datasets_with_progress(self, payload: dict) -> None:
+        console = Console()
+        status_info = {
+            "step": "merge",
+            "message": "",
+            "dataset_id": "",
+        }
+        upload_info = {
+            "active": False,
+            "current_file": "",
+            "file_size": 0,
+            "bytes_transferred": 0,
+            "files_done": 0,
+            "total_files": 0,
+            "total_size": 0,
+        }
+        output_lines: List[str] = []
+        max_display_lines = 6
+
+        def make_progress_panel() -> Panel:
+            if upload_info["active"]:
+                table = Table(show_header=False, box=None, padding=(0, 1))
+                table.add_column("Label", style="cyan")
+                table.add_column("Value")
+
+                table.add_row("ステップ:", "upload")
+                if status_info["dataset_id"]:
+                    table.add_row("データセット:", status_info["dataset_id"])
+
+                if upload_info["current_file"]:
+                    if upload_info["file_size"] > 0:
+                        pct = (upload_info["bytes_transferred"] / upload_info["file_size"]) * 100
+                        transferred_str = format_size(upload_info["bytes_transferred"])
+                        size_str = format_size(upload_info["file_size"])
+                        progress_str = f"{transferred_str} / {size_str} ({pct:.1f}%)"
+                    else:
+                        progress_str = format_size(upload_info["file_size"]) if upload_info["file_size"] else "..."
+                    table.add_row("ファイル:", upload_info["current_file"])
+                    table.add_row("転送:", progress_str)
+
+                if upload_info["total_files"] > 0:
+                    table.add_row("ファイル数:", f"{upload_info['files_done']}/{upload_info['total_files']}")
+
+                if upload_info["total_size"] > 0:
+                    table.add_row("合計サイズ:", format_size(upload_info["total_size"]))
+
+                return Panel(table, title="📤 マージ結果をアップロード中", border_style="green")
+
+            text = Text()
+            step = status_info["step"].replace("_", " ")
+            text.append(f"Step: {step}\n", style="cyan")
+            if status_info["message"]:
+                text.append(f"Status: {status_info['message']}\n", style="cyan")
+            if status_info["dataset_id"]:
+                text.append(f"Dataset: {status_info['dataset_id']}\n", style="dim")
+            text.append("\n")
+
+            display_lines = output_lines[-max_display_lines:]
+            for line in display_lines:
+                lower = line.lower()
+                if lower.startswith("[error]") or "error" in lower:
+                    text.append(line + "\n", style="red")
+                elif lower.startswith("[upload]") or lower.startswith("[download]"):
+                    text.append(line + "\n", style="green")
+                elif lower.startswith("[info]"):
+                    text.append(line + "\n", style="dim")
+                else:
+                    text.append(line + "\n", style="dim")
+
+            return Panel(text, title="🧩 データセットマージ中", border_style="cyan")
+
+        def progress_callback(message: dict) -> None:
+            msg_type = message.get("type")
+            if msg_type == "heartbeat":
+                return
+            if msg_type in ("start", "step_complete"):
+                status_info["step"] = message.get("step", status_info["step"])
+                status_info["message"] = message.get("message", status_info["message"])
+                output_lines.append(f"[info] {status_info['step']}: {status_info['message']}")
+                return
+            if msg_type == "progress" and message.get("step") == "download":
+                status_info["step"] = "download"
+                status_info["dataset_id"] = message.get("dataset_id", "")
+                status_info["message"] = "Downloading"
+                output_lines.append(f"[download] {status_info['dataset_id']}")
+                return
+            if msg_type == "upload_start":
+                upload_info["active"] = True
+                upload_info["total_files"] = message.get("total_files", 0)
+                upload_info["total_size"] = message.get("total_size", 0)
+                upload_info["files_done"] = 0
+                output_lines.append("[upload] start")
+                return
+            if msg_type == "uploading":
+                upload_info["active"] = True
+                upload_info["current_file"] = message.get("current_file", "")
+                upload_info["file_size"] = message.get("file_size", 0)
+                upload_info["bytes_transferred"] = 0
+                upload_info["files_done"] = message.get("files_done", 0)
+                output_lines.append(f"[upload] {upload_info['current_file']}")
+                return
+            if msg_type == "upload_progress":
+                upload_info["current_file"] = message.get("current_file", "")
+                upload_info["file_size"] = message.get("file_size", 0)
+                upload_info["bytes_transferred"] = message.get("bytes_transferred", 0)
+                return
+            if msg_type == "upload_file_complete":
+                upload_info["files_done"] = message.get("files_done", 0)
+                upload_info["bytes_transferred"] = upload_info["file_size"]
+                output_lines.append(f"[upload] done {upload_info['current_file']}")
+                return
+            if msg_type == "upload_complete":
+                upload_info["active"] = False
+                status_info["message"] = "Upload complete"
+                output_lines.append("[upload] complete")
+                return
+            if msg_type == "error":
+                status_info["message"] = f"Error: {message.get('error', 'Unknown')}"
+                output_lines.append(f"[error] {message.get('error', 'Unknown')}")
+                return
+            if msg_type == "complete":
+                status_info["message"] = "Merge completed"
+                dataset_id = message.get("dataset_id", "N/A")
+                output_lines.append(f"[info] complete: {dataset_id}")
+
+        with Live(make_progress_panel(), refresh_per_second=4, console=console) as live:
+            def live_progress_callback(data: dict) -> None:
+                progress_callback(data)
+                live.update(make_progress_panel())
+
+            result = self.api.merge_datasets_ws(payload, live_progress_callback)
+
+        if result.get("type") == "error":
+            print(f"{Colors.error('Error:')} {result.get('error')}")
+        elif result.get("type") == "complete":
+            dataset_id = result.get("dataset_id", "N/A")
+            print(f"{Colors.success('Merged dataset created')}: {dataset_id}")
 
     def _show_dataset_actions(self, dataset_id: str) -> MenuResult:
         """Show actions for a specific dataset."""
@@ -124,6 +368,7 @@ class DatasetsMenu(BaseMenu):
             choices=[
                 Choice(value="archive", name="Archive"),
                 Choice(value="restore", name="Restore"),
+                Choice(value="merge", name="Merge"),
                 Choice(value="back", name="« Back"),
             ],
             style=hacker_style,
@@ -146,6 +391,55 @@ class DatasetsMenu(BaseMenu):
             try:
                 self.api.restore_dataset(dataset_id)
                 print(f"{Colors.success('Dataset restored')}")
+            except Exception as e:
+                print(f"{Colors.error('Error:')} {e}")
+
+        elif action == "merge":
+            try:
+                project_id = dataset.get("project_id")
+                list_result = self.api.list_datasets()
+                candidates = [
+                    d for d in list_result.get("datasets", [])
+                    if d.get("project_id") == project_id
+                    and d.get("status") == "active"
+                    and d.get("id") != dataset_id
+                ]
+                if not candidates:
+                    print(f"{Colors.warning('No additional datasets to merge')}")
+                else:
+                    selections = inquirer.checkbox(
+                        message="Merge with datasets:",
+                        choices=[
+                            Choice(
+                                value=d.get("id"),
+                                name=f"{d.get('id')} ({format_size(d.get('size_bytes', 0))})",
+                            )
+                            for d in candidates
+                        ],
+                        style=hacker_style,
+                    ).execute()
+
+                    if not selections:
+                        print(f"{Colors.warning('No datasets selected')}")
+                    else:
+                        default_name = f"{dataset_id.split('/')[-1]}_merged"
+                        dataset_name = inquirer.text(
+                            message="New dataset name:",
+                            default=default_name,
+                            style=hacker_style,
+                        ).execute()
+                        confirm = inquirer.confirm(
+                            message=f"Merge {len(selections) + 1} datasets into {project_id}/{dataset_name}?",
+                            default=False,
+                            style=hacker_style,
+                        ).execute()
+                        if confirm:
+                            payload = {
+                                "project_id": project_id,
+                                "dataset_name": dataset_name,
+                                "source_dataset_ids": [dataset_id, *selections],
+                            }
+                            self._merge_datasets_with_progress(payload)
             except Exception as e:
                 print(f"{Colors.error('Error:')} {e}")
 

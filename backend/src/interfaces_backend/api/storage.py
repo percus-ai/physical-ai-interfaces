@@ -1,17 +1,22 @@
 """Storage API router for datasets/models (DB-backed)."""
 
+import asyncio
 import logging
 import shutil
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from huggingface_hub import HfApi, snapshot_download, upload_folder
+from pydantic import ValidationError
 
 from interfaces_backend.models.storage import (
     ArchiveListResponse,
     ArchiveBulkRequest,
     ArchiveBulkResponse,
     ArchiveResponse,
+    DatasetMergeRequest,
+    DatasetMergeResponse,
     DatasetInfo,
     DatasetListResponse,
     HuggingFaceDatasetImportRequest,
@@ -23,12 +28,17 @@ from interfaces_backend.models.storage import (
     StorageUsageResponse,
 )
 from percus_ai.db import get_supabase_client
+from percus_ai.storage.hash import compute_directory_hash, compute_directory_size
 from percus_ai.storage.hub import download_model, ensure_hf_token, get_local_model_info, upload_model
+from percus_ai.storage.naming import validate_dataset_name
 from percus_ai.storage.paths import get_datasets_dir, get_models_dir
 from percus_ai.storage.r2_db_sync import R2DBSyncService
+from lerobot.datasets.aggregate import aggregate_datasets
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/storage", tags=["storage"])
+_executor = ThreadPoolExecutor(max_workers=1)
 
 
 def _dataset_is_local(dataset_id: str) -> bool:
@@ -103,6 +113,189 @@ async def list_datasets(
 
     datasets = [_dataset_row_to_info(row) for row in rows]
     return DatasetListResponse(datasets=datasets, total=len(datasets))
+
+
+def _merge_datasets(
+    request: DatasetMergeRequest,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> DatasetMergeResponse:
+    def report(message: dict) -> None:
+        if progress_callback:
+            progress_callback(message)
+
+    source_dataset_ids = list(dict.fromkeys(request.source_dataset_ids))
+    if len(source_dataset_ids) < 2:
+        raise HTTPException(status_code=400, detail="At least two source datasets are required")
+
+    is_valid, errors = validate_dataset_name(request.dataset_name)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"Invalid dataset name: {'; '.join(errors)}")
+
+    merged_dataset_id = f"{request.project_id}/{request.dataset_name}"
+    client = get_supabase_client()
+    existing = client.table("datasets").select("id").eq("id", merged_dataset_id).execute().data or []
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Dataset already exists: {merged_dataset_id}")
+
+    report({"type": "start", "step": "validate", "message": "Validating datasets"})
+    source_rows = []
+    for dataset_id in source_dataset_ids:
+        rows = client.table("datasets").select("*").eq("id", dataset_id).execute().data or []
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+        row = rows[0]
+        if row.get("status") != "active":
+            raise HTTPException(status_code=400, detail=f"Dataset is not active: {dataset_id}")
+        if row.get("project_id") != request.project_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Project mismatch for dataset {dataset_id}: {row.get('project_id')}",
+            )
+        source_rows.append(row)
+    report({"type": "step_complete", "step": "validate", "message": "Validation complete"})
+
+    environment_ids = {row.get("environment_id") for row in source_rows if row.get("environment_id")}
+    if len(environment_ids) > 1:
+        raise HTTPException(status_code=400, detail="Environment mismatch across source datasets")
+    environment_id = next(iter(environment_ids), None)
+
+    report({"type": "start", "step": "download", "message": "Ensuring local datasets"})
+    sync_service = R2DBSyncService()
+    for dataset_id in source_dataset_ids:
+        report({"type": "progress", "step": "download", "dataset_id": dataset_id})
+        result = sync_service.ensure_dataset_local(dataset_id, auto_download=True)
+        if not result.success:
+            raise HTTPException(status_code=500, detail=f"Dataset download failed: {result.message}")
+    report({"type": "step_complete", "step": "download", "message": "Local datasets ready"})
+
+    datasets_dir = get_datasets_dir()
+    merged_root = datasets_dir / merged_dataset_id
+    if merged_root.exists():
+        raise HTTPException(status_code=409, detail=f"Local dataset already exists: {merged_dataset_id}")
+
+    report({"type": "start", "step": "aggregate", "message": "Aggregating datasets"})
+    roots = [datasets_dir / dataset_id for dataset_id in source_dataset_ids]
+    try:
+        aggregate_datasets(
+            repo_ids=source_dataset_ids,
+            aggr_repo_id=merged_dataset_id,
+            roots=roots,
+            aggr_root=merged_root,
+        )
+    except Exception as e:
+        if merged_root.exists():
+            shutil.rmtree(merged_root)
+        raise HTTPException(status_code=500, detail=f"Dataset merge failed: {e}") from e
+    report({"type": "step_complete", "step": "aggregate", "message": "Aggregation complete"})
+
+    metadata = LeRobotDatasetMetadata(merged_dataset_id, root=merged_root)
+    episode_count = metadata.total_episodes
+    size_bytes = compute_directory_size(merged_root)
+    content_hash = compute_directory_hash(merged_root, use_content=True)
+
+    def upload_progress(message: dict) -> None:
+        msg_type = message.get("type")
+        if msg_type == "error":
+            report({"type": "error", "error": message.get("error")})
+            return
+        type_map = {
+            "start": "upload_start",
+            "uploading": "uploading",
+            "progress": "upload_progress",
+            "uploaded": "upload_file_complete",
+            "complete": "upload_complete",
+        }
+        report({**message, "type": type_map.get(msg_type, msg_type), "step": "upload"})
+
+    report({"type": "start", "step": "upload", "message": "Uploading merged dataset"})
+    ok, error = sync_service.upload_dataset_with_progress(merged_dataset_id, upload_progress)
+    if not ok:
+        shutil.rmtree(merged_root)
+        raise HTTPException(status_code=500, detail=f"R2 upload failed: {error}")
+    report({"type": "step_complete", "step": "upload", "message": "Upload complete"})
+
+    payload = {
+        "id": merged_dataset_id,
+        "project_id": request.project_id,
+        "name": request.dataset_name,
+        "environment_id": environment_id,
+        "episode_count": episode_count,
+        "dataset_type": "merged",
+        "source": "r2",
+        "status": "active",
+        "size_bytes": size_bytes,
+        "content_hash": content_hash,
+    }
+    client.table("datasets").upsert(payload, on_conflict="id").execute()
+
+    return DatasetMergeResponse(
+        success=True,
+        dataset_id=merged_dataset_id,
+        message="Dataset merged",
+        size_bytes=size_bytes,
+        episode_count=episode_count,
+    )
+
+
+@router.post("/datasets/merge", response_model=DatasetMergeResponse)
+async def merge_datasets(request: DatasetMergeRequest):
+    """Merge multiple datasets into a new dataset."""
+    return _merge_datasets(request)
+
+
+@router.websocket("/ws/merge")
+async def websocket_merge_datasets(websocket: WebSocket):
+    """WebSocket endpoint for dataset merge with progress updates."""
+    await websocket.accept()
+
+    try:
+        data = await websocket.receive_json()
+        request = DatasetMergeRequest(**data)
+    except ValidationError as e:
+        await websocket.send_json({"type": "error", "error": str(e)})
+        await websocket.close()
+        return
+    except Exception:
+        await websocket.send_json({"type": "error", "error": "Invalid request"})
+        await websocket.close()
+        return
+
+    progress_queue: asyncio.Queue = asyncio.Queue()
+    main_loop = asyncio.get_running_loop()
+
+    def progress_callback(progress: dict) -> None:
+        asyncio.run_coroutine_threadsafe(progress_queue.put(progress), main_loop)
+
+    async def run_merge() -> None:
+        try:
+            result = await main_loop.run_in_executor(_executor, lambda: _merge_datasets(request, progress_callback))
+            await progress_queue.put({"type": "complete", **result.model_dump()})
+        except HTTPException as e:
+            await progress_queue.put({"type": "error", "error": e.detail})
+        except Exception as e:
+            await progress_queue.put({"type": "error", "error": str(e)})
+
+    merge_task = asyncio.create_task(run_merge())
+
+    try:
+        while True:
+            try:
+                progress = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                await websocket.send_json(progress)
+                if progress.get("type") in ("complete", "error"):
+                    break
+            except asyncio.TimeoutError:
+                if merge_task.done():
+                    break
+                await websocket.send_json({"type": "heartbeat"})
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected during dataset merge")
+    except Exception as e:
+        logger.error(f"WebSocket merge error: {e}")
+    finally:
+        if not merge_task.done():
+            merge_task.cancel()
+        await websocket.close()
 
 
 @router.get("/datasets/{dataset_id:path}", response_model=DatasetInfo)
