@@ -255,6 +255,7 @@ async def delete_archived_model(model_id: str):
     sync_service = R2DBSyncService()
     sync_service.delete_model_remote(model_id)
     _delete_local_model(model_id)
+    client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
     client.table("models").delete().eq("id", model_id).execute()
     return ArchiveResponse(id=model_id, success=True, message="Model deleted", status="deleted")
 
@@ -321,6 +322,7 @@ async def delete_archived_items(request: ArchiveBulkRequest):
             continue
         sync_service.delete_model_remote(model_id)
         _delete_local_model(model_id)
+        client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
         client.table("models").delete().eq("id", model_id).execute()
         deleted.append(model_id)
 
