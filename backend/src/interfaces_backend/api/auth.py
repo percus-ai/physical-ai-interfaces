@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -43,6 +44,18 @@ def _extract_user_id(response: Any, session: Any) -> str | None:
     return _extract_value(user, "id")
 
 
+def _is_session_expired(session: Optional[dict[str, Any]]) -> bool:
+    if not session:
+        return True
+    expires_at = session.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        return time.time() >= float(expires_at) - 30
+    except (TypeError, ValueError):
+        return False
+
+
 @router.post("/login", response_model=AuthLoginResponse)
 def login(request: AuthLoginRequest) -> AuthLoginResponse:
     client = create_supabase_anon_client()
@@ -81,7 +94,8 @@ def logout() -> AuthStatusResponse:
 @router.get("/status", response_model=AuthStatusResponse)
 def status() -> AuthStatusResponse:
     session = get_cached_supabase_session() or load_supabase_session()
-    if not session:
+    if not session or _is_session_expired(session):
+        clear_supabase_session_file()
         return AuthStatusResponse(authenticated=False, user_id=None, expires_at=None)
     return AuthStatusResponse(
         authenticated=True,

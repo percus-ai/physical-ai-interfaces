@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 import yaml
+from postgrest.exceptions import APIError
 from fastapi import APIRouter, HTTPException
 from interfaces_backend.models.project import (
     ProjectCreateRequest,
@@ -40,7 +41,20 @@ async def debug_paths():
 @router.get("", response_model=ProjectListResponse)
 async def list_projects():
     """List all available projects."""
-    projects = ProjectManager().list_projects()
+    try:
+        projects = ProjectManager().list_projects()
+    except APIError as e:
+        error_data = None
+        if e.args and isinstance(e.args[0], dict):
+            error_data = e.args[0]
+        message = ""
+        code = ""
+        if isinstance(error_data, dict):
+            message = str(error_data.get("message", ""))
+            code = str(error_data.get("code", ""))
+        if code == "PGRST303" or "JWT expired" in message or "JWT expired" in str(e):
+            raise HTTPException(status_code=401, detail="JWT expired") from e
+        raise
     return ProjectListResponse(projects=projects, total=len(projects))
 
 

@@ -572,209 +572,14 @@ class HuggingFaceMenu(BaseMenu):
             return self._export_model()
         return MenuResult.CONTINUE
 
-
-class ArchiveMenu(BaseMenu):
-    """Archive management menu."""
-
-    title = "アーカイブ一覧"
-
-    def get_choices(self) -> List[Choice]:
-        choices: List[Choice] = []
-        try:
-            result = self.api.list_archive()
-            datasets = result.get("datasets", [])
-            models = result.get("models", [])
-            for d in datasets:
-                item_id = d.get("id")
-                if not item_id:
-                    continue
-                size = format_size(d.get("size_bytes", 0))
-                choices.append(Choice(value=("dataset", item_id), name=f"📁 {item_id} ({size})"))
-            for m in models:
-                item_id = m.get("id")
-                if not item_id:
-                    continue
-                size = format_size(m.get("size_bytes", 0))
-                choices.append(Choice(value=("model", item_id), name=f"🤖 {item_id} ({size})"))
-        except Exception:
-            pass
-
-        choices.append(Choice(value="bulk_restore", name="♻️  一括復元"))
-        choices.append(Choice(value="bulk_delete", name="🧹 一括削除"))
-        return choices
-
-    def handle_choice(self, choice: Any) -> MenuResult:
-        if choice == "bulk_restore":
-            return self._bulk_restore()
-        if choice == "bulk_delete":
-            return self._bulk_delete()
-        if isinstance(choice, tuple) and len(choice) == 2:
-            return self._show_item_detail(choice[0], choice[1])
-        return MenuResult.CONTINUE
-
-    def _select_items(self, label: str) -> List[tuple]:
-        try:
-            result = self.api.list_archive()
-            datasets = result.get("datasets", [])
-            models = result.get("models", [])
-        except Exception:
-            datasets = []
-            models = []
-
-        choices: List[Choice] = []
-        for d in datasets:
-            item_id = d.get("id")
-            if not item_id:
-                continue
-            choices.append(Choice(value=("dataset", item_id), name=f"📁 {item_id}"))
-        for m in models:
-            item_id = m.get("id")
-            if not item_id:
-                continue
-            choices.append(Choice(value=("model", item_id), name=f"🤖 {item_id}"))
-
-        if not choices:
-            print(f"{Colors.muted('アーカイブがありません。')}")
-            input(f"\n{Colors.muted('Press Enter to continue...')}")
-            return []
-
-        selected = inquirer.checkbox(
-            message=label,
-            choices=choices,
-            style=hacker_style,
-        ).execute()
-
-        return selected or []
-
-    def _bulk_restore(self) -> MenuResult:
-        items = self._select_items("復元する項目を選択:")
-        if not items:
-            return MenuResult.CONTINUE
-
-        dataset_ids = [item_id for item_type, item_id in items if item_type == "dataset"]
-        model_ids = [item_id for item_type, item_id in items if item_type == "model"]
-
-        confirm = inquirer.confirm(
-            message="選択した項目を復元しますか?",
-            default=False,
-            style=hacker_style,
-        ).execute()
-        if not confirm:
-            return MenuResult.CONTINUE
-
-        try:
-            result = self.api.restore_archives({
-                "dataset_ids": dataset_ids,
-                "model_ids": model_ids,
-            })
-            restored = result.get("restored", [])
-            errors = result.get("errors", [])
-            if restored:
-                print(f"{Colors.success('Restored')}: {len(restored)} items")
-            if errors:
-                print(f"{Colors.warning('Errors')}: {len(errors)}")
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
-
-    def _bulk_delete(self) -> MenuResult:
-        items = self._select_items("削除する項目を選択:")
-        if not items:
-            return MenuResult.CONTINUE
-
-        dataset_ids = [item_id for item_type, item_id in items if item_type == "dataset"]
-        model_ids = [item_id for item_type, item_id in items if item_type == "model"]
-
-        confirm = inquirer.confirm(
-            message="選択した項目を完全に削除しますか?",
-            default=False,
-            style=hacker_style,
-        ).execute()
-        if not confirm:
-            return MenuResult.CONTINUE
-
-        try:
-            result = self.api.delete_archives({
-                "dataset_ids": dataset_ids,
-                "model_ids": model_ids,
-            })
-            deleted = result.get("deleted", [])
-            errors = result.get("errors", [])
-            if deleted:
-                print(f"{Colors.success('Deleted')}: {len(deleted)} items")
-            if errors:
-                print(f"{Colors.warning('Errors')}: {len(errors)}")
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-
-        input(f"\n{Colors.muted('Press Enter to continue...')}")
-        return MenuResult.CONTINUE
-
-    def _show_item_detail(self, item_type: str, item_id: str) -> MenuResult:
-        show_section_header(f"Archived {item_type}: {item_id}")
-        try:
-            if item_type == "dataset":
-                item = self.api.get_dataset(item_id)
-            else:
-                item = self.api.get_model(item_id)
-            print(f"  ID: {item.get('id', 'N/A')}")
-            print(f"  Project: {item.get('project_id', 'N/A')}")
-            print(f"  Status: {item.get('status', 'N/A')}")
-            print(f"  Size: {format_size(item.get('size_bytes', 0))}")
-            print(f"  Created: {item.get('created_at', 'N/A')}")
-        except Exception as e:
-            print(f"{Colors.error('Error:')} {e}")
-            input(f"\n{Colors.muted('Press Enter to continue...')}")
-            return MenuResult.CONTINUE
-
-        action = inquirer.select(
-            message="Action:",
-            choices=[
-                Choice(value="restore", name="復元"),
-                Choice(value="delete", name="削除"),
-                Choice(value="back", name="« 戻る"),
-            ],
-            style=hacker_style,
-        ).execute()
-
-        if action == "restore":
-            try:
-                if item_type == "dataset":
-                    self.api.restore_dataset(item_id)
-                else:
-                    self.api.restore_model(item_id)
-                print(f"{Colors.success('Restored')}")
-            except Exception as e:
-                print(f"{Colors.error('Error:')} {e}")
-        elif action == "delete":
-            confirm = inquirer.confirm(
-                message="完全に削除しますか?",
-                default=False,
-                style=hacker_style,
-            ).execute()
-            if confirm:
-                try:
-                    if item_type == "dataset":
-                        self.api.delete_archived_dataset(item_id)
-                    else:
-                        self.api.delete_archived_model(item_id)
-                    print(f"{Colors.success('Deleted')}")
-                except Exception as e:
-                    print(f"{Colors.error('Error:')} {e}")
-
-        if action != "back":
-            input(f"\n{Colors.muted('Press Enter to continue...')}")
-
-        return MenuResult.CONTINUE
-
     def _select_project(self) -> Optional[str]:
         try:
             result = self.api.list_projects()
             projects = result.get("projects", [])
-        except Exception:
-            projects = []
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return None
 
         if not projects:
             print(f"{Colors.warning('No projects found.')}")
@@ -999,4 +804,201 @@ class ArchiveMenu(BaseMenu):
             print(f"{Colors.error('Error:')} {e}")
 
         input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+
+class ArchiveMenu(BaseMenu):
+    """Archive management menu."""
+
+    title = "アーカイブ一覧"
+
+    def get_choices(self) -> List[Choice]:
+        choices: List[Choice] = []
+        try:
+            result = self.api.list_archive()
+            datasets = result.get("datasets", [])
+            models = result.get("models", [])
+            for d in datasets:
+                item_id = d.get("id")
+                if not item_id:
+                    continue
+                size = format_size(d.get("size_bytes", 0))
+                choices.append(Choice(value=("dataset", item_id), name=f"📁 {item_id} ({size})"))
+            for m in models:
+                item_id = m.get("id")
+                if not item_id:
+                    continue
+                size = format_size(m.get("size_bytes", 0))
+                choices.append(Choice(value=("model", item_id), name=f"🤖 {item_id} ({size})"))
+        except Exception:
+            pass
+
+        choices.append(Choice(value="bulk_restore", name="♻️  一括復元"))
+        choices.append(Choice(value="bulk_delete", name="🧹 一括削除"))
+        return choices
+
+    def handle_choice(self, choice: Any) -> MenuResult:
+        if choice == "bulk_restore":
+            return self._bulk_restore()
+        if choice == "bulk_delete":
+            return self._bulk_delete()
+        if isinstance(choice, tuple) and len(choice) == 2:
+            return self._show_item_detail(choice[0], choice[1])
+        return MenuResult.CONTINUE
+
+    def _select_items(self, label: str) -> List[tuple]:
+        try:
+            result = self.api.list_archive()
+            datasets = result.get("datasets", [])
+            models = result.get("models", [])
+        except Exception:
+            datasets = []
+            models = []
+
+        choices: List[Choice] = []
+        for d in datasets:
+            item_id = d.get("id")
+            if not item_id:
+                continue
+            choices.append(Choice(value=("dataset", item_id), name=f"📁 {item_id}"))
+        for m in models:
+            item_id = m.get("id")
+            if not item_id:
+                continue
+            choices.append(Choice(value=("model", item_id), name=f"🤖 {item_id}"))
+
+        if not choices:
+            print(f"{Colors.muted('アーカイブがありません。')}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return []
+
+        selected = inquirer.checkbox(
+            message=label,
+            choices=choices,
+            style=hacker_style,
+        ).execute()
+
+        return selected or []
+
+    def _bulk_restore(self) -> MenuResult:
+        items = self._select_items("復元する項目を選択:")
+        if not items:
+            return MenuResult.CONTINUE
+
+        dataset_ids = [item_id for item_type, item_id in items if item_type == "dataset"]
+        model_ids = [item_id for item_type, item_id in items if item_type == "model"]
+
+        confirm = inquirer.confirm(
+            message="選択した項目を復元しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            return MenuResult.CONTINUE
+
+        try:
+            result = self.api.restore_archives({
+                "dataset_ids": dataset_ids,
+                "model_ids": model_ids,
+            })
+            restored = result.get("restored", [])
+            errors = result.get("errors", [])
+            if restored:
+                print(f"{Colors.success('Restored')}: {len(restored)} items")
+            if errors:
+                print(f"{Colors.warning('Errors')}: {len(errors)}")
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+    def _bulk_delete(self) -> MenuResult:
+        items = self._select_items("削除する項目を選択:")
+        if not items:
+            return MenuResult.CONTINUE
+
+        dataset_ids = [item_id for item_type, item_id in items if item_type == "dataset"]
+        model_ids = [item_id for item_type, item_id in items if item_type == "model"]
+
+        confirm = inquirer.confirm(
+            message="選択した項目を完全に削除しますか?",
+            default=False,
+            style=hacker_style,
+        ).execute()
+        if not confirm:
+            return MenuResult.CONTINUE
+
+        try:
+            result = self.api.delete_archives({
+                "dataset_ids": dataset_ids,
+                "model_ids": model_ids,
+            })
+            deleted = result.get("deleted", [])
+            errors = result.get("errors", [])
+            if deleted:
+                print(f"{Colors.success('Deleted')}: {len(deleted)} items")
+            if errors:
+                print(f"{Colors.warning('Errors')}: {len(errors)}")
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+        return MenuResult.CONTINUE
+
+    def _show_item_detail(self, item_type: str, item_id: str) -> MenuResult:
+        show_section_header(f"Archived {item_type}: {item_id}")
+        try:
+            if item_type == "dataset":
+                item = self.api.get_dataset(item_id)
+            else:
+                item = self.api.get_model(item_id)
+            print(f"  ID: {item.get('id', 'N/A')}")
+            print(f"  Project: {item.get('project_id', 'N/A')}")
+            print(f"  Status: {item.get('status', 'N/A')}")
+            print(f"  Size: {format_size(item.get('size_bytes', 0))}")
+            print(f"  Created: {item.get('created_at', 'N/A')}")
+        except Exception as e:
+            print(f"{Colors.error('Error:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return MenuResult.CONTINUE
+
+        action = inquirer.select(
+            message="Action:",
+            choices=[
+                Choice(value="restore", name="復元"),
+                Choice(value="delete", name="削除"),
+                Choice(value="back", name="« 戻る"),
+            ],
+            style=hacker_style,
+        ).execute()
+
+        if action == "restore":
+            try:
+                if item_type == "dataset":
+                    self.api.restore_dataset(item_id)
+                else:
+                    self.api.restore_model(item_id)
+                print(f"{Colors.success('Restored')}")
+            except Exception as e:
+                print(f"{Colors.error('Error:')} {e}")
+        elif action == "delete":
+            confirm = inquirer.confirm(
+                message="完全に削除しますか?",
+                default=False,
+                style=hacker_style,
+            ).execute()
+            if confirm:
+                try:
+                    if item_type == "dataset":
+                        self.api.delete_archived_dataset(item_id)
+                    else:
+                        self.api.delete_archived_model(item_id)
+                    print(f"{Colors.success('Deleted')}")
+                except Exception as e:
+                    print(f"{Colors.error('Error:')} {e}")
+
+        if action != "back":
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+
         return MenuResult.CONTINUE
