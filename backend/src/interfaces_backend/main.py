@@ -56,6 +56,7 @@ from interfaces_backend.api import (
     build_router,
     calibration_router,
     config_router,
+    experiments_router,
     hardware_router,
     inference_router,
     platform_router,
@@ -92,6 +93,7 @@ app.include_router(auth_router)
 app.include_router(build_router)
 app.include_router(calibration_router)
 app.include_router(config_router)
+app.include_router(experiments_router)
 app.include_router(hardware_router)
 app.include_router(inference_router)
 app.include_router(platform_router)

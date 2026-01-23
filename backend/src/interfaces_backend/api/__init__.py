@@ -5,6 +5,7 @@ from interfaces_backend.api.auth import router as auth_router
 from interfaces_backend.api.build import router as build_router
 from interfaces_backend.api.calibration import router as calibration_router
 from interfaces_backend.api.config import router as config_router
+from interfaces_backend.api.experiments import router as experiments_router
 from interfaces_backend.api.hardware import router as hardware_router
 from interfaces_backend.api.inference import router as inference_router
 from interfaces_backend.api.platform import router as platform_router
@@ -22,6 +23,7 @@ __all__ = [
     "build_router",
     "calibration_router",
     "config_router",
+    "experiments_router",
     "hardware_router",
     "inference_router",
     "platform_router",

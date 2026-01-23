@@ -19,6 +19,9 @@ from interfaces_backend.models.storage import (
     DatasetMergeResponse,
     DatasetInfo,
     DatasetListResponse,
+    EnvironmentCreateRequest,
+    EnvironmentInfo,
+    EnvironmentListResponse,
     HuggingFaceDatasetImportRequest,
     HuggingFaceExportRequest,
     HuggingFaceModelImportRequest,
@@ -80,6 +83,20 @@ def _dataset_row_to_info(row: dict) -> DatasetInfo:
     )
 
 
+def _environment_row_to_info(row: dict) -> EnvironmentInfo:
+    return EnvironmentInfo(
+        id=row.get("id"),
+        name=row.get("name") or row.get("id"),
+        description=row.get("description"),
+        camera_count=row.get("camera_count"),
+        camera_details=row.get("camera_details"),
+        image_files=row.get("image_files"),
+        notes=row.get("notes"),
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
+
+
 def _model_row_to_info(row: dict) -> ModelInfo:
     return ModelInfo(
         id=row.get("id"),
@@ -95,6 +112,60 @@ def _model_row_to_info(row: dict) -> ModelInfo:
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
+
+
+@router.get("/environments", response_model=EnvironmentListResponse)
+async def list_environments():
+    """List environments from DB."""
+    client = get_supabase_client()
+    rows = client.table("environments").select("*").execute().data or []
+    environments = [_environment_row_to_info(row) for row in rows]
+    return EnvironmentListResponse(environments=environments, total=len(environments))
+
+
+@router.post("/environments", response_model=EnvironmentInfo)
+async def create_environment(request: EnvironmentCreateRequest):
+    """Create environment in DB."""
+    record = {
+        "name": request.name,
+        "description": request.description,
+        "camera_count": request.camera_count,
+        "camera_details": request.camera_details,
+        "image_files": request.image_files,
+        "notes": request.notes,
+    }
+    upsert_with_owner("environments", "name", record)
+    client = get_supabase_client()
+    rows = (
+        client.table("environments")
+        .select("*")
+        .eq("name", request.name)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to create environment")
+    return _environment_row_to_info(rows[0])
+
+
+@router.get("/environments/{environment_id}", response_model=EnvironmentInfo)
+async def get_environment(environment_id: str):
+    """Get environment details from DB."""
+    client = get_supabase_client()
+    rows = (
+        client.table("environments")
+        .select("*")
+        .eq("id", environment_id)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Environment not found: {environment_id}")
+    return _environment_row_to_info(rows[0])
 
 
 @router.get("/datasets", response_model=DatasetListResponse)

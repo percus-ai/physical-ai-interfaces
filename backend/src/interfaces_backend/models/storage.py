@@ -32,6 +32,38 @@ class DatasetListResponse(BaseModel):
     total: int
 
 
+class EnvironmentInfo(BaseModel):
+    """Environment information for API responses."""
+
+    id: str = Field(..., description="Environment ID")
+    name: str = Field(..., description="Environment name")
+    description: Optional[str] = Field(None, description="Environment description")
+    camera_count: Optional[int] = Field(None, description="Camera count")
+    camera_details: Optional[dict] = Field(None, description="Camera details")
+    image_files: Optional[List[str]] = Field(None, description="R2 keys for images")
+    notes: Optional[str] = Field(None, description="Notes")
+    created_at: Optional[str] = Field(None, description="Creation time")
+    updated_at: Optional[str] = Field(None, description="Last update time")
+
+
+class EnvironmentListResponse(BaseModel):
+    """Response for environment list endpoint."""
+
+    environments: List[EnvironmentInfo]
+    total: int
+
+
+class EnvironmentCreateRequest(BaseModel):
+    """Request for creating environments."""
+
+    name: str = Field(..., description="Environment name")
+    description: Optional[str] = Field(None, description="Environment description")
+    camera_count: Optional[int] = Field(None, description="Camera count")
+    camera_details: Optional[dict] = Field(None, description="Camera details")
+    image_files: Optional[List[str]] = Field(None, description="R2 keys for images")
+    notes: Optional[str] = Field(None, description="Notes")
+
+
 class DatasetMergeRequest(BaseModel):
     """Request to merge multiple datasets into one."""
 
