@@ -9,6 +9,7 @@ This module implements the training CLI with:
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from InquirerPy import inquirer
@@ -2365,11 +2366,15 @@ class TrainingJobsMenu(BaseMenu):
             if status in ("running", "starting", "deploying"):
                 action_choices.append(Choice(value="stream_train_logs", name="📜 学習ログをストリーミング (Ctrl+Cで終了)"))
                 action_choices.append(Choice(value="stream_setup_logs", name="🧰 セットアップログをストリーミング (Ctrl+Cで終了)"))
+                action_choices.append(Choice(value="download_train_logs", name="📥 学習ログをダウンロード"))
+                action_choices.append(Choice(value="download_setup_logs", name="📥 セットアップログをダウンロード"))
                 action_choices.append(Choice(value="stop", name="⏹ ジョブを停止"))
                 action_choices.append(Choice(value="refresh", name="🔄 更新"))
             else:
                 action_choices.append(Choice(value="show_train_logs", name="📜 学習ログを表示 (最新30行)"))
                 action_choices.append(Choice(value="show_setup_logs", name="🧰 セットアップログを表示 (最新30行)"))
+                action_choices.append(Choice(value="download_train_logs", name="📥 学習ログをダウンロード"))
+                action_choices.append(Choice(value="download_setup_logs", name="📥 セットアップログをダウンロード"))
 
             if status in ("completed", "failed", "stopped", "terminated"):
                 action_choices.append(Choice(value="delete", name="🗑 ジョブを削除"))
@@ -2390,6 +2395,10 @@ class TrainingJobsMenu(BaseMenu):
                 self._stream_job_logs(job_id, log_type="training")
             elif action == "stream_setup_logs":
                 self._stream_job_logs(job_id, log_type="setup")
+            elif action == "download_train_logs":
+                self._download_job_logs(job_id, log_type="training")
+            elif action == "download_setup_logs":
+                self._download_job_logs(job_id, log_type="setup")
             elif action == "stop":
                 self._stop_job(job_id)
             elif action == "delete":
@@ -2412,6 +2421,9 @@ class TrainingJobsMenu(BaseMenu):
         try:
             result = self.api.get_training_job_logs(job_id, log_type=log_type)
             logs = result.get("logs", "")
+            source = result.get("source")
+            if source == "r2":
+                print(f"  {Colors.muted('[R2から取得]')}")
             if logs:
                 lines = logs.strip().split("\n") if isinstance(logs, str) else logs
                 for line in lines[-30:]:
@@ -2420,6 +2432,25 @@ class TrainingJobsMenu(BaseMenu):
                 print(f"  {Colors.muted('ログなし')}")
         except Exception as e:
             print(f"{Colors.error('エラー:')} {e}")
+        input(f"\n{Colors.muted('Press Enter to continue...')}")
+
+    def _download_job_logs(self, job_id: str, log_type: str = "training") -> None:
+        title = "学習ログ" if log_type == "training" else "セットアップログ"
+        try:
+            logs = self.api.download_training_job_logs(job_id, log_type=log_type)
+        except Exception as e:
+            print(f"{Colors.error('エラー:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return
+
+        safe_job_id = job_id.replace("/", "_")
+        file_name = f"{safe_job_id}_{log_type}.log"
+        output_dir = Path("outputs") / "logs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        file_path = output_dir / file_name
+        file_path.write_text(logs, encoding="utf-8")
+        print(f"{Colors.success(f'{title}を保存しました')}")
+        print(f"  {file_path}")
         input(f"\n{Colors.muted('Press Enter to continue...')}")
 
     def _stream_job_logs(self, job_id: str, log_type: str = "training") -> None:

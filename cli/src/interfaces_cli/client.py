@@ -1123,6 +1123,15 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
+    def download_training_job_logs(self, job_id: str, log_type: str = "training") -> str:
+        """GET /api/training/jobs/{job_id}/logs/download - Download full logs."""
+        response = self._client.get(
+            f"/api/training/jobs/{job_id}/logs/download",
+            params={"log_type": log_type},
+        )
+        response.raise_for_status()
+        return response.text
+
     def stream_training_job_logs_ws(
         self,
         job_id: str,

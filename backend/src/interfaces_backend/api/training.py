@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from verda import VerdaClient
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 
 from interfaces_backend.models.training import (
     JobInfo,
@@ -849,6 +850,129 @@ def _get_remote_logs(job_data: dict, lines: int = 100, log_type: str = "training
         conn.disconnect()
 
 
+def _get_remote_log_file(job_data: dict, log_type: str = "training") -> Optional[str]:
+    conn = _get_ssh_connection_for_job(job_data)
+    if not conn:
+        return None
+    try:
+        if log_type == "setup":
+            log_file = _get_setup_log_file_path(job_data)
+        else:
+            log_file = _get_training_log_file_path(job_data)
+        cmd = f"cat {log_file} 2>/dev/null || echo '[Log file not found]'"
+        exit_code, stdout, stderr = conn.exec_command(cmd)
+        return stdout
+    except Exception:
+        return None
+    finally:
+        conn.disconnect()
+
+
+def _get_log_file_name(job_data: dict, log_type: str) -> str:
+    mode = job_data.get("mode", "train")
+    if log_type == "setup":
+        return f"setup_env_{mode}.log"
+    return f"training_{mode}.log"
+
+
+def _get_logs_r2_sync_service() -> Optional["R2SyncService"]:
+    try:
+        from percus_ai.storage import ManifestManager, R2SyncService
+
+        manifest = ManifestManager()
+        manifest.init_directories()
+        bucket = os.getenv("R2_BUCKET", "percus-data")
+        version = os.getenv("R2_VERSION", "v2")
+        return R2SyncService(manifest, bucket, version=version)
+    except Exception as e:
+        logger.warning(f"Failed to init R2 sync service for logs: {e}")
+        return None
+
+
+def _upload_log_file_to_r2(r2: "R2SyncService", local_path: Path, job_id: str) -> bool:
+    try:
+        prefix = f"{r2.version}/" if r2.version else ""
+        key = f"{prefix}training_logs/{job_id}/{local_path.name}"
+        r2.s3.client.upload_file(str(local_path), r2.bucket, key)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to upload log to R2: {e}")
+        return False
+
+
+def _upload_remote_logs_to_r2(conn: SSHConnection, job_data: dict) -> None:
+    r2 = _get_logs_r2_sync_service()
+    if not r2:
+        return
+    job_id = job_data.get("job_id") or job_data.get("id")
+    if not job_id:
+        return
+    remote_base_dir = job_data.get("remote_base_dir", "/root/.physical-ai")
+    remote_run_dir = f"{remote_base_dir}/run"
+    job_data["log_r2_prefix"] = f"training_logs/{job_id}/"
+    _save_job(job_data)
+
+    for log_type in ("setup", "training"):
+        log_name = _get_log_file_name(job_data, log_type)
+        remote_path = f"{remote_run_dir}/{log_name}"
+        local_path = Path("/tmp") / f"{job_id}_{log_name}"
+        try:
+            conn.download_file(remote_path, local_path)
+        except Exception as e:
+            logger.warning(f"Failed to download log {remote_path}: {e}")
+            continue
+        _upload_log_file_to_r2(r2, local_path, job_id)
+        try:
+            local_path.unlink()
+        except Exception:
+            pass
+
+
+def _tail_text_lines(text: str, lines: int) -> str:
+    if lines <= 0:
+        return ""
+    parts = text.splitlines()
+    if len(parts) <= lines:
+        return "\n".join(parts) + ("\n" if text.endswith("\n") else "")
+    return "\n".join(parts[-lines:]) + "\n"
+
+
+def _get_logs_from_r2(job_data: dict, lines: int, log_type: str) -> Optional[str]:
+    r2 = _get_logs_r2_sync_service()
+    if not r2:
+        return None
+    job_id = job_data.get("job_id") or job_data.get("id")
+    if not job_id:
+        return None
+    log_name = _get_log_file_name(job_data, log_type)
+    prefix = f"{r2.version}/" if r2.version else ""
+    key = f"{prefix}training_logs/{job_id}/{log_name}"
+    try:
+        obj = r2.s3.client.get_object(Bucket=r2.bucket, Key=key)
+        body = obj["Body"].read().decode("utf-8", errors="replace")
+        return _tail_text_lines(body, lines)
+    except Exception as e:
+        logger.warning(f"Failed to fetch log from R2: {e}")
+        return None
+
+
+def _get_full_logs_from_r2(job_data: dict, log_type: str) -> Optional[str]:
+    r2 = _get_logs_r2_sync_service()
+    if not r2:
+        return None
+    job_id = job_data.get("job_id") or job_data.get("id")
+    if not job_id:
+        return None
+    log_name = _get_log_file_name(job_data, log_type)
+    prefix = f"{r2.version}/" if r2.version else ""
+    key = f"{prefix}training_logs/{job_id}/{log_name}"
+    try:
+        obj = r2.s3.client.get_object(Bucket=r2.bucket, Key=key)
+        return obj["Body"].read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning(f"Failed to fetch full log from R2: {e}")
+        return None
+
 def _get_remote_progress(job_id: str) -> Optional[dict]:
     """Get training progress from Supabase metrics."""
     client = get_supabase_client()
@@ -1593,13 +1717,37 @@ async def get_job_logs(
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
+    source = "remote"
     logs = _get_remote_logs(job_data, lines, log_type=log_type)
+    if logs is None:
+        source = "r2"
+        logs = _get_logs_from_r2(job_data, lines, log_type)
     if logs is None:
         raise HTTPException(
             status_code=503, detail="Could not connect to remote instance"
         )
 
-    return JobLogsResponse(job_id=job_id, logs=logs, lines=lines)
+    return JobLogsResponse(job_id=job_id, logs=logs, lines=lines, source=source)
+
+
+@router.get("/jobs/{job_id}/logs/download", response_class=PlainTextResponse)
+async def download_job_logs(
+    job_id: str,
+    log_type: str = Query("training", pattern="^(training|setup)$"),
+):
+    """Download full job logs as plain text."""
+    job_data = _load_job(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    logs = _get_remote_log_file(job_data, log_type=log_type)
+    if logs is None:
+        logs = _get_full_logs_from_r2(job_data, log_type)
+    if logs is None:
+        raise HTTPException(
+            status_code=503, detail="Could not connect to remote instance"
+        )
+    return logs
 
 
 @router.get("/jobs/{job_id}/progress", response_model=JobProgressResponse)
@@ -2552,6 +2700,7 @@ def _create_job_with_progress(
                     job_data["error_message"] = "環境構築がタイムアウトしました"
                     job_data["completed_at"] = datetime.now().isoformat()
                     _save_job(job_data)
+                    _upload_remote_logs_to_r2(conn, job_data)
                     emit_progress({"type": "error", "error": "環境構築がタイムアウトしました"})
                     return cleanup_instance_on_failure("環境構築がタイムアウトしました")
                 job_data["status"] = "failed"
@@ -2559,6 +2708,7 @@ def _create_job_with_progress(
                 job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                 job_data["completed_at"] = datetime.now().isoformat()
                 _save_job(job_data)
+                _upload_remote_logs_to_r2(conn, job_data)
                 emit_progress({"type": "error", "error": "環境構築に失敗しました"})
                 return cleanup_instance_on_failure("環境構築に失敗しました")
 
@@ -2861,6 +3011,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
                     job_data["error_message"] = "環境構築がタイムアウトしました"
                     job_data["completed_at"] = datetime.now().isoformat()
                     _save_job(job_data)
+                    _upload_remote_logs_to_r2(conn, job_data)
                     cleanup_on_failure("環境構築がタイムアウトしました")
                     return
                 job_data["status"] = "failed"
@@ -2868,6 +3019,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
                 job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                 job_data["completed_at"] = datetime.now().isoformat()
                 _save_job(job_data)
+                _upload_remote_logs_to_r2(conn, job_data)
                 cleanup_on_failure("環境構築に失敗しました")
                 return
 

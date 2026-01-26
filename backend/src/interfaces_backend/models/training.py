@@ -101,6 +101,7 @@ class JobLogsResponse(BaseModel):
     job_id: str
     logs: str
     lines: int
+    source: Optional[str] = None
 
 
 class JobProgressResponse(BaseModel):
