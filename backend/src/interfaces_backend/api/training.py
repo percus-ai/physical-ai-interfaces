@@ -281,6 +281,7 @@ def _get_training_job_realtime_manager() -> TrainingJobRealtimeManager:
 # Remote scripts directory - contains setup_env.sh, run_training.sh, entry.py, etc.
 # These scripts are deployed to remote instances for training
 REMOTE_SCRIPTS_DIR = Path(__file__).parent.parent.parent.parent.parent.parent / "features" / "percus_ai" / "training" / "remote"
+REPO_ROOT = REMOTE_SCRIPTS_DIR.parents[4]
 
 
 # --- SSH utilities for remote deployment ---
@@ -352,6 +353,27 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
     return config
 
 
+def _load_env_file_vars() -> dict[str, str]:
+    env_paths = [
+        REPO_ROOT / ".env",
+        REPO_ROOT / "data" / ".env",
+    ]
+    data: dict[str, str] = {}
+    for path in env_paths:
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                data.setdefault(key.strip(), value.strip())
+        except Exception:
+            continue
+    return data
+
+
 def _generate_env_file(
     job_id: str,
     instance_id: str,
@@ -360,6 +382,7 @@ def _generate_env_file(
 ) -> str:
     """Generate .env file content with required credentials."""
     lines = []
+    env_fallback = _load_env_file_vars()
 
     # HuggingFace token
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
@@ -380,9 +403,24 @@ def _generate_env_file(
         lines.append(f"DATACRUNCH_CLIENT_SECRET={dc_client_secret}")
 
     # R2/S3 credentials
-    r2_endpoint = os.environ.get("R2_ENDPOINT_URL") or os.environ.get("S3_ENDPOINT_URL")
-    r2_access_key = os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("S3_ACCESS_KEY_ID")
-    r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY") or os.environ.get("S3_SECRET_ACCESS_KEY")
+    r2_endpoint = (
+        os.environ.get("R2_ENDPOINT_URL")
+        or os.environ.get("S3_ENDPOINT_URL")
+        or env_fallback.get("R2_ENDPOINT_URL")
+        or env_fallback.get("S3_ENDPOINT_URL")
+    )
+    r2_access_key = (
+        os.environ.get("R2_ACCESS_KEY_ID")
+        or os.environ.get("S3_ACCESS_KEY_ID")
+        or env_fallback.get("R2_ACCESS_KEY_ID")
+        or env_fallback.get("S3_ACCESS_KEY_ID")
+    )
+    r2_secret_key = (
+        os.environ.get("R2_SECRET_ACCESS_KEY")
+        or os.environ.get("S3_SECRET_ACCESS_KEY")
+        or env_fallback.get("R2_SECRET_ACCESS_KEY")
+        or env_fallback.get("S3_SECRET_ACCESS_KEY")
+    )
     if r2_endpoint:
         lines.append(f"S3_ENDPOINT_URL={r2_endpoint}")
         lines.append(f"R2_ENDPOINT_URL={r2_endpoint}")
@@ -394,11 +432,27 @@ def _generate_env_file(
         lines.append(f"R2_SECRET_ACCESS_KEY={r2_secret_key}")
 
     # R2/S3 bucket name
-    r2_bucket = os.environ.get("R2_BUCKET") or os.environ.get("S3_BUCKET")
+    r2_bucket = (
+        os.environ.get("R2_BUCKET")
+        or os.environ.get("S3_BUCKET")
+        or env_fallback.get("R2_BUCKET")
+        or env_fallback.get("S3_BUCKET")
+    )
     if r2_bucket:
         lines.append(f"R2_BUCKET={r2_bucket}")
         lines.append(f"S3_BUCKET={r2_bucket}")
 
+    r2_version = (
+        os.environ.get("R2_VERSION")
+        or os.environ.get("S3_VERSION")
+        or env_fallback.get("R2_VERSION")
+        or env_fallback.get("S3_VERSION")
+    )
+    if r2_version:
+        lines.append(f"R2_VERSION={r2_version}")
+        lines.append(f"S3_VERSION={r2_version}")
+
+    # Use remote user's home to avoid path mismatch across SSH users
     lines.append("PHYSICAL_AI_DATA_DIR=$HOME/.physical-ai")
 
     repo_url = os.environ.get(
@@ -793,7 +847,8 @@ def _get_ssh_connection_for_job(job_data: dict, timeout: int = 30) -> Optional[S
         return None
 
     try:
-        key_path = Path(job_data.get("ssh_private_key", "~/.ssh/id_rsa")).expanduser()
+        default_key = str(Path.home() / ".ssh" / "id_rsa")
+        key_path = Path(job_data.get("ssh_private_key", default_key)).expanduser()
         conn = SSHConnection(
             host=ip,
             user=job_data.get("ssh_user", "root"),
@@ -801,6 +856,8 @@ def _get_ssh_connection_for_job(job_data: dict, timeout: int = 30) -> Optional[S
         )
         conn.connect(timeout_sec=timeout)
         return conn
+    except SystemExit:
+        return None
     except Exception:
         return None
 
@@ -851,7 +908,10 @@ def _get_remote_logs(job_data: dict, lines: int = 100, log_type: str = "training
 
 
 def _get_remote_log_file(job_data: dict, log_type: str = "training") -> Optional[str]:
-    conn = _get_ssh_connection_for_job(job_data)
+    try:
+        conn = _get_ssh_connection_for_job(job_data)
+    except SystemExit:
+        return None
     if not conn:
         return None
     try:
@@ -2175,7 +2235,10 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
 
         # Get SSH key
         ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
-        ssh_private_key = os.environ.get("VERDA_SSH_PRIVATE_KEY", "~/.ssh/id_rsa")
+        ssh_private_key = os.environ.get(
+            "VERDA_SSH_PRIVATE_KEY",
+            str(Path.home() / ".ssh" / "id_rsa"),
+        )
 
         if not ssh_key_name:
             raise HTTPException(
@@ -2493,7 +2556,10 @@ def _create_job_with_progress(
         # Get SSH key
         emit_progress({"type": "getting_ssh_key", "message": "SSHキーを取得中..."})
         ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
-        ssh_private_key = os.environ.get("VERDA_SSH_PRIVATE_KEY", "~/.ssh/id_rsa")
+        ssh_private_key = os.environ.get(
+            "VERDA_SSH_PRIVATE_KEY",
+            str(Path.home() / ".ssh" / "id_rsa"),
+        )
         if not ssh_key_name:
             emit_progress({"type": "error", "error": "VERDA_SSH_KEY_NAMEが設定されていません"})
             return {"success": False, "error": "VERDA_SSH_KEY_NAMEが設定されていません"}
@@ -2635,8 +2701,8 @@ def _create_job_with_progress(
         emit_progress({"type": "ssh_ready", "message": "SSH接続完了"})
 
         try:
-            resolved_base_dir = conn.resolve_path("~/.physical-ai") or "/root/.physical-ai"
-            remote_base_dir = resolved_base_dir
+            home_dir = conn.resolve_path("$HOME") or "/root"
+            remote_base_dir = f"{home_dir}/.physical-ai"
             remote_run_dir = f"{remote_base_dir}/run"
             job_data["remote_base_dir"] = remote_base_dir
             _save_job(job_data)
@@ -2937,7 +3003,7 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
 
         # SSH deployment using SSHConnection
         ssh_user = job_data.get("ssh_user", "root")
-        ssh_private_key = job_data.get("ssh_private_key", "~/.ssh/id_rsa")
+        ssh_private_key = job_data.get("ssh_private_key", str(Path.home() / ".ssh" / "id_rsa"))
 
         # Wait for SSH to be ready (up to 5 minutes)
         conn: Optional[SSHConnection] = None
@@ -2959,8 +3025,8 @@ async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> 
             return
 
         try:
-            resolved_base_dir = conn.resolve_path("~/.physical-ai") or "/root/.physical-ai"
-            remote_base_dir = resolved_base_dir
+            home_dir = conn.resolve_path("$HOME") or "/root"
+            remote_base_dir = f"{home_dir}/.physical-ai"
             remote_run_dir = f"{remote_base_dir}/run"
             job_data["remote_base_dir"] = remote_base_dir
             _save_job(job_data)
@@ -3456,7 +3522,10 @@ async def create_continue_job(
 
         # Get SSH key
         ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
-        ssh_private_key = os.environ.get("VERDA_SSH_PRIVATE_KEY", "~/.ssh/id_rsa")
+        ssh_private_key = os.environ.get(
+            "VERDA_SSH_PRIVATE_KEY",
+            str(Path.home() / ".ssh" / "id_rsa"),
+        )
 
         if not ssh_key_name:
             raise HTTPException(
