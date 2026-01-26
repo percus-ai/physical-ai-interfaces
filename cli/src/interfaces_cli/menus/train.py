@@ -172,28 +172,22 @@ class NewTrainingState:
     torch_nightly: bool = False
 
     # Step 6: Job naming
-    author: Optional[str] = None
-    comment: Optional[str] = None
     job_name: Optional[str] = None
 
     def generate_job_name(self) -> str:
         """Generate job name from state.
 
-        Format: {policy}_{dataset_short_id}_{author}_{YYMMDD_HHMMSS}_{comment}
-        Example: pi05_a1b2c3_kinoue_260109_143052
+        Format: {policy}_{dataset_short_id}_{YYMMDD_HHMMSS}
+        Example: pi05_a1b2c3_260109_143052
         """
         parts = []
         if self.policy_type:
             parts.append(self.policy_type)
         if self.dataset_short_id:
             parts.append(self.dataset_short_id)  # 6-char short ID
-        if self.author:
-            parts.append(self.author)
         # Use 2-digit year and include time (YYMMDD_HHMMSS)
         datetime_str = datetime.now().strftime("%y%m%d_%H%M%S")
         parts.append(datetime_str)
-        if self.comment:
-            parts.append(self.comment)
         return "_".join(parts)
 
 
@@ -1152,35 +1146,20 @@ class TrainingWizard(BaseMenu):
 
     def _step6_job_naming(self) -> str:
         """Step 6: Job naming."""
-        # Use user_id as default
-        default_author = self.state.author
-        if not default_author:
-            try:
-                user_config = self.api.get_user_config()
-                default_author = user_config.get("user_id", "")
-            except Exception:
-                default_author = ""
-
+        suggested_name = self.state.generate_job_name()
         try:
-            author = inquirer.text(
-                message="User ID:",
-                default=default_author,
+            job_name = inquirer.text(
+                message="ジョブ名 (空で自動提案):",
+                default="",
                 style=hacker_style,
             ).execute()
-            self.state.author = author if author else None
-
-            comment = inquirer.text(
-                message="コメント (オプション):",
-                default=self.state.comment or "",
-                style=hacker_style,
-            ).execute()
-            self.state.comment = comment if comment else None
+            job_name = job_name.strip()
+            self.state.job_name = job_name or suggested_name
 
         except KeyboardInterrupt:
             return "back"
 
         # Generate and show preview
-        self.state.job_name = self.state.generate_job_name()
         print(f"\n{Colors.CYAN}プレビュー:{Colors.RESET}")
         print(f"  {self.state.job_name}")
 
