@@ -749,18 +749,32 @@ LOG_STREAM_MAX_SEC = 30  # Max time to stream initial logs
 LOG_STREAM_INITIAL_LINES = 10  # Number of log lines to show initially
 
 
-def _get_log_file_path(job_data: dict) -> str:
-    """Get the remote log file path for a job.
+def _get_setup_log_file_path(job_data: dict) -> str:
+    """Get the remote setup log file path for a job.
 
     Args:
         job_data: Job data dict containing remote_base_dir and mode
 
     Returns:
-        Full path to the log file on the remote instance
+        Full path to the setup log file on the remote instance
     """
     mode = job_data.get("mode", "train")
     remote_base_dir = job_data.get("remote_base_dir", "/root/.physical-ai")
     return f"{remote_base_dir}/run/setup_env_{mode}.log"
+
+
+def _get_training_log_file_path(job_data: dict) -> str:
+    """Get the remote training log file path for a job.
+
+    Args:
+        job_data: Job data dict containing remote_base_dir and mode
+
+    Returns:
+        Full path to the training log file on the remote instance
+    """
+    mode = job_data.get("mode", "train")
+    remote_base_dir = job_data.get("remote_base_dir", "/root/.physical-ai")
+    return f"{remote_base_dir}/run/training_{mode}.log"
 
 
 def _get_ssh_connection_for_job(job_data: dict, timeout: int = 30) -> Optional[SSHConnection]:
@@ -813,7 +827,7 @@ def _get_remote_logs(job_data: dict, lines: int = 100) -> Optional[str]:
         return None
 
     try:
-        log_file = _get_log_file_path(job_data)
+        log_file = _get_training_log_file_path(job_data)
         cmd = f"tail -n {lines} {log_file} 2>/dev/null || echo '[Log file not found]'"
         exit_code, stdout, stderr = conn.exec_command(cmd)
         return stdout
@@ -2502,7 +2516,7 @@ def _create_job_with_progress(
                 emit_progress({"type": "training_log", "message": "警告: tmuxセッションの開始を確認できませんでした"})
 
             # Stream log file in real-time using tail -f
-            log_file = _get_log_file_path(job_data)
+            log_file = _get_setup_log_file_path(job_data)
             max_stream_time = LOG_STREAM_MAX_SEC
             lines_to_show = LOG_STREAM_INITIAL_LINES
             lines_received = 0
@@ -3848,7 +3862,7 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
         await websocket.send_json({"type": "connected", "message": "SSH接続完了"})
 
         # Determine log file path
-        log_file = _get_log_file_path(job_data)
+        log_file = _get_training_log_file_path(job_data)
 
         # Start tail -f in a channel
         transport = ssh_conn.client.get_transport()
@@ -4025,7 +4039,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
         await _send_progress(websocket, job_id)
 
         # Determine log file path for later use
-        log_file = _get_log_file_path(job_data)
+        log_file = _get_training_log_file_path(job_data)
 
         last_heartbeat = asyncio.get_event_loop().time()
         last_progress_update = asyncio.get_event_loop().time()

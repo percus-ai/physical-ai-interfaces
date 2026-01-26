@@ -1348,7 +1348,7 @@ class TrainingWizard(BaseMenu):
             # Training startup logs (real-time)
             if current.get("training_logs"):
                 table.add_row("", "")  # Spacer
-                table.add_row("ログ:", "[dim]リアルタイム[/dim]")
+                table.add_row("セットアップログ:", "[dim]リアルタイム[/dim]")
                 for log_line in current["training_logs"][-3:]:  # Show last 3 lines
                     # Truncate long lines
                     display_line = log_line[:60] + "..." if len(log_line) > 60 else log_line
@@ -1440,7 +1440,7 @@ class TrainingWizard(BaseMenu):
                 # Ask if user wants to stream logs
                 if job_id:
                     stream = inquirer.confirm(
-                        message="ログをストリーミングしますか? (Ctrl+Cで終了)",
+                        message="学習ログをストリーミングしますか? (Ctrl+Cで終了)",
                         default=True,
                         style=hacker_style,
                     ).execute()
