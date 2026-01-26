@@ -9,6 +9,8 @@ This module implements the training CLI with:
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
+import time
 from typing import Any, Dict, List, Optional
 
 from InquirerPy import inquirer
@@ -82,7 +84,7 @@ POLICY_TYPES: Dict[str, PolicyTypeInfo] = {
         compile_model=True,
         gradient_checkpointing=True,
         dtype="bfloat16",
-        use_amp=True,
+        use_amp=False,
     ),
     "pi05": PolicyTypeInfo(
         display_name="π0.5 (Open-World VLA Model)",
@@ -96,7 +98,7 @@ POLICY_TYPES: Dict[str, PolicyTypeInfo] = {
         compile_model=True,
         gradient_checkpointing=True,
         dtype="bfloat16",
-        use_amp=True,
+        use_amp=False,
     ),
     "groot": PolicyTypeInfo(
         display_name="GR00T N1.5 (NVIDIA Isaac GR00T)",
@@ -169,11 +171,11 @@ class NewTrainingState:
     log_freq: int = 200
     num_workers: int = 4
     save_checkpoint: bool = True
-    validation_enable: bool = False
-    validation_eval_freq: int = 20000
+    validation_enable: bool = True
+    validation_eval_freq: int = 100
     validation_max_batches: Optional[int] = None
     validation_batch_size: Optional[int] = None
-    early_stopping_enable: bool = False
+    early_stopping_enable: bool = True
     early_stopping_patience: int = 5
     early_stopping_min_delta: float = 0.0
     early_stopping_mode: str = "min"
@@ -233,11 +235,11 @@ class ContinueTrainingState:
     log_freq: int = 200
     num_workers: int = 4
     save_checkpoint: bool = True
-    validation_enable: bool = False
-    validation_eval_freq: int = 20000
+    validation_enable: bool = True
+    validation_eval_freq: int = 100
     validation_max_batches: Optional[int] = None
     validation_batch_size: Optional[int] = None
-    early_stopping_enable: bool = False
+    early_stopping_enable: bool = True
     early_stopping_patience: int = 5
     early_stopping_min_delta: float = 0.0
     early_stopping_mode: str = "min"
@@ -743,6 +745,8 @@ class TrainingWizard(BaseMenu):
         self.state.policy_gradient_checkpointing = policy_info.gradient_checkpointing
         self.state.policy_dtype = policy_info.dtype
         self.state.policy_use_amp = policy_info.use_amp
+        if self.state.policy_dtype in ("bfloat16", "bf16"):
+            self.state.policy_use_amp = False
 
         return "next"
 
@@ -955,15 +959,17 @@ class TrainingWizard(BaseMenu):
             self.state.batch_size = int(batch_size)
 
             save_freq_max = self.state.steps
-            save_freq_default = max(min(self.state.save_freq, save_freq_max), 50)
+            save_freq_default = max(min(self.state.save_freq, save_freq_max), 1)
             save_freq = inquirer.number(
                 message="Save frequency (steps):",
                 default=save_freq_default,
-                min_allowed=50,
+                min_allowed=1,
                 max_allowed=save_freq_max,
                 style=hacker_style,
             ).execute()
             self.state.save_freq = int(save_freq)
+            if self.state.validation_eval_freq <= 0 or self.state.validation_eval_freq > self.state.steps:
+                self.state.validation_eval_freq = min(100, self.state.steps)
 
             print(f"{Colors.muted('追加の学習パラメータ（デフォルト）')}")
             print(f"  log_freq: {self.state.log_freq}")
@@ -998,52 +1004,6 @@ class TrainingWizard(BaseMenu):
                     default=self.state.save_checkpoint,
                     style=hacker_style,
                 ).execute()
-
-            print(f"{Colors.muted('Early Stopping（デフォルト）')}")
-            print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
-            print(f"  patience: {self.state.early_stopping_patience}")
-            print(f"  min_delta: {self.state.early_stopping_min_delta}")
-            print(f"  mode: {self.state.early_stopping_mode}")
-            if inquirer.confirm(
-                message="Early Stoppingの設定を変更しますか？",
-                default=False,
-                style=hacker_style,
-            ).execute():
-                self.state.early_stopping_enable = inquirer.confirm(
-                    message="Early Stoppingを有効にしますか？",
-                    default=self.state.early_stopping_enable,
-                    style=hacker_style,
-                ).execute()
-                if self.state.early_stopping_enable:
-                    patience = inquirer.number(
-                        message="Early Stopping patience:",
-                        default=self.state.early_stopping_patience,
-                        min_allowed=1,
-                        max_allowed=1000,
-                        style=hacker_style,
-                    ).execute()
-                    self.state.early_stopping_patience = int(patience)
-
-                    min_delta_input = inquirer.text(
-                        message="Early Stopping min_delta:",
-                        default=str(self.state.early_stopping_min_delta),
-                        style=hacker_style,
-                    ).execute()
-                    try:
-                        self.state.early_stopping_min_delta = float(min_delta_input)
-                    except ValueError:
-                        self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
-
-                    mode = inquirer.select(
-                        message="Early Stopping mode:",
-                        choices=[
-                            Choice(value="min", name="min (損失が下がらなくなったら停止)"),
-                            Choice(value="max", name="max (指標が上がらなくなったら停止)"),
-                        ],
-                        default=self.state.early_stopping_mode,
-                        style=hacker_style,
-                    ).execute()
-                    self.state.early_stopping_mode = mode
 
             print(f"{Colors.muted('Validation（デフォルト）')}")
             print(f"  enable: {'有効' if self.state.validation_enable else '無効'}")
@@ -1088,6 +1048,56 @@ class TrainingWizard(BaseMenu):
                     ).execute()
                     self.state.validation_batch_size = int(val_batch) if int(val_batch) > 0 else None
 
+            if not self.state.validation_enable:
+                self.state.early_stopping_enable = False
+
+            if self.state.validation_enable:
+                print(f"{Colors.muted('Early Stopping（デフォルト）')}")
+                print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
+                print(f"  patience: {self.state.early_stopping_patience}")
+                print(f"  min_delta: {self.state.early_stopping_min_delta}")
+                print(f"  mode: {self.state.early_stopping_mode}")
+                if inquirer.confirm(
+                    message="Early Stoppingの設定を変更しますか？",
+                    default=False,
+                    style=hacker_style,
+                ).execute():
+                    self.state.early_stopping_enable = inquirer.confirm(
+                        message="Early Stoppingを有効にしますか？",
+                        default=self.state.early_stopping_enable,
+                        style=hacker_style,
+                    ).execute()
+                    if self.state.early_stopping_enable:
+                        patience = inquirer.number(
+                            message="Early Stopping patience:",
+                            default=self.state.early_stopping_patience,
+                            min_allowed=1,
+                            max_allowed=1000,
+                            style=hacker_style,
+                        ).execute()
+                        self.state.early_stopping_patience = int(patience)
+
+                        min_delta_input = inquirer.text(
+                            message="Early Stopping min_delta:",
+                            default=str(self.state.early_stopping_min_delta),
+                            style=hacker_style,
+                        ).execute()
+                        try:
+                            self.state.early_stopping_min_delta = float(min_delta_input)
+                        except ValueError:
+                            self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
+
+                        mode = inquirer.select(
+                            message="Early Stopping mode:",
+                            choices=[
+                                Choice(value="min", name="min (損失が下がらなくなったら停止)"),
+                                Choice(value="max", name="max (指標が上がらなくなったら停止)"),
+                            ],
+                            default=self.state.early_stopping_mode,
+                            style=hacker_style,
+                        ).execute()
+                        self.state.early_stopping_mode = mode
+
             print(f"{Colors.muted('モデル/精度設定（デフォルト）')}")
             print(f"  dtype: {self.state.policy_dtype}")
             print(f"  use_amp: {self.state.policy_use_amp}")
@@ -1111,11 +1121,15 @@ class TrainingWizard(BaseMenu):
                 ).execute()
                 self.state.policy_dtype = dtype
 
-                self.state.policy_use_amp = inquirer.confirm(
-                    message="AMPを有効にしますか？",
-                    default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
-                    style=hacker_style,
-                ).execute()
+                if self.state.policy_dtype in ("bfloat16", "bf16"):
+                    self.state.policy_use_amp = False
+                    print(f"{Colors.muted('  ※ bfloat16ではAMPを無効化します')}")
+                else:
+                    self.state.policy_use_amp = inquirer.confirm(
+                        message="AMPを有効にしますか？",
+                        default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
+                        style=hacker_style,
+                    ).execute()
 
                 self.state.policy_gradient_checkpointing = inquirer.confirm(
                     message="Gradient checkpointingを有効にしますか？",
@@ -1298,8 +1312,7 @@ class TrainingWizard(BaseMenu):
             storage = inquirer.number(
                 message="ストレージサイズ (GB):",
                 default=self.state.storage_size,
-                min_allowed=50,
-                max_allowed=1000,
+                min_allowed=1,
                 style=hacker_style,
             ).execute()
             self.state.storage_size = int(storage)
@@ -1923,6 +1936,8 @@ class ContinueTrainingWizard(BaseMenu):
                 self.state.policy_gradient_checkpointing = policy_info.gradient_checkpointing
                 self.state.policy_dtype = policy_info.dtype
                 self.state.policy_use_amp = policy_info.use_amp
+                if self.state.policy_dtype in ("bfloat16", "bf16"):
+                    self.state.policy_use_amp = False
 
         return "next"
 
@@ -2070,15 +2085,17 @@ class ContinueTrainingWizard(BaseMenu):
             self.state.batch_size = int(batch_size)
 
             save_freq_max = self.state.additional_steps
-            save_freq_default = max(min(self.state.save_freq, save_freq_max), 50)
+            save_freq_default = max(min(self.state.save_freq, save_freq_max), 1)
             save_freq = inquirer.number(
                 message="Save frequency (steps):",
                 default=save_freq_default,
-                min_allowed=50,
+                min_allowed=1,
                 max_allowed=save_freq_max,
                 style=hacker_style,
             ).execute()
             self.state.save_freq = int(save_freq)
+            if self.state.validation_eval_freq <= 0 or self.state.validation_eval_freq > self.state.additional_steps:
+                self.state.validation_eval_freq = min(100, self.state.additional_steps)
 
             print(f"{Colors.muted('追加の学習パラメータ（デフォルト）')}")
             print(f"  log_freq: {self.state.log_freq}")
@@ -2113,52 +2130,6 @@ class ContinueTrainingWizard(BaseMenu):
                     default=self.state.save_checkpoint,
                     style=hacker_style,
                 ).execute()
-
-            print(f"{Colors.muted('Early Stopping（デフォルト）')}")
-            print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
-            print(f"  patience: {self.state.early_stopping_patience}")
-            print(f"  min_delta: {self.state.early_stopping_min_delta}")
-            print(f"  mode: {self.state.early_stopping_mode}")
-            if inquirer.confirm(
-                message="Early Stoppingの設定を変更しますか？",
-                default=False,
-                style=hacker_style,
-            ).execute():
-                self.state.early_stopping_enable = inquirer.confirm(
-                    message="Early Stoppingを有効にしますか？",
-                    default=self.state.early_stopping_enable,
-                    style=hacker_style,
-                ).execute()
-                if self.state.early_stopping_enable:
-                    patience = inquirer.number(
-                        message="Early Stopping patience:",
-                        default=self.state.early_stopping_patience,
-                        min_allowed=1,
-                        max_allowed=1000,
-                        style=hacker_style,
-                    ).execute()
-                    self.state.early_stopping_patience = int(patience)
-
-                    min_delta_input = inquirer.text(
-                        message="Early Stopping min_delta:",
-                        default=str(self.state.early_stopping_min_delta),
-                        style=hacker_style,
-                    ).execute()
-                    try:
-                        self.state.early_stopping_min_delta = float(min_delta_input)
-                    except ValueError:
-                        self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
-
-                    mode = inquirer.select(
-                        message="Early Stopping mode:",
-                        choices=[
-                            Choice(value="min", name="min (損失が下がらなくなったら停止)"),
-                            Choice(value="max", name="max (指標が上がらなくなったら停止)"),
-                        ],
-                        default=self.state.early_stopping_mode,
-                        style=hacker_style,
-                    ).execute()
-                    self.state.early_stopping_mode = mode
 
             print(f"{Colors.muted('Validation（デフォルト）')}")
             print(f"  enable: {'有効' if self.state.validation_enable else '無効'}")
@@ -2203,6 +2174,56 @@ class ContinueTrainingWizard(BaseMenu):
                     ).execute()
                     self.state.validation_batch_size = int(val_batch) if int(val_batch) > 0 else None
 
+            if not self.state.validation_enable:
+                self.state.early_stopping_enable = False
+
+            if self.state.validation_enable:
+                print(f"{Colors.muted('Early Stopping（デフォルト）')}")
+                print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
+                print(f"  patience: {self.state.early_stopping_patience}")
+                print(f"  min_delta: {self.state.early_stopping_min_delta}")
+                print(f"  mode: {self.state.early_stopping_mode}")
+                if inquirer.confirm(
+                    message="Early Stoppingの設定を変更しますか？",
+                    default=False,
+                    style=hacker_style,
+                ).execute():
+                    self.state.early_stopping_enable = inquirer.confirm(
+                        message="Early Stoppingを有効にしますか？",
+                        default=self.state.early_stopping_enable,
+                        style=hacker_style,
+                    ).execute()
+                    if self.state.early_stopping_enable:
+                        patience = inquirer.number(
+                            message="Early Stopping patience:",
+                            default=self.state.early_stopping_patience,
+                            min_allowed=1,
+                            max_allowed=1000,
+                            style=hacker_style,
+                        ).execute()
+                        self.state.early_stopping_patience = int(patience)
+
+                        min_delta_input = inquirer.text(
+                            message="Early Stopping min_delta:",
+                            default=str(self.state.early_stopping_min_delta),
+                            style=hacker_style,
+                        ).execute()
+                        try:
+                            self.state.early_stopping_min_delta = float(min_delta_input)
+                        except ValueError:
+                            self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
+
+                        mode = inquirer.select(
+                            message="Early Stopping mode:",
+                            choices=[
+                                Choice(value="min", name="min (損失が下がらなくなったら停止)"),
+                                Choice(value="max", name="max (指標が上がらなくなったら停止)"),
+                            ],
+                            default=self.state.early_stopping_mode,
+                            style=hacker_style,
+                        ).execute()
+                        self.state.early_stopping_mode = mode
+
             print(f"{Colors.muted('モデル/精度設定（デフォルト）')}")
             print(f"  dtype: {self.state.policy_dtype}")
             print(f"  use_amp: {self.state.policy_use_amp}")
@@ -2226,11 +2247,15 @@ class ContinueTrainingWizard(BaseMenu):
                 ).execute()
                 self.state.policy_dtype = dtype
 
-                self.state.policy_use_amp = inquirer.confirm(
-                    message="AMPを有効にしますか？",
-                    default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
-                    style=hacker_style,
-                ).execute()
+                if self.state.policy_dtype in ("bfloat16", "bf16"):
+                    self.state.policy_use_amp = False
+                    print(f"{Colors.muted('  ※ bfloat16ではAMPを無効化します')}")
+                else:
+                    self.state.policy_use_amp = inquirer.confirm(
+                        message="AMPを有効にしますか？",
+                        default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
+                        style=hacker_style,
+                    ).execute()
 
                 self.state.policy_gradient_checkpointing = inquirer.confirm(
                     message="Gradient checkpointingを有効にしますか？",
@@ -2412,8 +2437,7 @@ class ContinueTrainingWizard(BaseMenu):
             storage = inquirer.number(
                 message="ストレージサイズ (GB):",
                 default=self.state.storage_size,
-                min_allowed=50,
-                max_allowed=1000,
+                min_allowed=1,
                 style=hacker_style,
             ).execute()
             self.state.storage_size = int(storage)
@@ -2862,6 +2886,8 @@ class TrainingJobsMenu(BaseMenu):
                 action_choices.append(Choice(value="download_setup_logs", name="📥 セットアップログをダウンロード"))
 
             if status in ("completed", "failed", "stopped", "terminated"):
+                if job_info.get("instance_id"):
+                    action_choices.append(Choice(value="revive_instance", name="🧟 インスタンス蘇生 (CPU) + SSH"))
                 action_choices.append(Choice(value="delete", name="🗑 ジョブを削除"))
 
             action_choices.append(Choice(value="back", name="← 戻る"))
@@ -2890,6 +2916,8 @@ class TrainingJobsMenu(BaseMenu):
                 self._delete_job(job_id)
             elif action == "refresh":
                 return self._show_job_detail(job_id)
+            elif action == "revive_instance":
+                self._revive_job(job_id)
 
         except KeyboardInterrupt:
             print(f"\n{Colors.muted('中断されました')}")
@@ -2898,6 +2926,105 @@ class TrainingJobsMenu(BaseMenu):
             input(f"\n{Colors.muted('Press Enter to continue...')}")
 
         return MenuResult.CONTINUE
+
+    def _revive_job(self, job_id: str) -> None:
+        show_section_header("インスタンス蘇生")
+        try:
+            current = {
+                "stage": "",
+                "message": "",
+                "elapsed": None,
+                "timeout": None,
+            }
+
+            def make_panel() -> Panel:
+                table = Table(show_header=False, box=None, padding=(0, 1))
+                table.add_column("Label", style="cyan")
+                table.add_column("Value")
+                if current["stage"]:
+                    table.add_row("フェーズ:", current["stage"])
+                if current["message"]:
+                    table.add_row("状態:", current["message"])
+                if current["elapsed"] is not None:
+                    timeout = current["timeout"] or 0
+                    table.add_row("経過:", f"{current['elapsed']}s / {timeout}s")
+                return Panel(table, title="🧟 インスタンス蘇生", border_style="cyan")
+
+            def on_message(message: Dict[str, Any]) -> None:
+                msg_type = message.get("type", "")
+                current["stage"] = msg_type
+                current["message"] = message.get("message", "") or message.get("error", "")
+                if "elapsed" in message:
+                    current["elapsed"] = message.get("elapsed")
+                if "timeout" in message:
+                    current["timeout"] = message.get("timeout")
+
+            console = Console()
+            with Live(make_panel(), console=console, refresh_per_second=4) as live:
+                def update_display(message: Dict[str, Any]) -> None:
+                    on_message(message)
+                    live.update(make_panel())
+
+                ws_result = self.api.revive_training_job_ws(job_id, progress_callback=update_display)
+
+            if ws_result.get("type") != "complete":
+                raise Exception(ws_result.get("error", "蘇生に失敗しました"))
+
+            result = ws_result.get("result", {})
+            print(f"{Colors.success('蘇生完了')}")
+            print(f"  旧インスタンスID: {result.get('old_instance_id')}")
+            print(f"  ストレージID: {result.get('volume_id')}")
+            print(f"  新インスタンスID: {result.get('instance_id')}")
+            print(f"  インスタンスタイプ: {result.get('instance_type')}")
+            print(f"  ロケーション: {result.get('location')}")
+            print(f"  IP: {result.get('ip')}")
+            ssh_user = result.get("ssh_user") or "root"
+            ssh_key = result.get("ssh_private_key") or str(Path.home() / ".ssh" / "id_rsa")
+            print(f"  SSHユーザー: {ssh_user}")
+            print(f"  SSH鍵: {ssh_key}")
+
+            proceed = inquirer.confirm(
+                message="このままSSH接続してターミナルを譲渡しますか？",
+                default=True,
+                style=hacker_style,
+            ).execute()
+            if proceed:
+                self._handover_ssh(ssh_user, result.get("ip", ""), ssh_key)
+        except Exception as e:
+            print(f"{Colors.error('エラー:')} {e}")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+
+    def _handover_ssh(self, ssh_user: str, ip: str, ssh_key: str) -> None:
+        if not ip:
+            print(f"{Colors.error('エラー:')} IPが取得できませんでした")
+            input(f"\n{Colors.muted('Press Enter to continue...')}")
+            return
+        key_path = Path(ssh_key).expanduser()
+        if not key_path.exists():
+            print(f"{Colors.warning('警告:')} SSH鍵が見つかりません: {key_path}")
+        cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={Path.home() / '.ssh' / 'known_hosts'}",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            str(key_path),
+            f"{ssh_user}@{ip}",
+        ]
+        max_attempts = 6
+        wait_sec = 10
+        for attempt in range(1, max_attempts + 1):
+            print(f"\n{Colors.muted('SSH接続します:')} {' '.join(cmd)}")
+            print(f"{Colors.muted(f'試行 {attempt}/{max_attempts} (失敗時は{wait_sec}s待機)')}\n")
+            result = subprocess.run(cmd, check=False)
+            if result.returncode == 0:
+                return
+            if attempt < max_attempts:
+                time.sleep(wait_sec)
+        print(f"{Colors.error('エラー:')} SSH接続に失敗しました")
 
     def _show_job_logs(self, job_id: str, log_type: str = "training") -> None:
         """Show job logs (for non-running jobs)."""
@@ -2925,6 +3052,18 @@ class TrainingJobsMenu(BaseMenu):
             logs = self.api.download_training_job_logs(job_id, log_type=log_type)
         except Exception as e:
             print(f"{Colors.error('エラー:')} {e}")
+            try:
+                status = self.api.get_training_job_log_status(job_id, log_type=log_type)
+                r2 = status.get("r2", {})
+                if r2.get("exists"):
+                    print(f"{Colors.muted('R2にログは存在しますが取得に失敗しました。再試行してください。')}")
+                    print(f"  key: {r2.get('key')}")
+                else:
+                    print(f"{Colors.muted('R2にログが見つかりません。')}")
+                    if r2.get("key"):
+                        print(f"  key: {r2.get('key')}")
+            except Exception:
+                pass
             input(f"\n{Colors.muted('Press Enter to continue...')}")
             return
 

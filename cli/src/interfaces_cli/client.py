@@ -1072,6 +1072,40 @@ class PhiClient:
         response.raise_for_status()
         return response.json()
 
+    def revive_training_job(self, job_id: str) -> Dict[str, Any]:
+        """POST /api/training/jobs/{job_id}/revive - Revive job instance."""
+        response = self._client.post(f"/api/training/jobs/{job_id}/revive")
+        response.raise_for_status()
+        return response.json()
+
+    def revive_training_job_ws(
+        self,
+        job_id: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Revive job instance via WebSocket with progress updates."""
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/api/training/ws/jobs/{job_id}/revive"
+        result: Dict[str, Any] = {"type": "error", "error": "Unknown error"}
+
+        try:
+            ws = websocket.create_connection(ws_url, timeout=None, enable_multithread=True)
+            while True:
+                message = ws.recv()
+                msg_data = json.loads(message)
+                if progress_callback:
+                    progress_callback(msg_data)
+                if msg_data.get("type") in ("complete", "error"):
+                    result = msg_data
+                    break
+            ws.close()
+        except Exception as e:
+            if progress_callback:
+                progress_callback({"type": "error", "error": str(e)})
+            result = {"type": "error", "error": str(e)}
+
+        return result
+
     def get_training_job_logs(self, job_id: str, log_type: str = "training") -> Dict[str, Any]:
         """GET /api/training/jobs/{job_id}/logs - Get logs."""
         response = self._client.get(
@@ -1086,9 +1120,19 @@ class PhiClient:
         response = self._client.get(
             f"/api/training/jobs/{job_id}/logs/download",
             params={"log_type": log_type},
+            timeout=120.0,
         )
         response.raise_for_status()
         return response.text
+
+    def get_training_job_log_status(self, job_id: str, log_type: str = "training") -> Dict[str, Any]:
+        """GET /api/training/jobs/{job_id}/logs/status - Check log presence on R2."""
+        response = self._client.get(
+            f"/api/training/jobs/{job_id}/logs/status",
+            params={"log_type": log_type},
+        )
+        response.raise_for_status()
+        return response.json()
 
     def stream_training_job_logs_ws(
         self,

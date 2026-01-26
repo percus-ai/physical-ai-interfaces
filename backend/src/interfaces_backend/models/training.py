@@ -173,7 +173,7 @@ class TrainingParams(BaseModel):
 class ValidationConfig(BaseModel):
     """Validation parameters."""
 
-    enable: bool = Field(False, description="Enable validation during training")
+    enable: bool = Field(True, description="Enable validation during training")
     eval_freq: Optional[int] = Field(None, ge=1, description="Validation frequency (steps)")
     max_batches: Optional[int] = Field(None, ge=1, description="Max validation batches")
     batch_size: Optional[int] = Field(None, ge=1, description="Validation batch size")
@@ -182,7 +182,7 @@ class ValidationConfig(BaseModel):
 class EarlyStoppingConfig(BaseModel):
     """Early stopping parameters."""
 
-    enable: bool = Field(False, description="Enable early stopping")
+    enable: bool = Field(True, description="Enable early stopping")
     patience: int = Field(5, ge=1, description="Patience (number of worsening evals)")
     min_delta: float = Field(0.0, description="Minimum change to qualify as improvement")
     mode: str = Field("min", description="Mode: min or max")
@@ -350,6 +350,21 @@ class VerdaStorageActionResult(BaseModel):
     success_ids: list[str] = Field(default_factory=list)
     failed: list[VerdaStorageActionFailure] = Field(default_factory=list)
     skipped: list[VerdaStorageActionFailure] = Field(default_factory=list)
+
+
+class JobReviveResponse(BaseModel):
+    """Response for reviving a terminated instance with restored storage."""
+
+    job_id: str
+    old_instance_id: str
+    volume_id: str
+    instance_id: str
+    instance_type: str
+    ip: str
+    ssh_user: str = "root"
+    ssh_private_key: str
+    location: str
+    message: str
 
 
 class DatasetCompatibilityCheckRequest(BaseModel):

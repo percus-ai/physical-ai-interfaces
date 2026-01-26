@@ -50,6 +50,7 @@ from interfaces_backend.models.training import (
     VerdaStorageActionResult,
     VerdaStorageItem,
     VerdaStorageListResponse,
+    JobReviveResponse,
 )
 from percus_ai.storage import get_project_root, get_models_dir
 from percus_ai.db import (
@@ -358,6 +359,8 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
         config["policy"]["gradient_checkpointing"] = policy.gradient_checkpointing
     if policy.use_amp is not None:
         config["policy"]["use_amp"] = policy.use_amp
+    if config["policy"].get("dtype") in ("bfloat16", "bf16") and config["policy"].get("use_amp"):
+        config["policy"]["use_amp"] = False
 
     return config
 
@@ -572,6 +575,143 @@ def _collect_verda_volumes(client: VerdaClient) -> dict[str, tuple[str, object]]
     for volume in trash_volumes:
         volumes_by_id[getattr(volume, "id", "")] = ("deleted", volume)
     return volumes_by_id
+
+
+def _gpu_count_from_instance_type(instance_type: object) -> int:
+    gpu = getattr(instance_type, "gpu", None) or {}
+    count = gpu.get("count") or gpu.get("number_of_gpus") or gpu.get("gpu_count") or 0
+    try:
+        return int(count)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _select_cpu_instance_type(client: VerdaClient) -> str:
+    instance_types = client.instance_types.get()
+    cpu_types = [t for t in instance_types if _gpu_count_from_instance_type(t) == 0]
+    if not cpu_types:
+        raise HTTPException(status_code=503, detail="CPUインスタンスタイプが見つかりません")
+    cpu_types.sort(key=lambda t: getattr(t, "price_per_hour", float("inf")))
+    return cpu_types[0].instance_type
+
+
+def _pick_os_volume_for_instance(
+    volumes_by_id: dict[str, tuple[str, object]],
+    instance_id: str,
+) -> Optional[tuple[str, object]]:
+    candidates: list[tuple[str, object]] = []
+    os_candidates: list[tuple[str, object]] = []
+    for _, (state, volume) in volumes_by_id.items():
+        if getattr(volume, "instance_id", None) != instance_id:
+            continue
+        item = (state, volume)
+        candidates.append(item)
+        if getattr(volume, "is_os_volume", False):
+            os_candidates.append(item)
+    if os_candidates:
+        return os_candidates[0]
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def _pick_os_volume_for_job(
+    volumes_by_id: dict[str, tuple[str, object]],
+    job_id: str,
+) -> Optional[tuple[str, object]]:
+    job_prefix = f"train-{job_id[:16]}"
+    matches: list[tuple[str, object]] = []
+    os_matches: list[tuple[str, object]] = []
+    for _, (state, volume) in volumes_by_id.items():
+        name = getattr(volume, "name", None) or ""
+        if job_prefix not in name:
+            continue
+        item = (state, volume)
+        matches.append(item)
+        if getattr(volume, "is_os_volume", False):
+            os_matches.append(item)
+    candidates = os_matches or matches
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: getattr(item[1], "created_at", "") or "", reverse=True)
+    return candidates[0]
+
+
+def _wait_for_volume_restore(client: VerdaClient, volume_id: str, timeout_sec: int = 120) -> None:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            volume = client.volumes.get_by_id(volume_id)
+            status = getattr(volume, "status", "") or ""
+            if status.lower() not in ("deleted", "deleting", "trash"):
+                return
+        except Exception:
+            pass
+        time.sleep(5)
+    raise HTTPException(status_code=504, detail="ストレージ復活の完了待ちがタイムアウトしました")
+
+
+def _ensure_volume_detached(client: VerdaClient, volume_id: str, timeout_sec: int = 120) -> None:
+    try:
+        volume = client.volumes.get_by_id(volume_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"ストレージ取得に失敗しました: {exc}") from exc
+
+    if getattr(volume, "instance_id", None) is None:
+        return
+
+    try:
+        client.volumes.detach(volume_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ストレージのデタッチに失敗しました: {exc}") from exc
+
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            volume = client.volumes.get_by_id(volume_id)
+            if getattr(volume, "instance_id", None) is None:
+                return
+        except Exception:
+            pass
+        time.sleep(5)
+
+    raise HTTPException(status_code=504, detail="ストレージのデタッチ完了待ちがタイムアウトしました")
+
+
+def _wait_for_volume_detached(client: VerdaClient, volume_id: str, timeout_sec: int = 180) -> None:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            volume = client.volumes.get_by_id(volume_id)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"ストレージ取得に失敗しました: {exc}") from exc
+        if getattr(volume, "instance_id", None) is None:
+            return
+        time.sleep(5)
+
+    raise HTTPException(status_code=504, detail="ストレージのデタッチ完了待ちがタイムアウトしました")
+
+
+def _wait_for_instance_offline(
+    client: VerdaClient,
+    instance_id: str,
+    timeout_sec: int = 120,
+    allowed_statuses: Optional[set[str]] = None,
+) -> None:
+    if allowed_statuses is None:
+        allowed_statuses = {"offline", "discontinued", "deleted"}
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            instance = client.instances.get_by_id(instance_id)
+            status = getattr(instance, "status", "") or ""
+            if status in allowed_statuses:
+                return
+        except Exception:
+            return
+        time.sleep(5)
+
+    raise HTTPException(status_code=504, detail="インスタンス停止の完了待ちがタイムアウトしました")
 
 
 def _restore_verda_volumes(client: VerdaClient, volume_ids: list[str]) -> None:
@@ -945,6 +1085,8 @@ def _should_try_r2_first(job_data: dict) -> bool:
     cleanup_status = job_data.get("cleanup_status")
     if cleanup_status in ("running", "done"):
         return True
+    if job_data.get("status") in ("completed", "failed", "stopped", "terminated"):
+        return True
     if not job_data.get("ip"):
         return True
     return False
@@ -1054,6 +1196,21 @@ def _get_full_logs_from_r2(job_data: dict, log_type: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to fetch full log from R2: {e}")
         return None
+
+
+def _check_logs_in_r2(job_data: dict, log_type: str) -> dict:
+    r2 = _get_logs_r2_sync_service()
+    job_id = job_data.get("job_id") or job_data.get("id")
+    if not r2 or not job_id:
+        return {"exists": False, "key": None, "error": "r2_unavailable"}
+    log_name = _get_log_file_name(job_data, log_type)
+    prefix = f"{r2.version}/" if r2.version else ""
+    key = f"{prefix}training_logs/{job_id}/{log_name}"
+    try:
+        r2.s3.client.head_object(Bucket=r2.bucket, Key=key)
+        return {"exists": True, "key": key, "error": None}
+    except Exception as e:
+        return {"exists": False, "key": key, "error": str(e)}
 
 def _get_remote_progress(job_id: str) -> Optional[dict]:
     """Get training progress from Supabase metrics."""
@@ -1825,16 +1982,38 @@ async def download_job_logs(
     if _should_try_r2_first(job_data):
         logs = _get_full_logs_from_r2(job_data, log_type)
         if logs is None:
-            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=5)
+            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=15)
     else:
-        logs = _get_remote_log_file(job_data, log_type=log_type, timeout=5)
+        logs = _get_remote_log_file(job_data, log_type=log_type, timeout=15)
         if logs is None:
             logs = _get_full_logs_from_r2(job_data, log_type)
     if logs is None:
+        r2_status = _check_logs_in_r2(job_data, log_type)
         raise HTTPException(
-            status_code=503, detail="Could not connect to remote instance"
+            status_code=503,
+            detail=(
+                "Log fetch failed. "
+                f"r2_exists={r2_status.get('exists')} key={r2_status.get('key')}"
+            ),
         )
     return logs
+
+
+@router.get("/jobs/{job_id}/logs/status")
+async def get_job_logs_status(
+    job_id: str,
+    log_type: str = Query("training", pattern="^(training|setup)$"),
+):
+    """Check whether logs exist on R2 for this job."""
+    job_data = _load_job(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    r2_status = _check_logs_in_r2(job_data, log_type)
+    return {
+        "job_id": job_id,
+        "log_type": log_type,
+        "r2": r2_status,
+    }
 
 
 @router.get("/jobs/{job_id}/progress", response_model=JobProgressResponse)
@@ -1908,6 +2087,181 @@ async def get_instance_status(job_id: str):
     )
 
 
+@router.post("/jobs/{job_id}/revive", response_model=JobReviveResponse)
+async def revive_job_instance(job_id: str):
+    """Revive a terminated instance by restoring its OS volume and starting a CPU instance."""
+    result = _revive_job_with_progress(job_id, lambda _msg: None)
+    return JobReviveResponse(**result)
+
+
+def _revive_job_with_progress(job_id: str, emit_progress: Callable[[dict], None]) -> dict:
+    emit_progress({"type": "start", "message": "蘇生を開始しました"})
+    job_data = _load_job(job_id, include_deleted=True)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    instance_id = job_data.get("instance_id")
+    if not instance_id:
+        raise HTTPException(status_code=400, detail="ジョブに instance_id がありません")
+
+    client = _get_verda_client()
+    if not client:
+        raise HTTPException(
+            status_code=400,
+            detail="Verda認証情報が設定されていません (DATACRUNCH_CLIENT_ID/SECRET)",
+        )
+
+    emit_progress({"type": "loading_storage", "message": "ストレージ情報を取得中..."})
+    volumes_by_id = _collect_verda_volumes(client)
+    picked = _pick_os_volume_for_instance(volumes_by_id, instance_id)
+    if not picked:
+        picked = _pick_os_volume_for_job(volumes_by_id, job_id)
+    if not picked:
+        raise HTTPException(
+            status_code=404,
+            detail="対象インスタンスのストレージが見つかりません",
+        )
+
+    state, volume = picked
+    volume_id = getattr(volume, "id", "") or ""
+    if not volume_id:
+        raise HTTPException(status_code=404, detail="ストレージIDが取得できませんでした")
+
+    if state == "deleted":
+        emit_progress({"type": "restore_storage", "message": "ストレージを復活中...", "volume_id": volume_id})
+        _restore_verda_volumes(client, [volume_id])
+        _wait_for_volume_restore(client, volume_id)
+        emit_progress({"type": "restore_complete", "message": "ストレージ復活完了", "volume_id": volume_id})
+
+    detach_ready_statuses = {"offline", "discontinued", "deleted"}
+    attached_instance_id = getattr(volume, "instance_id", None)
+    if attached_instance_id and attached_instance_id != instance_id:
+        emit_progress(
+            {
+                "type": "detaching_from_other",
+                "message": "別インスタンスからデタッチ中...",
+                "instance_id": attached_instance_id,
+            }
+        )
+        attached_status = _check_instance_via_api(attached_instance_id)
+        if attached_status is not None and attached_status not in detach_ready_statuses:
+            _delete_verda_instance(attached_instance_id)
+            _wait_for_instance_offline(client, attached_instance_id, allowed_statuses=detach_ready_statuses)
+
+    instance_status = _check_instance_via_api(instance_id)
+    if instance_status is not None and instance_status not in detach_ready_statuses:
+        emit_progress(
+            {
+                "type": "stopping_old_instance",
+                "message": "旧インスタンス停止中...",
+                "instance_id": instance_id,
+            }
+        )
+        _delete_verda_instance(instance_id)
+        _wait_for_instance_offline(client, instance_id, allowed_statuses=detach_ready_statuses)
+
+    emit_progress({"type": "detaching_storage", "message": "ストレージをデタッチ中...", "volume_id": volume_id})
+    _ensure_volume_detached(client, volume_id)
+    _wait_for_volume_detached(client, volume_id)
+    emit_progress({"type": "detached_storage", "message": "ストレージのデタッチ完了", "volume_id": volume_id})
+
+    emit_progress({"type": "select_instance", "message": "CPUインスタンスを選択中..."})
+    instance_type = _select_cpu_instance_type(client)
+    ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
+    if not ssh_key_name:
+        raise HTTPException(status_code=400, detail="VERDA_SSH_KEY_NAMEが設定されていません")
+    ssh_key_id = _get_ssh_key_id(client, ssh_key_name)
+
+    preferred_location = getattr(volume, "location", None) or "auto"
+    location = _find_location(client, instance_type, preferred_location, is_spot=False)
+    hostname = f"revive-{job_id[:8]}"
+
+    emit_progress({"type": "creating_instance", "message": "CPUインスタンスを作成中..."})
+    instance = client.instances.create(
+        instance_type=instance_type,
+        image=volume_id,
+        hostname=hostname,
+        description=f"Revive job: {job_id}",
+        ssh_key_ids=[ssh_key_id],
+        location=location,
+        is_spot=False,
+    )
+    new_instance_id = instance.id
+
+    ip = None
+    start_time = time.time()
+    deadline = start_time + IP_WAIT_TIMEOUT_SEC
+    while time.time() < deadline:
+        try:
+            inst = client.instances.get_by_id(new_instance_id)
+            if getattr(inst, "ip", None):
+                ip = inst.ip
+                break
+        except Exception:
+            pass
+        emit_progress(
+            {
+                "type": "waiting_ip",
+                "message": "IP割り当て待機中...",
+                "elapsed": int(time.time() - start_time),
+                "timeout": IP_WAIT_TIMEOUT_SEC,
+            }
+        )
+        time.sleep(10)
+
+    if not ip:
+        raise HTTPException(status_code=504, detail="IP取得タイムアウト (15分)")
+
+    ssh_private_key = job_data.get("ssh_private_key") or os.environ.get("VERDA_SSH_PRIVATE_KEY")
+    if not ssh_private_key:
+        ssh_private_key = str(Path.home() / ".ssh" / "id_rsa")
+    ssh_user = job_data.get("ssh_user") or "root"
+
+    result = JobReviveResponse(
+        job_id=job_id,
+        old_instance_id=instance_id,
+        volume_id=volume_id,
+        instance_id=new_instance_id,
+        instance_type=instance_type,
+        ip=ip,
+        ssh_user=ssh_user,
+        ssh_private_key=ssh_private_key,
+        location=location,
+        message="CPUインスタンスを起動しました。SSH接続できます。",
+    )
+    return result.model_dump()
+
+
+@router.websocket("/ws/jobs/{job_id}/revive")
+async def websocket_revive_job(websocket: WebSocket, job_id: str):
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def emit(msg: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, msg)
+
+    def worker() -> None:
+        try:
+            result = _revive_job_with_progress(job_id, emit)
+            emit({"type": "complete", "result": result})
+        except HTTPException as exc:
+            emit({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            emit({"type": "error", "error": str(exc)})
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    try:
+        while True:
+            message = await queue.get()
+            await websocket.send_json(message)
+            if message.get("type") in ("complete", "error"):
+                break
+    except WebSocketDisconnect:
+        return
+
+
 @router.post("/jobs/{job_id}/stop", response_model=JobActionResponse)
 async def stop_job(job_id: str):
     """Stop a running training job."""
@@ -1957,7 +2311,7 @@ def _delete_verda_instance(instance_id: str, wait_timeout: int = 30) -> bool:
         current_status = instance.status
         logger.info(f"Instance {instance_id} current status: {current_status}")
 
-        if current_status in ("offline", "deleted", "deleting"):
+        if current_status in ("offline", "deleted", "deleting", "discontinued"):
             logger.info(f"Instance {instance_id} already terminated or deleting (status: {current_status})")
             return True
 
@@ -1974,7 +2328,7 @@ def _delete_verda_instance(instance_id: str, wait_timeout: int = 30) -> bool:
                 new_status = instance.status
                 logger.info(f"Instance {instance_id} status after delete request: {new_status}")
 
-                if new_status in ("deleted", "deleting", "offline"):
+                if new_status in ("deleted", "deleting", "offline", "discontinued"):
                     logger.info(f"Instance {instance_id} deletion confirmed (status: {new_status})")
                     return True
             except Exception as check_error:
