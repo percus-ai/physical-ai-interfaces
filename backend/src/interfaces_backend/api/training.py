@@ -907,9 +907,13 @@ def _get_remote_logs(job_data: dict, lines: int = 100, log_type: str = "training
         conn.disconnect()
 
 
-def _get_remote_log_file(job_data: dict, log_type: str = "training") -> Optional[str]:
+def _get_remote_log_file(
+    job_data: dict,
+    log_type: str = "training",
+    timeout: int = 15,
+) -> Optional[str]:
     try:
-        conn = _get_ssh_connection_for_job(job_data)
+        conn = _get_ssh_connection_for_job(job_data, timeout=timeout)
     except SystemExit:
         return None
     if not conn:
@@ -926,6 +930,15 @@ def _get_remote_log_file(job_data: dict, log_type: str = "training") -> Optional
         return None
     finally:
         conn.disconnect()
+
+
+def _should_try_r2_first(job_data: dict) -> bool:
+    cleanup_status = job_data.get("cleanup_status")
+    if cleanup_status in ("running", "done"):
+        return True
+    if not job_data.get("ip"):
+        return True
+    return False
 
 
 def _get_log_file_name(job_data: dict, log_type: str) -> str:
@@ -1800,9 +1813,14 @@ async def download_job_logs(
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
-    logs = _get_remote_log_file(job_data, log_type=log_type)
-    if logs is None:
+    if _should_try_r2_first(job_data):
         logs = _get_full_logs_from_r2(job_data, log_type)
+        if logs is None:
+            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=5)
+    else:
+        logs = _get_remote_log_file(job_data, log_type=log_type, timeout=5)
+        if logs is None:
+            logs = _get_full_logs_from_r2(job_data, log_type)
     if logs is None:
         raise HTTPException(
             status_code=503, detail="Could not connect to remote instance"
