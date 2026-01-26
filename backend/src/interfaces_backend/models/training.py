@@ -156,6 +156,7 @@ class PolicyConfig(BaseModel):
     compile_model: Optional[bool] = Field(None, description="Enable torch.compile")
     gradient_checkpointing: Optional[bool] = Field(None, description="Enable gradient checkpointing")
     dtype: Optional[str] = Field(None, description="Model dtype: float32, float16, bfloat16")
+    use_amp: Optional[bool] = Field(None, description="Enable AMP (mixed precision)")
 
 
 class TrainingParams(BaseModel):
@@ -164,6 +165,27 @@ class TrainingParams(BaseModel):
     steps: Optional[int] = Field(None, description="Number of training steps")
     batch_size: Optional[int] = Field(None, description="Batch size")
     save_freq: Optional[int] = Field(None, ge=50, description="Checkpoint save frequency")
+    log_freq: Optional[int] = Field(None, ge=1, description="Logging frequency (steps)")
+    num_workers: Optional[int] = Field(None, ge=0, description="Dataloader workers")
+    save_checkpoint: Optional[bool] = Field(None, description="Save checkpoints during training")
+
+
+class ValidationConfig(BaseModel):
+    """Validation parameters."""
+
+    enable: bool = Field(False, description="Enable validation during training")
+    eval_freq: Optional[int] = Field(None, ge=1, description="Validation frequency (steps)")
+    max_batches: Optional[int] = Field(None, ge=1, description="Max validation batches")
+    batch_size: Optional[int] = Field(None, ge=1, description="Validation batch size")
+
+
+class EarlyStoppingConfig(BaseModel):
+    """Early stopping parameters."""
+
+    enable: bool = Field(False, description="Enable early stopping")
+    patience: int = Field(5, ge=1, description="Patience (number of worsening evals)")
+    min_delta: float = Field(0.0, description="Minimum change to qualify as improvement")
+    mode: str = Field("min", description="Mode: min or max")
 
 
 class CloudConfig(BaseModel):
@@ -182,6 +204,8 @@ class JobCreateRequest(BaseModel):
     dataset: Optional[DatasetConfig] = Field(None, description="Dataset config")
     policy: Optional[PolicyConfig] = Field(None, description="Policy config")
     training: TrainingParams = Field(default_factory=TrainingParams)
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     checkpoint_repo_id: Optional[str] = Field(None, description="HF repo for checkpoint upload")
     wandb_enable: bool = Field(True, description="Enable Weights & Biases logging")
@@ -368,6 +392,9 @@ class ContinueTrainingParams(BaseModel):
     additional_steps: int = Field(..., description="Additional steps to train")
     batch_size: Optional[int] = Field(None, description="Batch size")
     save_freq: Optional[int] = Field(None, description="Checkpoint save frequency")
+    log_freq: Optional[int] = Field(None, ge=1, description="Logging frequency (steps)")
+    num_workers: Optional[int] = Field(None, ge=0, description="Dataloader workers")
+    save_checkpoint: Optional[bool] = Field(None, description="Save checkpoints during training")
 
 
 class JobCreateContinueRequest(BaseModel):
@@ -377,6 +404,9 @@ class JobCreateContinueRequest(BaseModel):
     checkpoint: ContinueCheckpointConfig = Field(..., description="Source checkpoint")
     dataset: ContinueDatasetConfig = Field(..., description="Dataset config")
     training: ContinueTrainingParams = Field(..., description="Training params")
+    policy: Optional[PolicyConfig] = Field(None, description="Policy overrides")
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     wandb_enable: bool = Field(True, description="Enable W&B logging")
     author: Optional[str] = Field(None, description="Author user id")

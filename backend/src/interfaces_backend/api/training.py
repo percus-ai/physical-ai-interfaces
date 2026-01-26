@@ -40,6 +40,8 @@ from interfaces_backend.models.training import (
     DatasetCompatibilityCheckResponse,
     # Continue training models
     JobCreateContinueRequest,
+    EarlyStoppingConfig,
+    ValidationConfig,
     # GPU availability
     GpuAvailabilityInfo,
     GpuAvailabilityResponse,
@@ -316,8 +318,17 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
     dataset = request.dataset
     policy = request.policy
 
-    training = request.training.model_dump()
+    training = {k: v for k, v in request.training.model_dump().items() if v is not None}
     training.setdefault("save_checkpoint", True)
+
+    validation = {k: v for k, v in request.validation.model_dump().items() if v is not None}
+    early_stopping = {k: v for k, v in request.early_stopping.model_dump().items() if v is not None}
+    if early_stopping.get("enable"):
+        validation.setdefault("enable", True)
+        if not training.get("save_checkpoint", True):
+            training["save_checkpoint"] = True
+    if validation.get("enable") and validation.get("eval_freq") is None:
+        validation["eval_freq"] = training.get("save_freq") or 20_000
 
     config = {
         "dataset": {
@@ -328,12 +339,8 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
             "push_to_hub": False,
         },
         "training": training,
-        "validation": {
-            "enable": False,
-        },
-        "early_stopping": {
-            "enable": False,
-        },
+        "validation": validation or {"enable": False},
+        "early_stopping": early_stopping or {"enable": False},
         "output": {
             "job_name": job_id,
         },
@@ -349,6 +356,8 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
         config["policy"]["compile_model"] = policy.compile_model
     if policy.gradient_checkpointing is not None:
         config["policy"]["gradient_checkpointing"] = policy.gradient_checkpointing
+    if policy.use_amp is not None:
+        config["policy"]["use_amp"] = policy.use_amp
 
     return config
 
@@ -2217,6 +2226,29 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
         )
 
         # Save job info (status: starting)
+        training_payload = {k: v for k, v in training_config.model_dump().items() if v is not None}
+        validation_payload = {k: v for k, v in request.validation.model_dump().items() if v is not None}
+        early_stopping_payload = {k: v for k, v in request.early_stopping.model_dump().items() if v is not None}
+        if early_stopping_payload.get("enable"):
+            validation_payload.setdefault("enable", True)
+            if training_payload.get("save_checkpoint") is False:
+                training_payload["save_checkpoint"] = True
+        if validation_payload.get("enable") and validation_payload.get("eval_freq") is None:
+            validation_payload["eval_freq"] = training_payload.get("save_freq") or 20_000
+
+        policy_payload = {"type": checkpoint_entry.policy_type}
+        if request.policy:
+            if request.policy.pretrained_path:
+                policy_payload["pretrained_path"] = request.policy.pretrained_path
+            if request.policy.dtype:
+                policy_payload["dtype"] = request.policy.dtype
+            if request.policy.compile_model is not None:
+                policy_payload["compile_model"] = request.policy.compile_model
+            if request.policy.gradient_checkpointing is not None:
+                policy_payload["gradient_checkpointing"] = request.policy.gradient_checkpointing
+            if request.policy.use_amp is not None:
+                policy_payload["use_amp"] = request.policy.use_amp
+
         job_data = {
             "job_id": job_id,
             "job_name": job_name,
@@ -2450,12 +2482,21 @@ def _create_job_with_progress(
         policy = PolicyConfig(
             type=policy_data.get("type", "act"),
             pretrained_path=policy_data.get("pretrained_path"),
+            compile_model=policy_data.get("compile_model"),
+            gradient_checkpointing=policy_data.get("gradient_checkpointing"),
+            dtype=policy_data.get("dtype"),
+            use_amp=policy_data.get("use_amp"),
         )
         training = TrainingParams(
             steps=training_data.get("steps"),
             batch_size=training_data.get("batch_size"),
             save_freq=training_data.get("save_freq"),
+            log_freq=training_data.get("log_freq"),
+            num_workers=training_data.get("num_workers"),
+            save_checkpoint=training_data.get("save_checkpoint"),
         )
+        validation_data = request_data.get("validation", {})
+        early_stopping_data = request_data.get("early_stopping", {})
         cloud = CloudConfig(
             gpu_model=cloud_data.get("gpu_model", "H100"),
             gpus_per_instance=cloud_data.get("gpus_per_instance", 1),
@@ -2545,6 +2586,10 @@ def _create_job_with_progress(
             dataset=dataset,
             policy=policy,
             training=training,
+            validation=ValidationConfig(**validation_data) if validation_data else ValidationConfig(),
+            early_stopping=(
+                EarlyStoppingConfig(**early_stopping_data) if early_stopping_data else EarlyStoppingConfig()
+            ),
             cloud=cloud,
             checkpoint_repo_id=checkpoint_repo_id,
             wandb_enable=wandb_enable,
@@ -3530,7 +3575,10 @@ async def create_continue_job(
             "author": author,
             "training_config": {
                 "dataset": request.dataset.model_dump(),
-                "training": training_config.model_dump(),
+                "policy": policy_payload,
+                "training": training_payload,
+                "validation": validation_payload or {"enable": False},
+                "early_stopping": early_stopping_payload or {"enable": False},
                 "checkpoint": {
                     "job_name": checkpoint_config.job_name,
                     "step": step,

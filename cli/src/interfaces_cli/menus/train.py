@@ -53,6 +53,7 @@ class PolicyTypeInfo:
     compile_model: Optional[bool] = None
     gradient_checkpointing: Optional[bool] = None
     dtype: Optional[str] = None
+    use_amp: Optional[bool] = None
 
 
 POLICY_TYPES: Dict[str, PolicyTypeInfo] = {
@@ -81,6 +82,7 @@ POLICY_TYPES: Dict[str, PolicyTypeInfo] = {
         compile_model=True,
         gradient_checkpointing=True,
         dtype="bfloat16",
+        use_amp=True,
     ),
     "pi05": PolicyTypeInfo(
         display_name="π0.5 (Open-World VLA Model)",
@@ -94,6 +96,7 @@ POLICY_TYPES: Dict[str, PolicyTypeInfo] = {
         compile_model=True,
         gradient_checkpointing=True,
         dtype="bfloat16",
+        use_amp=True,
     ),
     "groot": PolicyTypeInfo(
         display_name="GR00T N1.5 (NVIDIA Isaac GR00T)",
@@ -163,6 +166,21 @@ class NewTrainingState:
     steps: int = 100000
     batch_size: int = 32
     save_freq: int = 5000
+    log_freq: int = 200
+    num_workers: int = 4
+    save_checkpoint: bool = True
+    validation_enable: bool = False
+    validation_eval_freq: int = 20000
+    validation_max_batches: Optional[int] = None
+    validation_batch_size: Optional[int] = None
+    early_stopping_enable: bool = False
+    early_stopping_patience: int = 5
+    early_stopping_min_delta: float = 0.0
+    early_stopping_mode: str = "min"
+    policy_use_amp: Optional[bool] = None
+    policy_dtype: Optional[str] = None
+    policy_gradient_checkpointing: Optional[bool] = None
+    policy_compile_model: Optional[bool] = None
 
     # Step 5: Verda settings
     gpu_model: str = "H100"
@@ -212,6 +230,21 @@ class ContinueTrainingState:
     additional_steps: int = 50000
     batch_size: int = 32
     save_freq: int = 5000
+    log_freq: int = 200
+    num_workers: int = 4
+    save_checkpoint: bool = True
+    validation_enable: bool = False
+    validation_eval_freq: int = 20000
+    validation_max_batches: Optional[int] = None
+    validation_batch_size: Optional[int] = None
+    early_stopping_enable: bool = False
+    early_stopping_patience: int = 5
+    early_stopping_min_delta: float = 0.0
+    early_stopping_mode: str = "min"
+    policy_use_amp: Optional[bool] = None
+    policy_dtype: Optional[str] = None
+    policy_gradient_checkpointing: Optional[bool] = None
+    policy_compile_model: Optional[bool] = None
 
     # Step 5: Verda settings
     gpu_model: str = "H100"
@@ -706,6 +739,10 @@ class TrainingWizard(BaseMenu):
         self.state.save_freq = policy_info.default_save_freq
         self.state.storage_size = policy_info.recommended_storage
         self.state.torch_nightly = policy_info.torch_nightly
+        self.state.policy_compile_model = policy_info.compile_model
+        self.state.policy_gradient_checkpointing = policy_info.gradient_checkpointing
+        self.state.policy_dtype = policy_info.dtype
+        self.state.policy_use_amp = policy_info.use_amp
 
         return "next"
 
@@ -928,8 +965,184 @@ class TrainingWizard(BaseMenu):
             ).execute()
             self.state.save_freq = int(save_freq)
 
+            print(f"{Colors.muted('追加の学習パラメータ（デフォルト）')}")
+            print(f"  log_freq: {self.state.log_freq}")
+            print(f"  num_workers: {self.state.num_workers}")
+            print(f"  save_checkpoint: {'有効' if self.state.save_checkpoint else '無効'}")
+            if inquirer.confirm(
+                message="追加の学習パラメータを変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                log_freq_max = max(self.state.steps, 1)
+                log_freq = inquirer.number(
+                    message="Log frequency (steps):",
+                    default=self.state.log_freq,
+                    min_allowed=1,
+                    max_allowed=log_freq_max,
+                    style=hacker_style,
+                ).execute()
+                self.state.log_freq = int(log_freq)
+
+                num_workers = inquirer.number(
+                    message="DataLoader workers:",
+                    default=self.state.num_workers,
+                    min_allowed=0,
+                    max_allowed=64,
+                    style=hacker_style,
+                ).execute()
+                self.state.num_workers = int(num_workers)
+
+                self.state.save_checkpoint = inquirer.confirm(
+                    message="Save checkpoints during training?",
+                    default=self.state.save_checkpoint,
+                    style=hacker_style,
+                ).execute()
+
+            print(f"{Colors.muted('Early Stopping（デフォルト）')}")
+            print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
+            print(f"  patience: {self.state.early_stopping_patience}")
+            print(f"  min_delta: {self.state.early_stopping_min_delta}")
+            print(f"  mode: {self.state.early_stopping_mode}")
+            if inquirer.confirm(
+                message="Early Stoppingの設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                self.state.early_stopping_enable = inquirer.confirm(
+                    message="Early Stoppingを有効にしますか？",
+                    default=self.state.early_stopping_enable,
+                    style=hacker_style,
+                ).execute()
+                if self.state.early_stopping_enable:
+                    patience = inquirer.number(
+                        message="Early Stopping patience:",
+                        default=self.state.early_stopping_patience,
+                        min_allowed=1,
+                        max_allowed=1000,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.early_stopping_patience = int(patience)
+
+                    min_delta_input = inquirer.text(
+                        message="Early Stopping min_delta:",
+                        default=str(self.state.early_stopping_min_delta),
+                        style=hacker_style,
+                    ).execute()
+                    try:
+                        self.state.early_stopping_min_delta = float(min_delta_input)
+                    except ValueError:
+                        self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
+
+                    mode = inquirer.select(
+                        message="Early Stopping mode:",
+                        choices=[
+                            Choice(value="min", name="min (損失が下がらなくなったら停止)"),
+                            Choice(value="max", name="max (指標が上がらなくなったら停止)"),
+                        ],
+                        default=self.state.early_stopping_mode,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.early_stopping_mode = mode
+
+            print(f"{Colors.muted('Validation（デフォルト）')}")
+            print(f"  enable: {'有効' if self.state.validation_enable else '無効'}")
+            print(f"  eval_freq: {self.state.validation_eval_freq}")
+            print(f"  max_batches: {self.state.validation_max_batches}")
+            print(f"  batch_size: {self.state.validation_batch_size}")
+            if inquirer.confirm(
+                message="Validationの設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                self.state.validation_enable = inquirer.confirm(
+                    message="検証を有効にしますか？",
+                    default=self.state.validation_enable,
+                    style=hacker_style,
+                ).execute()
+                if self.state.validation_enable:
+                    eval_freq = inquirer.number(
+                        message="Validation frequency (steps):",
+                        default=self.state.validation_eval_freq,
+                        min_allowed=1,
+                        max_allowed=max(self.state.steps, 1),
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_eval_freq = int(eval_freq)
+
+                    max_batches = inquirer.number(
+                        message="Validation max batches (0=無制限):",
+                        default=self.state.validation_max_batches or 0,
+                        min_allowed=0,
+                        max_allowed=100000,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_max_batches = int(max_batches) if int(max_batches) > 0 else None
+
+                    val_batch = inquirer.number(
+                        message="Validation batch size (0=未指定):",
+                        default=self.state.validation_batch_size or 0,
+                        min_allowed=0,
+                        max_allowed=256,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_batch_size = int(val_batch) if int(val_batch) > 0 else None
+
+            print(f"{Colors.muted('モデル/精度設定（デフォルト）')}")
+            print(f"  dtype: {self.state.policy_dtype}")
+            print(f"  use_amp: {self.state.policy_use_amp}")
+            print(f"  gradient_checkpointing: {self.state.policy_gradient_checkpointing}")
+            print(f"  compile_model: {self.state.policy_compile_model}")
+            if inquirer.confirm(
+                message="モデル/精度設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                dtype = inquirer.select(
+                    message="モデルdtype:",
+                    choices=[
+                        Choice(value=None, name="指定しない"),
+                        Choice(value="float32", name="float32"),
+                        Choice(value="bfloat16", name="bfloat16"),
+                        Choice(value="float16", name="float16"),
+                    ],
+                    default=self.state.policy_dtype,
+                    style=hacker_style,
+                ).execute()
+                self.state.policy_dtype = dtype
+
+                self.state.policy_use_amp = inquirer.confirm(
+                    message="AMPを有効にしますか？",
+                    default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
+                    style=hacker_style,
+                ).execute()
+
+                self.state.policy_gradient_checkpointing = inquirer.confirm(
+                    message="Gradient checkpointingを有効にしますか？",
+                    default=(
+                        self.state.policy_gradient_checkpointing
+                        if self.state.policy_gradient_checkpointing is not None
+                        else False
+                    ),
+                    style=hacker_style,
+                ).execute()
+
+                self.state.policy_compile_model = inquirer.confirm(
+                    message="torch.compileを有効にしますか？",
+                    default=self.state.policy_compile_model if self.state.policy_compile_model is not None else False,
+                    style=hacker_style,
+                ).execute()
+
         except KeyboardInterrupt:
             return "back"
+
+        if self.state.early_stopping_enable and not self.state.validation_enable:
+            self.state.validation_enable = True
+            if self.state.validation_eval_freq <= 0:
+                self.state.validation_eval_freq = self.state.save_freq
+
+        if self.state.early_stopping_enable and not self.state.save_checkpoint:
+            self.state.save_checkpoint = True
 
         # Confirm or go back
         action = inquirer.select(
@@ -1183,6 +1396,9 @@ class TrainingWizard(BaseMenu):
         print(f"  ステップ数: {self.state.steps:,}")
         print(f"  バッチサイズ: {self.state.batch_size}")
         print(f"  保存頻度: {self.state.save_freq:,} steps")
+        print(f"  ログ頻度: {self.state.log_freq:,} steps")
+        print(f"  DataLoader workers: {self.state.num_workers}")
+        print(f"  チェックポイント保存: {'有効' if self.state.save_checkpoint else '無効'}")
 
         print(f"\n{Colors.CYAN}=== Verda設定 ==={Colors.RESET}")
         print(f"  GPU: {self.state.gpu_model} x {self.state.gpu_count}")
@@ -1190,6 +1406,24 @@ class TrainingWizard(BaseMenu):
         print(f"  インスタンス: {'スポット' if self.state.is_spot else 'オンデマンド'}")
         if self.state.torch_nightly:
             print(f"  torch nightly: 有効")
+
+        print(f"\n{Colors.CYAN}=== 検証/早期終了 ==={Colors.RESET}")
+        print(f"  検証: {'有効' if self.state.validation_enable else '無効'}")
+        if self.state.validation_enable:
+            print(f"  eval_freq: {self.state.validation_eval_freq}")
+            print(f"  max_batches: {self.state.validation_max_batches}")
+            print(f"  val_batch_size: {self.state.validation_batch_size}")
+        print(f"  Early Stopping: {'有効' if self.state.early_stopping_enable else '無効'}")
+        if self.state.early_stopping_enable:
+            print(f"  patience: {self.state.early_stopping_patience}")
+            print(f"  min_delta: {self.state.early_stopping_min_delta}")
+            print(f"  mode: {self.state.early_stopping_mode}")
+
+        print(f"\n{Colors.CYAN}=== モデル設定 ==={Colors.RESET}")
+        print(f"  dtype: {self.state.policy_dtype}")
+        print(f"  AMP: {self.state.policy_use_amp}")
+        print(f"  gradient_checkpointing: {self.state.policy_gradient_checkpointing}")
+        print(f"  torch.compile: {self.state.policy_compile_model}")
 
         print(f"\n{Colors.CYAN}=== ジョブ名 ==={Colors.RESET}")
         print(f"  {self.state.job_name}")
@@ -1231,6 +1465,21 @@ class TrainingWizard(BaseMenu):
                 "steps": self.state.steps,
                 "batch_size": self.state.batch_size,
                 "save_freq": self.state.save_freq,
+                "log_freq": self.state.log_freq,
+                "num_workers": self.state.num_workers,
+                "save_checkpoint": self.state.save_checkpoint,
+            },
+            "validation": {
+                "enable": self.state.validation_enable,
+                "eval_freq": self.state.validation_eval_freq,
+                "max_batches": self.state.validation_max_batches,
+                "batch_size": self.state.validation_batch_size,
+            },
+            "early_stopping": {
+                "enable": self.state.early_stopping_enable,
+                "patience": self.state.early_stopping_patience,
+                "min_delta": self.state.early_stopping_min_delta,
+                "mode": self.state.early_stopping_mode,
             },
             "cloud": {
                 "gpu_model": self.state.gpu_model,
@@ -1252,6 +1501,17 @@ class TrainingWizard(BaseMenu):
             payload["policy"]["gradient_checkpointing"] = policy_info.gradient_checkpointing
         if policy_info.dtype:
             payload["policy"]["dtype"] = policy_info.dtype
+        if policy_info.use_amp is not None:
+            payload["policy"]["use_amp"] = policy_info.use_amp
+
+        if self.state.policy_compile_model is not None:
+            payload["policy"]["compile_model"] = self.state.policy_compile_model
+        if self.state.policy_gradient_checkpointing is not None:
+            payload["policy"]["gradient_checkpointing"] = self.state.policy_gradient_checkpointing
+        if self.state.policy_dtype is not None:
+            payload["policy"]["dtype"] = self.state.policy_dtype
+        if self.state.policy_use_amp is not None:
+            payload["policy"]["use_amp"] = self.state.policy_use_amp
 
         # Progress state for Rich Live display
         console = Console()
@@ -1659,6 +1919,10 @@ class ContinueTrainingWizard(BaseMenu):
                 self.state.batch_size = policy_info.default_batch_size
                 self.state.save_freq = policy_info.default_save_freq
                 self.state.storage_size = policy_info.recommended_storage
+                self.state.policy_compile_model = policy_info.compile_model
+                self.state.policy_gradient_checkpointing = policy_info.gradient_checkpointing
+                self.state.policy_dtype = policy_info.dtype
+                self.state.policy_use_amp = policy_info.use_amp
 
         return "next"
 
@@ -1816,8 +2080,184 @@ class ContinueTrainingWizard(BaseMenu):
             ).execute()
             self.state.save_freq = int(save_freq)
 
+            print(f"{Colors.muted('追加の学習パラメータ（デフォルト）')}")
+            print(f"  log_freq: {self.state.log_freq}")
+            print(f"  num_workers: {self.state.num_workers}")
+            print(f"  save_checkpoint: {'有効' if self.state.save_checkpoint else '無効'}")
+            if inquirer.confirm(
+                message="追加の学習パラメータを変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                log_freq_max = max(self.state.additional_steps, 1)
+                log_freq = inquirer.number(
+                    message="Log frequency (steps):",
+                    default=self.state.log_freq,
+                    min_allowed=1,
+                    max_allowed=log_freq_max,
+                    style=hacker_style,
+                ).execute()
+                self.state.log_freq = int(log_freq)
+
+                num_workers = inquirer.number(
+                    message="DataLoader workers:",
+                    default=self.state.num_workers,
+                    min_allowed=0,
+                    max_allowed=64,
+                    style=hacker_style,
+                ).execute()
+                self.state.num_workers = int(num_workers)
+
+                self.state.save_checkpoint = inquirer.confirm(
+                    message="Save checkpoints during training?",
+                    default=self.state.save_checkpoint,
+                    style=hacker_style,
+                ).execute()
+
+            print(f"{Colors.muted('Early Stopping（デフォルト）')}")
+            print(f"  enable: {'有効' if self.state.early_stopping_enable else '無効'}")
+            print(f"  patience: {self.state.early_stopping_patience}")
+            print(f"  min_delta: {self.state.early_stopping_min_delta}")
+            print(f"  mode: {self.state.early_stopping_mode}")
+            if inquirer.confirm(
+                message="Early Stoppingの設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                self.state.early_stopping_enable = inquirer.confirm(
+                    message="Early Stoppingを有効にしますか？",
+                    default=self.state.early_stopping_enable,
+                    style=hacker_style,
+                ).execute()
+                if self.state.early_stopping_enable:
+                    patience = inquirer.number(
+                        message="Early Stopping patience:",
+                        default=self.state.early_stopping_patience,
+                        min_allowed=1,
+                        max_allowed=1000,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.early_stopping_patience = int(patience)
+
+                    min_delta_input = inquirer.text(
+                        message="Early Stopping min_delta:",
+                        default=str(self.state.early_stopping_min_delta),
+                        style=hacker_style,
+                    ).execute()
+                    try:
+                        self.state.early_stopping_min_delta = float(min_delta_input)
+                    except ValueError:
+                        self.state.early_stopping_min_delta = float(self.state.early_stopping_min_delta)
+
+                    mode = inquirer.select(
+                        message="Early Stopping mode:",
+                        choices=[
+                            Choice(value="min", name="min (損失が下がらなくなったら停止)"),
+                            Choice(value="max", name="max (指標が上がらなくなったら停止)"),
+                        ],
+                        default=self.state.early_stopping_mode,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.early_stopping_mode = mode
+
+            print(f"{Colors.muted('Validation（デフォルト）')}")
+            print(f"  enable: {'有効' if self.state.validation_enable else '無効'}")
+            print(f"  eval_freq: {self.state.validation_eval_freq}")
+            print(f"  max_batches: {self.state.validation_max_batches}")
+            print(f"  batch_size: {self.state.validation_batch_size}")
+            if inquirer.confirm(
+                message="Validationの設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                self.state.validation_enable = inquirer.confirm(
+                    message="検証を有効にしますか？",
+                    default=self.state.validation_enable,
+                    style=hacker_style,
+                ).execute()
+                if self.state.validation_enable:
+                    eval_freq = inquirer.number(
+                        message="Validation frequency (steps):",
+                        default=self.state.validation_eval_freq,
+                        min_allowed=1,
+                        max_allowed=max(self.state.additional_steps, 1),
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_eval_freq = int(eval_freq)
+
+                    max_batches = inquirer.number(
+                        message="Validation max batches (0=無制限):",
+                        default=self.state.validation_max_batches or 0,
+                        min_allowed=0,
+                        max_allowed=100000,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_max_batches = int(max_batches) if int(max_batches) > 0 else None
+
+                    val_batch = inquirer.number(
+                        message="Validation batch size (0=未指定):",
+                        default=self.state.validation_batch_size or 0,
+                        min_allowed=0,
+                        max_allowed=256,
+                        style=hacker_style,
+                    ).execute()
+                    self.state.validation_batch_size = int(val_batch) if int(val_batch) > 0 else None
+
+            print(f"{Colors.muted('モデル/精度設定（デフォルト）')}")
+            print(f"  dtype: {self.state.policy_dtype}")
+            print(f"  use_amp: {self.state.policy_use_amp}")
+            print(f"  gradient_checkpointing: {self.state.policy_gradient_checkpointing}")
+            print(f"  compile_model: {self.state.policy_compile_model}")
+            if inquirer.confirm(
+                message="モデル/精度設定を変更しますか？",
+                default=False,
+                style=hacker_style,
+            ).execute():
+                dtype = inquirer.select(
+                    message="モデルdtype:",
+                    choices=[
+                        Choice(value=None, name="指定しない"),
+                        Choice(value="float32", name="float32"),
+                        Choice(value="bfloat16", name="bfloat16"),
+                        Choice(value="float16", name="float16"),
+                    ],
+                    default=self.state.policy_dtype,
+                    style=hacker_style,
+                ).execute()
+                self.state.policy_dtype = dtype
+
+                self.state.policy_use_amp = inquirer.confirm(
+                    message="AMPを有効にしますか？",
+                    default=self.state.policy_use_amp if self.state.policy_use_amp is not None else False,
+                    style=hacker_style,
+                ).execute()
+
+                self.state.policy_gradient_checkpointing = inquirer.confirm(
+                    message="Gradient checkpointingを有効にしますか？",
+                    default=(
+                        self.state.policy_gradient_checkpointing
+                        if self.state.policy_gradient_checkpointing is not None
+                        else False
+                    ),
+                    style=hacker_style,
+                ).execute()
+
+                self.state.policy_compile_model = inquirer.confirm(
+                    message="torch.compileを有効にしますか？",
+                    default=self.state.policy_compile_model if self.state.policy_compile_model is not None else False,
+                    style=hacker_style,
+                ).execute()
+
         except KeyboardInterrupt:
             return "back"
+
+        if self.state.early_stopping_enable and not self.state.validation_enable:
+            self.state.validation_enable = True
+            if self.state.validation_eval_freq <= 0:
+                self.state.validation_eval_freq = self.state.save_freq
+
+        if self.state.early_stopping_enable and not self.state.save_checkpoint:
+            self.state.save_checkpoint = True
 
         action = inquirer.select(
             message="",
@@ -2038,11 +2478,33 @@ class ContinueTrainingWizard(BaseMenu):
         print(f"  追加ステップ: {self.state.additional_steps:,}")
         print(f"  最終ステップ: {total_steps:,}")
         print(f"  バッチサイズ: {self.state.batch_size}")
+        print(f"  保存頻度: {self.state.save_freq:,} steps")
+        print(f"  ログ頻度: {self.state.log_freq:,} steps")
+        print(f"  DataLoader workers: {self.state.num_workers}")
+        print(f"  チェックポイント保存: {'有効' if self.state.save_checkpoint else '無効'}")
 
         print(f"\n{Colors.CYAN}=== Verda設定 ==={Colors.RESET}")
         print(f"  GPU: {self.state.gpu_model} x {self.state.gpu_count}")
         print(f"  ストレージ: {self.state.storage_size}GB")
         print(f"  インスタンス: {'スポット' if self.state.is_spot else 'オンデマンド'}")
+
+        print(f"\n{Colors.CYAN}=== 検証/早期終了 ==={Colors.RESET}")
+        print(f"  検証: {'有効' if self.state.validation_enable else '無効'}")
+        if self.state.validation_enable:
+            print(f"  eval_freq: {self.state.validation_eval_freq}")
+            print(f"  max_batches: {self.state.validation_max_batches}")
+            print(f"  val_batch_size: {self.state.validation_batch_size}")
+        print(f"  Early Stopping: {'有効' if self.state.early_stopping_enable else '無効'}")
+        if self.state.early_stopping_enable:
+            print(f"  patience: {self.state.early_stopping_patience}")
+            print(f"  min_delta: {self.state.early_stopping_min_delta}")
+            print(f"  mode: {self.state.early_stopping_mode}")
+
+        print(f"\n{Colors.CYAN}=== モデル設定 ==={Colors.RESET}")
+        print(f"  dtype: {self.state.policy_dtype}")
+        print(f"  AMP: {self.state.policy_use_amp}")
+        print(f"  gradient_checkpointing: {self.state.policy_gradient_checkpointing}")
+        print(f"  torch.compile: {self.state.policy_compile_model}")
 
         action = inquirer.select(
             message="",
@@ -2078,6 +2540,21 @@ class ContinueTrainingWizard(BaseMenu):
                     "additional_steps": self.state.additional_steps,
                     "batch_size": self.state.batch_size,
                     "save_freq": self.state.save_freq,
+                    "log_freq": self.state.log_freq,
+                    "num_workers": self.state.num_workers,
+                    "save_checkpoint": self.state.save_checkpoint,
+                },
+                "validation": {
+                    "enable": self.state.validation_enable,
+                    "eval_freq": self.state.validation_eval_freq,
+                    "max_batches": self.state.validation_max_batches,
+                    "batch_size": self.state.validation_batch_size,
+                },
+                "early_stopping": {
+                    "enable": self.state.early_stopping_enable,
+                    "patience": self.state.early_stopping_patience,
+                    "min_delta": self.state.early_stopping_min_delta,
+                    "mode": self.state.early_stopping_mode,
                 },
                 "cloud": {
                     "gpu_model": self.state.gpu_model,
@@ -2086,6 +2563,18 @@ class ContinueTrainingWizard(BaseMenu):
                     "is_spot": self.state.is_spot,
                 },
             }
+
+            policy_payload = {}
+            if self.state.policy_compile_model is not None:
+                policy_payload["compile_model"] = self.state.policy_compile_model
+            if self.state.policy_gradient_checkpointing is not None:
+                policy_payload["gradient_checkpointing"] = self.state.policy_gradient_checkpointing
+            if self.state.policy_dtype is not None:
+                policy_payload["dtype"] = self.state.policy_dtype
+            if self.state.policy_use_amp is not None:
+                policy_payload["use_amp"] = self.state.policy_use_amp
+            if policy_payload:
+                payload["policy"] = policy_payload
 
             result = self.api.create_continue_training_job(payload)
 
