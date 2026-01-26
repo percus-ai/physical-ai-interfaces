@@ -1297,7 +1297,7 @@ class PhiClient:
         Args:
             data: Job creation request dict:
                 {
-                    "name": "job_name",
+                    "job_name": "job_name",
                     "dataset": {"id": "...", "source": "r2"},
                     "policy": {"type": "act", "pretrained_path": null},
                     "training": {"steps": 100000, "batch_size": 32},

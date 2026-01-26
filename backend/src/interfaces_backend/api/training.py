@@ -592,9 +592,6 @@ def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
     record = records[0]
     if not include_deleted and record.get("deleted_at"):
         return None
-    metadata = record.get("job_metadata") or {}
-    if isinstance(metadata, dict):
-        record.update(metadata)
     return record
 
 
@@ -605,6 +602,7 @@ def _save_job(job_data: dict) -> None:
 
     fixed_fields = {
         "job_id",
+        "job_name",
         "project_id",
         "model_id",
         "policy_type",
@@ -615,13 +613,11 @@ def _save_job(job_data: dict) -> None:
         "cleanup_status",
         "deleted_at",
         "training_config",
-        "compute_profile",
         "author",
         "base_checkpoint",
         "notes",
         "instance_id",
         "ip",
-        "config_name",
         "mode",
         "ssh_user",
         "ssh_private_key",
@@ -633,12 +629,11 @@ def _save_job(job_data: dict) -> None:
         "completed_at",
         "created_at",
         "updated_at",
-        "job_metadata",
+        "started_at",
+        "summary",
+        "early_stopping",
     }
     record = {k: job_data.get(k) for k in fixed_fields if k in job_data}
-    metadata = {k: v for k, v in job_data.items() if k not in fixed_fields}
-    if metadata:
-        record["job_metadata"] = metadata
 
     upsert_with_owner(DB_TABLE, "job_id", record)
 
@@ -722,9 +717,6 @@ def _list_jobs(days: int = 7) -> list[dict]:
     cutoff_date = datetime.now() - timedelta(days=days)
     filtered = []
     for job in jobs:
-        metadata = job.get("job_metadata") or {}
-        if isinstance(metadata, dict):
-            job.update(metadata)
         status = job.get("status")
         if status in ("running", "starting"):
             filtered.append(job)
@@ -831,33 +823,49 @@ def _get_remote_logs(job_data: dict, lines: int = 100) -> Optional[str]:
         conn.disconnect()
 
 
-def _get_remote_progress(job_data: dict) -> Optional[dict]:
-    """Get training progress via SSH."""
-    conn = _get_ssh_connection_for_job(job_data)
-    if not conn:
+def _get_remote_progress(job_id: str) -> Optional[dict]:
+    """Get training progress from Supabase metrics."""
+    client = get_supabase_client()
+    response = (
+        client.table("training_job_metrics")
+        .select("step,loss,metrics")
+        .eq("job_id", job_id)
+        .eq("split", "train")
+        .order("step", desc=True)
+        .limit(1)
+        .execute()
+    )
+    data = response.data or []
+    if not data:
         return None
+    latest = data[0]
+    step = latest.get("step")
+    loss = latest.get("loss")
+    return {
+        "step": str(step) if step is not None else "N/A",
+        "loss": str(loss) if loss is not None else "N/A",
+    }
 
-    try:
-        log_file = _get_log_file_path(job_data)
 
-        # Get step info
-        cmd = f"grep -oE 'step:[0-9]+|Step [0-9]+|optimization_step=[0-9]+' {log_file} 2>/dev/null | tail -1 || true"
-        exit_code, stdout, stderr = conn.exec_command(cmd)
-        step_line = stdout.strip()
-
-        # Get loss info
-        cmd = f"grep -oE 'loss[^=]*=[0-9.]+|Loss: [0-9.]+' {log_file} 2>/dev/null | tail -1 || true"
-        exit_code, stdout, stderr = conn.exec_command(cmd)
-        loss_line = stdout.strip()
-
-        return {
-            "step": step_line or "N/A",
-            "loss": loss_line or "N/A",
-        }
-    except Exception:
+def _get_latest_metric(job_id: str, split: str) -> Optional[dict]:
+    client = get_supabase_client()
+    response = (
+        client.table("training_job_metrics")
+        .select("step,loss,ts,metrics")
+        .eq("job_id", job_id)
+        .eq("split", split)
+        .order("step", desc=True)
+        .limit(1)
+        .execute()
+    )
+    data = response.data or []
+    if not data:
         return None
-    finally:
-        conn.disconnect()
+    return data[0]
+
+
+def _get_latest_metrics(job_id: str) -> tuple[Optional[dict], Optional[dict]]:
+    return _get_latest_metric(job_id, "train"), _get_latest_metric(job_id, "val")
 
 
 def _stop_remote_job(job_data: dict) -> bool:
@@ -1527,13 +1535,25 @@ async def get_job(job_id: str):
     job = JobInfo(**job_data)
     remote_status = None
     progress = None
+    latest_train_metrics, latest_val_metrics = _get_latest_metrics(job_id)
+    summary = job_data.get("summary")
+    early_stopping = job_data.get("early_stopping")
+    training_config = job_data.get("training_config")
 
-    # Check remote status if job is running
+    # Progress is derived from Supabase metrics
     if job.status in ("running", "starting"):
-        remote_status = _check_remote_status(job_data)
-        progress = _get_remote_progress(job_data)
+        progress = _get_remote_progress(job_id)
 
-    return JobDetailResponse(job=job, remote_status=remote_status, progress=progress)
+    return JobDetailResponse(
+        job=job,
+        remote_status=remote_status,
+        progress=progress,
+        latest_train_metrics=latest_train_metrics,
+        latest_val_metrics=latest_val_metrics,
+        summary=summary,
+        early_stopping=early_stopping,
+        training_config=training_config,
+    )
 
 
 @router.get("/jobs/{job_id}/logs", response_model=JobLogsResponse)
@@ -1559,7 +1579,7 @@ async def get_job_progress(job_id: str):
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
-    progress = _get_remote_progress(job_data)
+    progress = _get_remote_progress(job_id)
     if progress is None:
         return JobProgressResponse(job_id=job_id)
 
@@ -1870,7 +1890,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
 
     Can be called with either:
     - config_id: Load settings from saved config file
-    - Direct fields: Provide name, dataset, policy, etc. directly
+    - Direct fields: Provide job_name, dataset, policy, etc. directly
     """
     # If config_id is provided, load config and populate request fields
     if request.config_id:
@@ -1898,7 +1918,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
         wandb_cfg = config_data.get("wandb", {})
 
         # Use config_id as job name if not provided
-        job_id = request.name or request.config_id
+        job_name = request.job_name or request.config_id
 
         # Build dataset config
         request.dataset = DatasetConfig(
@@ -1937,10 +1957,10 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
         request.wandb_enable = wandb_cfg.get("enable", True)
     else:
         # Validate required fields when not using config_id
-        if not request.name:
+        if not request.job_name:
             raise HTTPException(
                 status_code=422,
-                detail="Either config_id or name must be provided",
+                detail="Either config_id or job_name must be provided",
             )
         if not request.dataset:
             raise HTTPException(
@@ -1952,7 +1972,9 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
                 status_code=422,
                 detail="Either config_id or policy must be provided",
             )
-        job_id = request.name
+        job_name = request.job_name
+
+    job_id = str(uuid.uuid4())
 
     # Check if Verda credentials are available
     client = _get_verda_client()
@@ -1964,13 +1986,6 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
         )
 
     now = datetime.now().isoformat()
-
-    # Check for duplicate job_id
-    if _load_job(job_id):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Job with ID '{job_id}' already exists",
-        )
 
     try:
         # Select instance type
@@ -2008,16 +2023,16 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             location=location,
             is_spot=request.cloud.is_spot,
             storage_size=request.cloud.storage_size,
-            hostname=f"train-{job_id[:16].replace('_', '-')}",
+            hostname=f"train-{job_id[:16]}",
         )
 
         # Save job info (status: starting)
         job_data = {
             "job_id": job_id,
+            "job_name": job_name,
             "instance_id": instance_id,
             "ip": None,
             "status": "starting",
-            "config_name": job_id,
             "mode": "train",
             "project_id": _resolve_project_id(request.dataset.id if request.dataset else None),
             "ssh_user": "root",
@@ -2031,7 +2046,6 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             "policy_type": request.policy.type if request.policy else None,
             "dataset_id": request.dataset.id if request.dataset else None,
             "training_config": _build_pipeline_config(request, job_id),
-            "compute_profile": request.cloud.model_dump(),
         }
         _save_job(job_data)
 
@@ -2225,8 +2239,8 @@ def _create_job_with_progress(
     try:
         emit_progress({"type": "validating", "message": "設定を検証中..."})
 
-        name = request_data.get("name")
-        if not name:
+        job_name = request_data.get("job_name")
+        if not job_name:
             emit_progress({"type": "error", "error": "ジョブ名が指定されていません"})
             return {"success": False, "error": "ジョブ名が指定されていません"}
 
@@ -2260,12 +2274,7 @@ def _create_job_with_progress(
             is_spot=cloud_data.get("is_spot", True),
         )
 
-        job_id = name
-
-        # Check for duplicate
-        if _load_job(job_id):
-            emit_progress({"type": "error", "error": f"ジョブ '{job_id}' は既に存在します"})
-            return {"success": False, "error": f"ジョブ '{job_id}' は既に存在します"}
+        job_id = str(uuid.uuid4())
 
         emit_progress({"type": "validated", "message": "設定OK"})
 
@@ -2330,7 +2339,7 @@ def _create_job_with_progress(
             location=location,
             is_spot=cloud.is_spot,
             storage_size=cloud.storage_size,
-            hostname=f"train-{job_id[:16].replace('_', '-')}",
+            hostname=f"train-{job_id[:16]}",
         )
         emit_progress({
             "type": "instance_created",
@@ -2339,7 +2348,7 @@ def _create_job_with_progress(
         })
 
         request_model = JobCreateRequest(
-            name=job_id,
+            job_name=job_name,
             dataset=dataset,
             policy=policy,
             training=training,
@@ -2353,10 +2362,10 @@ def _create_job_with_progress(
         now = datetime.now().isoformat()
         job_data = {
             "job_id": job_id,
+            "job_name": job_name,
             "instance_id": instance_id,
             "ip": None,
             "status": "starting",
-            "config_name": job_id,
             "mode": "train",
             "project_id": _resolve_project_id(dataset.id),
             "ssh_user": "root",
@@ -2370,7 +2379,6 @@ def _create_job_with_progress(
             "policy_type": policy.type,
             "dataset_id": dataset.id,
             "training_config": training_config,
-            "compute_profile": cloud.model_dump(),
         }
         _save_job(job_data)
 
@@ -2604,7 +2612,7 @@ async def websocket_create_job(websocket: WebSocket):
 
     Client sends JSON request (same format as POST /api/training/jobs but dict):
     {
-        "name": "job_name",
+        "job_name": "job_name",
         "dataset": {"id": "...", "source": "r2"},
         "policy": {"type": "act", "pretrained_path": null},
         "training": {"steps": 100000, "batch_size": 32},
@@ -3220,11 +3228,8 @@ async def create_continue_job(
         # 3. Generate job name
         date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         author = request.author or _default_author_user_id()
-        job_id = f"{checkpoint_config.job_name}_continue_{author}_{date_str}"
-
-        # Check for duplicates
-        if _load_job(job_id):
-            job_id = f"{job_id}_{datetime.now().strftime('%H%M%S')}"
+        job_name = f"{checkpoint_config.job_name}_continue_{author}_{date_str}"
+        job_id = str(uuid.uuid4())
 
         # 4. Prepare training config
         dataset_id = (
@@ -3281,16 +3286,16 @@ async def create_continue_job(
             location=location,
             is_spot=request.cloud.is_spot,
             storage_size=request.cloud.storage_size,
-            hostname=f"train-{job_id[:16].replace('_', '-')}",
+            hostname=f"train-{job_id[:16]}",
         )
 
         # Save job info (status: starting)
         job_data = {
             "job_id": job_id,
+            "job_name": job_name,
             "instance_id": instance_id,
             "ip": None,
             "status": "starting",
-            "config_name": job_id,
             "mode": "resume_local",
             "project_id": _resolve_project_id(dataset_id),
             "continue_from": {
@@ -3317,7 +3322,6 @@ async def create_continue_job(
                     "step": step,
                 },
             },
-            "compute_profile": request.cloud.model_dump(),
         }
         _save_job(job_data)
 
@@ -3967,14 +3971,15 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
         "type": "job_info",
         "data": {
             "job_id": job_data.get("job_id"),
+            "job_name": job_data.get("job_name"),
             "status": job_data.get("status"),
-            "config_name": job_data.get("config_name"),
             "mode": job_data.get("mode"),
             "gpu_model": job_data.get("gpu_model"),
             "gpus_per_instance": job_data.get("gpus_per_instance"),
             "ip": job_data.get("ip"),
             "instance_id": job_data.get("instance_id"),
             "created_at": job_data.get("created_at"),
+            "started_at": job_data.get("started_at"),
             "failure_reason": job_data.get("failure_reason"),
             "termination_reason": job_data.get("termination_reason"),
             "cleanup_status": job_data.get("cleanup_status"),
@@ -3995,7 +4000,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
                 "error": "Job has no IP address (instance may not be ready)"
             })
             # Continue without SSH - user can still see local info
-            await _run_session_loop_no_ssh(websocket, status_queue)
+            await _run_session_loop_no_ssh(websocket, status_queue, job_id)
             return
 
         # Start SSH connection
@@ -4010,14 +4015,14 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
 
         if not ssh_conn:
             await websocket.send_json({"type": "ssh_error", "error": "SSH接続に失敗しました"})
-            await _run_session_loop_no_ssh(websocket, status_queue)
+            await _run_session_loop_no_ssh(websocket, status_queue, job_id)
             return
 
         await websocket.send_json({"type": "ssh_connected"})
 
         # Get initial remote status and progress (pass raw paramiko client to helper functions)
         await _send_remote_status(websocket, ssh_conn.client)
-        await _send_progress(websocket, ssh_conn.client, job_data)
+        await _send_progress(websocket, job_id)
 
         # Determine log file path for later use
         log_file = _get_log_file_path(job_data)
@@ -4061,7 +4066,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
                 elif action == "refresh":
                     # Refresh status and progress
                     await _send_remote_status(websocket, ssh_conn.client)
-                    await _send_progress(websocket, ssh_conn.client, job_data)
+                    await _send_progress(websocket, job_id)
 
             except asyncio.TimeoutError:
                 pass  # No message received, continue
@@ -4093,7 +4098,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
 
             # Update progress every 10 seconds (if not streaming logs)
             if not is_streaming_logs and now - last_progress_update > 10:
-                await _send_progress(websocket, ssh_conn.client, job_data)
+                await _send_progress(websocket, job_id)
                 last_progress_update = now
 
             status = _drain_latest_status(status_queue) if status_queue else None
@@ -4132,9 +4137,11 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
 async def _run_session_loop_no_ssh(
     websocket: WebSocket,
     status_queue: "asyncio.Queue",
+    job_id: str,
 ) -> None:
     """Run session loop without SSH connection (local data only)."""
     last_heartbeat = asyncio.get_event_loop().time()
+    last_progress_update = asyncio.get_event_loop().time()
 
     try:
         while True:
@@ -4161,6 +4168,10 @@ async def _run_session_loop_no_ssh(
             if now - last_heartbeat > 5:
                 await websocket.send_json({"type": "heartbeat"})
                 last_heartbeat = now
+
+            if now - last_progress_update > 10:
+                await _send_progress(websocket, job_id)
+                last_progress_update = now
 
             status = _drain_latest_status(status_queue) if status_queue else None
             if status and status not in RUNNING_STATUSES_WITH_PENDING:
@@ -4195,31 +4206,23 @@ async def _send_remote_status(websocket: WebSocket, ssh_client) -> None:
         await websocket.send_json({"type": "remote_status", "status": "error"})
 
 
-async def _send_progress(websocket: WebSocket, ssh_client, job_data: dict) -> None:
-    """Send training progress via existing SSH connection."""
+async def _send_progress(websocket: WebSocket, job_id: str) -> None:
+    """Send training progress from Supabase metrics."""
     try:
-        log_file = _get_log_file_path(job_data)
-
         loop = asyncio.get_event_loop()
-
-        # Get step info
-        step_cmd = f"grep -oE 'step:[0-9]+|Step [0-9]+|optimization_step=[0-9]+' {log_file} 2>/dev/null | tail -1 || true"
-        step_line = await loop.run_in_executor(
+        latest_train, latest_val = await loop.run_in_executor(
             _executor,
-            lambda: _exec_ssh_command(ssh_client, step_cmd)
+            lambda: _get_latest_metrics(job_id),
         )
-
-        # Get loss info
-        loss_cmd = f"grep -oE 'loss[^=]*=[0-9.]+|Loss: [0-9.]+' {log_file} 2>/dev/null | tail -1 || true"
-        loss_line = await loop.run_in_executor(
-            _executor,
-            lambda: _exec_ssh_command(ssh_client, loss_cmd)
-        )
-
+        latest = latest_train or latest_val
+        step = latest.get("step") if latest else None
+        loss = latest.get("loss") if latest else None
         await websocket.send_json({
             "type": "progress",
-            "step": step_line.strip() if step_line else "N/A",
-            "loss": loss_line.strip() if loss_line else "N/A"
+            "step": str(step) if step is not None else "N/A",
+            "loss": str(loss) if loss is not None else "N/A",
+            "train": latest_train,
+            "val": latest_val,
         })
     except Exception as e:
         logger.debug(f"Failed to get progress: {e}")

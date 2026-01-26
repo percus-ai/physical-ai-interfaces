@@ -39,13 +39,15 @@ class JobInfo(BaseModel):
     """Training job information."""
 
     job_id: str
+    job_name: str
     instance_id: str
     ip: Optional[str] = None
     status: JobStatus
+    dataset_id: Optional[str] = None
+    policy_type: Optional[str] = None
     failure_reason: Optional[str] = None
     termination_reason: Optional[str] = None
     cleanup_status: Optional[CleanupStatus] = None
-    config_name: str
     mode: TrainingMode
 
     # SSH connection info
@@ -59,6 +61,7 @@ class JobInfo(BaseModel):
     # Timestamps
     created_at: datetime
     updated_at: datetime
+    started_at: Optional[datetime] = None
 
     # GPU info
     gpu_model: Optional[str] = None
@@ -85,6 +88,11 @@ class JobDetailResponse(BaseModel):
     job: JobInfo
     remote_status: Optional[str] = None
     progress: Optional[dict] = None
+    latest_train_metrics: Optional[dict] = None
+    latest_val_metrics: Optional[dict] = None
+    summary: Optional[dict] = None
+    early_stopping: Optional[dict] = None
+    training_config: Optional[dict] = None
 
 
 class JobLogsResponse(BaseModel):
@@ -174,7 +182,7 @@ class JobCreateRequest(BaseModel):
     """
 
     config_id: Optional[str] = Field(None, description="Config ID to load settings from")
-    name: Optional[str] = Field(None, description="Job name/ID (required if no config_id)")
+    job_name: Optional[str] = Field(None, description="Job display name (required if no config_id)")
     dataset: Optional[DatasetConfig] = Field(None, description="Dataset config (required if no config_id)")
     policy: Optional[PolicyConfig] = Field(None, description="Policy config (required if no config_id)")
     training: TrainingParams = Field(default_factory=TrainingParams)

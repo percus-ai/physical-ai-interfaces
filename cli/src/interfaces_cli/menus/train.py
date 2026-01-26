@@ -8,7 +8,7 @@ This module implements the training CLI with:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from InquirerPy import inquirer
@@ -1222,7 +1222,7 @@ class TrainingWizard(BaseMenu):
         policy_info = POLICY_TYPES.get(self.state.policy_type, PolicyTypeInfo(display_name=""))
 
         payload = {
-            "name": self.state.job_name,
+            "job_name": self.state.job_name,
             "dataset": {
                 "id": self.state.dataset_id,
                 "source": "r2",
@@ -2130,16 +2130,22 @@ class TrainingJobsMenu(BaseMenu):
             jobs = result.get("jobs", [])
             for job in jobs[:15]:
                 job_id = job.get("job_id", "unknown")
+                job_name = job.get("job_name") or job_id
                 status = job.get("status", "unknown")
-                config_name = job.get("config_name", "")
-                mode = job.get("mode", "train")
                 gpu_model = job.get("gpu_model", "")
+                gpu_count = job.get("gpus_per_instance") or job.get("gpu_count") or 1
                 status_icon = self._status_icon(status)
 
                 # Build display string
-                mode_icon = "🔄" if mode == "resume_hub" else ""
-                gpu_info = f"[{gpu_model}]" if gpu_model else ""
-                display = f"{status_icon} {job_id[:20]}... {mode_icon}{gpu_info} ({status})"
+                running_time = self._running_time(job)
+                gpu_info = f"{gpu_model}x{gpu_count}" if gpu_model else ""
+                name_display = job_name[:28] + "..." if len(job_name) > 31 else job_name
+                display_parts = [status_icon, name_display]
+                if gpu_info:
+                    display_parts.append(f"[{gpu_info}]")
+                display_parts.append(running_time)
+                display_parts.append(f"({status})")
+                display = " ".join(display_parts)
 
                 choices.append(Choice(value=job_id, name=display))
         except Exception:
@@ -2165,6 +2171,49 @@ class TrainingJobsMenu(BaseMenu):
             "terminated": "◌",
         }
         return icons.get(status, "?")
+
+    def _parse_timestamp(self, value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+
+    def _format_duration(self, seconds: float) -> str:
+        total = int(max(0, seconds))
+        if total < 60:
+            return f"{total}s"
+        minutes = total // 60
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        minutes = minutes % 60
+        if hours < 24:
+            return f"{hours}h{minutes:02d}m"
+        days = hours // 24
+        hours = hours % 24
+        return f"{days}d{hours:02d}h"
+
+    def _running_time(self, job: dict) -> str:
+        status = job.get("status")
+        started_at = self._parse_timestamp(job.get("started_at"))
+        created_at = self._parse_timestamp(job.get("created_at"))
+        completed_at = self._parse_timestamp(job.get("completed_at"))
+        start = started_at or created_at
+        if not start:
+            return "N/A"
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if status in ("completed", "failed", "stopped", "terminated") and completed_at:
+            end = completed_at
+        else:
+            end = now
+        if end < start:
+            end = start
+        return self._format_duration((end - start).total_seconds())
 
     def handle_choice(self, choice: Any) -> MenuResult:
         if choice == "__none__":
@@ -2201,102 +2250,112 @@ class TrainingJobsMenu(BaseMenu):
         return MenuResult.CONTINUE
 
     def _show_job_detail(self, job_id: str) -> MenuResult:
-        """Show job details and actions using unified WebSocket session."""
+        """Show job details and actions."""
         show_section_header("学習ジョブ詳細")
 
-        # Create WebSocket session for unified SSH connection
-        session = self.api.create_job_session_ws(job_id)
-
-        if not session.connect():
-            print(f"{Colors.error('エラー:')} WebSocket接続に失敗しました")
-            input(f"\n{Colors.muted('Press Enter to continue...')}")
-            return MenuResult.CONTINUE
-
         try:
-            # State tracking
-            job_info = {}
-            remote_status = None
-            progress_info = {}
-            ssh_connected = False
-            ssh_error = None
-            job_info_displayed = False
+            result = self.api.get_training_job(job_id)
+            job_info = result.get("job", {})
+            training_config = result.get("training_config") or {}
+            summary = result.get("summary") or {}
+            early_stopping = result.get("early_stopping") or {}
+            latest_train = result.get("latest_train_metrics")
+            latest_val = result.get("latest_val_metrics")
 
-            # Receive initial messages with progressive display
-            print(f"  {Colors.muted('読み込み中...')}", end="\r")
+            print(f"  ID: {job_info.get('job_id', 'N/A')}")
+            print(f"  ジョブ名: {job_info.get('job_name', 'N/A')}")
+            print(f"  ステータス: {job_info.get('status', 'N/A')}")
+            print(f"  モード: {job_info.get('mode', 'train')}")
+            if job_info.get("gpu_model"):
+                gpu_count = job_info.get("gpus_per_instance") or job_info.get("gpu_count", 1)
+                print(f"  GPU: {job_info.get('gpu_model')} x {gpu_count}")
+            if job_info.get("ip"):
+                print(f"  IP: {job_info.get('ip')}")
+            if job_info.get("dataset_id"):
+                print(f"  データセット: {job_info.get('dataset_id')}")
+            if job_info.get("policy_type"):
+                print(f"  ポリシー: {job_info.get('policy_type')}")
+            print(f"  作成: {job_info.get('created_at', 'N/A')}")
+            if job_info.get("started_at"):
+                print(f"  開始: {job_info.get('started_at')}")
+            running_time = self._running_time(job_info)
+            if running_time != "N/A":
+                print(f"  経過: {running_time}")
+            if job_info.get("failure_reason"):
+                print(f"  失敗理由: {job_info.get('failure_reason')}")
+            if job_info.get("termination_reason"):
+                print(f"  終了理由: {job_info.get('termination_reason')}")
+            if job_info.get("cleanup_status"):
+                print(f"  後処理: {job_info.get('cleanup_status')}")
+            if job_info.get("deleted_at"):
+                print(f"  削除日時: {job_info.get('deleted_at')}")
 
-            while True:
-                msg = session.receive(timeout=0.5)
-                if msg is None:
-                    continue
+            dataset_cfg = training_config.get("dataset") or {}
+            policy_cfg = training_config.get("policy") or {}
+            training_cfg = training_config.get("training") or {}
+            validation_cfg = training_config.get("validation") or {}
+            early_cfg = training_config.get("early_stopping") or {}
 
-                msg_type = msg.get("type", "")
+            if training_config:
+                print(f"\n{Colors.CYAN}設定:{Colors.RESET}")
+                if dataset_cfg.get("id"):
+                    print(f"  dataset.id: {dataset_cfg.get('id')}")
+                if policy_cfg.get("type"):
+                    print(f"  policy.type: {policy_cfg.get('type')}")
+                if policy_cfg.get("pretrained_path"):
+                    print(f"  policy.pretrained_path: {policy_cfg.get('pretrained_path')}")
+                if training_cfg.get("steps") is not None:
+                    print(f"  training.steps: {training_cfg.get('steps')}")
+                if training_cfg.get("batch_size") is not None:
+                    print(f"  training.batch_size: {training_cfg.get('batch_size')}")
+                if training_cfg.get("save_freq") is not None:
+                    print(f"  training.save_freq: {training_cfg.get('save_freq')}")
+                if validation_cfg.get("enable") is not None:
+                    print(f"  validation.enable: {validation_cfg.get('enable')}")
+                if validation_cfg.get("eval_freq") is not None:
+                    print(f"  validation.eval_freq: {validation_cfg.get('eval_freq')}")
+                if early_cfg.get("enable") is not None:
+                    print(f"  early_stopping.enable: {early_cfg.get('enable')}")
+                if early_cfg.get("patience") is not None:
+                    print(f"  early_stopping.patience: {early_cfg.get('patience')}")
+                if early_cfg.get("min_delta") is not None:
+                    print(f"  early_stopping.min_delta: {early_cfg.get('min_delta')}")
+                if early_cfg.get("mode"):
+                    print(f"  early_stopping.mode: {early_cfg.get('mode')}")
 
-                if msg_type == "job_info":
-                    job_info = msg.get("data", {})
-                    # Display job info immediately (progressive loading)
-                    print(f"  ID: {job_info.get('job_id', 'N/A')}                    ")
-                    print(f"  ステータス: {job_info.get('status', 'N/A')}")
-                    print(f"  設定名: {job_info.get('config_name', 'N/A')}")
-                    print(f"  モード: {job_info.get('mode', 'train')}")
-                    if job_info.get('gpu_model'):
-                        gpu_count = job_info.get('gpus_per_instance') or job_info.get('gpu_count', 1)
-                        print(f"  GPU: {job_info.get('gpu_model')} x {gpu_count}")
-                    if job_info.get('ip'):
-                        print(f"  IP: {job_info.get('ip')}")
-                    print(f"  作成: {job_info.get('created_at', 'N/A')}")
-                    if job_info.get('failure_reason'):
-                        print(f"  失敗理由: {job_info.get('failure_reason')}")
-                    if job_info.get('termination_reason'):
-                        print(f"  終了理由: {job_info.get('termination_reason')}")
-                    if job_info.get('cleanup_status'):
-                        print(f"  後処理: {job_info.get('cleanup_status')}")
-                    if job_info.get('deleted_at'):
-                        print(f"  削除日時: {job_info.get('deleted_at')}")
-                    job_info_displayed = True
-                    # Show loading indicator for remote info
-                    print(f"  {Colors.muted('リモート情報取得中...')}", end="\r")
+            if summary:
+                print(f"\n{Colors.CYAN}Summary:{Colors.RESET}")
+                for key in (
+                    "total_steps",
+                    "total_time_s",
+                    "early_stopping_point_step",
+                    "early_stopping_point_val_loss",
+                    "val_loss",
+                    "stopped_step",
+                ):
+                    if key in summary:
+                        print(f"  {key}: {summary.get(key)}")
 
-                elif msg_type == "ssh_connecting":
-                    if job_info_displayed:
-                        print(f"  {Colors.muted('SSH接続中...')}          ", end="\r")
+            if early_stopping:
+                print(f"\n{Colors.CYAN}Early Stopping:{Colors.RESET}")
+                for key, value in early_stopping.items():
+                    print(f"  {key}: {value}")
 
-                elif msg_type == "ssh_connected":
-                    ssh_connected = True
-                    if job_info_displayed:
-                        print(f"  {Colors.muted('情報取得中...')}          ", end="\r")
+            print(f"\n{Colors.CYAN}最新loss:{Colors.RESET}")
+            if latest_train:
+                print(
+                    f"  train: step={latest_train.get('step')} loss={latest_train.get('loss')} ts={latest_train.get('ts')}"
+                )
+            else:
+                print("  train: N/A")
+            if latest_val:
+                print(
+                    f"  val: step={latest_val.get('step')} loss={latest_val.get('loss')} ts={latest_val.get('ts')}"
+                )
+            else:
+                print("  val: N/A")
 
-                elif msg_type == "ssh_error":
-                    ssh_error = msg.get("error", "Unknown error")
-                    if job_info_displayed:
-                        print(f"  {Colors.muted(f'リモート情報: 取得不可')}          ")
-                    break
-
-                elif msg_type == "remote_status":
-                    remote_status = msg.get("status")
-
-                elif msg_type == "progress":
-                    progress_info = {"step": msg.get("step", "N/A"), "loss": msg.get("loss", "N/A")}
-                    # Display remote info (overwrite loading line)
-                    if remote_status:
-                        status_icon = "✓" if remote_status == "running" else "✗"
-                        print(f"  プロセス: {status_icon} {remote_status}          ")
-                    step = progress_info.get('step', 'N/A')
-                    loss = progress_info.get('loss', 'N/A')
-                    print(f"  進捗: Step {step}, Loss: {loss}")
-                    break  # Got all initial info
-
-                elif msg_type == "heartbeat":
-                    continue
-
-                elif msg_type == "error":
-                    print(f"\n{Colors.error('エラー:')} {msg.get('error', 'Unknown error')}")
-                    session.close()
-                    input(f"\n{Colors.muted('Press Enter to continue...')}")
-                    return MenuResult.CONTINUE
-
-            status = job_info.get('status', '')
-
-            # Build action choices
+            status = job_info.get("status", "")
             action_choices = []
 
             if status == "running":
@@ -2318,29 +2377,19 @@ class TrainingJobsMenu(BaseMenu):
             ).execute()
 
             if action == "logs":
-                session.close()
                 self._show_job_logs(job_id)
             elif action == "stream_logs":
-                # Use the same session for log streaming
-                self._stream_job_logs_with_session(session)
-                session.close()
+                self._stream_job_logs(job_id)
             elif action == "stop":
-                session.close()
                 self._stop_job(job_id)
             elif action == "delete":
-                session.close()
                 self._delete_job(job_id)
             elif action == "refresh":
-                session.close()
-                return self._show_job_detail(job_id)  # Recursive refresh
-            else:
-                session.close()
+                return self._show_job_detail(job_id)
 
         except KeyboardInterrupt:
-            session.close()
             print(f"\n{Colors.muted('中断されました')}")
         except Exception as e:
-            session.close()
             print(f"{Colors.error('エラー:')} {e}")
             input(f"\n{Colors.muted('Press Enter to continue...')}")
 
