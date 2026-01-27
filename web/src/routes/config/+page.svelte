@@ -57,8 +57,8 @@
       <input class="input mt-2" bind:value={backendUrl} />
     </div>
     <div class="mt-6 flex flex-wrap gap-3">
-      <Button.Root class="btn-primary" on:click={save}>保存</Button.Root>
-      <Button.Root class="btn-ghost" on:click={reset}>デフォルトに戻す</Button.Root>
+      <button class="btn-primary" type="button" on:click={save}>保存</button>
+      <button class="btn-ghost" type="button" on:click={reset}>デフォルトに戻す</button>
       {#if saved}
         <span class="chip">更新しました</span>
       {/if}

@@ -66,6 +66,11 @@ def _delete_local_model(model_id: str) -> None:
         shutil.rmtree(model_path)
 
 
+def _detach_models_from_dataset(dataset_id: str) -> None:
+    client = get_supabase_client()
+    client.table("models").update({"dataset_id": None}).eq("dataset_id", dataset_id).execute()
+
+
 def _dataset_row_to_info(row: dict) -> DatasetInfo:
     return DatasetInfo(
         id=row.get("id"),
@@ -499,6 +504,7 @@ async def delete_archived_dataset(dataset_id: str):
     if existing[0].get("status") != "archived":
         raise HTTPException(status_code=400, detail="Dataset is not archived")
 
+    _detach_models_from_dataset(dataset_id)
     sync_service = R2DBSyncService()
     sync_service.delete_dataset_remote(dataset_id)
     _delete_local_dataset(dataset_id)
@@ -571,6 +577,7 @@ async def delete_archived_items(request: ArchiveBulkRequest):
         if existing[0].get("status") != "archived":
             errors.append(f"Dataset is not archived: {dataset_id}")
             continue
+        _detach_models_from_dataset(dataset_id)
         sync_service.delete_dataset_remote(dataset_id)
         _delete_local_dataset(dataset_id)
         client.table("datasets").delete().eq("id", dataset_id).execute()

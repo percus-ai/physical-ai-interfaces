@@ -10,6 +10,7 @@ from interfaces_backend.models.auth import (
     AuthLoginRequest,
     AuthLoginResponse,
     AuthStatusResponse,
+    AuthTokenResponse,
 )
 from interfaces_backend.core.request_auth import (
     ACCESS_COOKIE_NAME,
@@ -121,6 +122,22 @@ def status(http_request: Request) -> AuthStatusResponse:
         return AuthStatusResponse(authenticated=False, user_id=None, expires_at=None)
     return AuthStatusResponse(
         authenticated=True,
+        user_id=session.get("user_id"),
+        expires_at=session.get("expires_at"),
+    )
+
+
+@router.get("/token", response_model=AuthTokenResponse)
+def token(http_request: Request) -> AuthTokenResponse:
+    session = build_session_from_request(http_request)
+    if not session or _is_session_expired(session):
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    access_token = session.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    return AuthTokenResponse(
+        access_token=access_token,
+        refresh_token=session.get("refresh_token"),
         user_id=session.get("user_id"),
         expires_at=session.get("expires_at"),
     )

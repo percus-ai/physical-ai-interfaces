@@ -1385,12 +1385,18 @@ class PhiClient:
         result: Dict[str, Any] = {"type": "error", "error": "Unknown error"}
 
         try:
+            headers = []
+            token = self._session.get("access_token") if self._session else None
+            if token:
+                headers.append(f"Authorization: Bearer {token}")
+
             # Create WebSocket with keepalive settings for long-running operations
             ws = websocket.create_connection(
                 ws_url,
                 timeout=None,  # No recv timeout (job creation can take 20+ minutes)
                 skip_utf8_validation=True,
                 enable_multithread=True,
+                header=headers or None,
             )
             # Set socket keepalive to detect dead connections
             sock = ws.sock

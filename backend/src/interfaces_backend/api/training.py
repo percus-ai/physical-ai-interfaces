@@ -17,6 +17,11 @@ from verda import VerdaClient
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 
+from interfaces_backend.core.request_auth import (
+    ACCESS_COOKIE_NAME,
+    REFRESH_COOKIE_NAME,
+    build_session_from_tokens,
+)
 from interfaces_backend.models.training import (
     JobInfo,
     JobListResponse,
@@ -58,6 +63,9 @@ from percus_ai.db import (
     get_current_user_id,
     get_supabase_async_client,
     get_supabase_client,
+    get_supabase_session,
+    reset_request_session,
+    set_request_session,
     upsert_with_owner,
 )
 from percus_ai.training.ssh.client import SSHConnection
@@ -394,6 +402,8 @@ def _generate_env_file(
     instance_id: str,
     policy_type: Optional[str],
     auto_delete: bool = True,
+    supabase_access_token: Optional[str] = None,
+    supabase_user_id: Optional[str] = None,
 ) -> str:
     """Generate .env file content with required credentials."""
     lines = []
@@ -497,6 +507,10 @@ def _generate_env_file(
             lines.append(f"SUPABASE_SERVICE_ROLE_KEY={supabase_key}")
         else:
             lines.append(f"SUPABASE_ANON_KEY={supabase_key}")
+    if supabase_access_token:
+        lines.append(f"SUPABASE_ACCESS_TOKEN={supabase_access_token}")
+    if supabase_user_id:
+        lines.append(f"SUPABASE_USER_ID={supabase_user_id}")
 
     return "\n".join(lines) + "\n"
 
@@ -2554,6 +2568,9 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
     job_name = request.job_name
 
     job_id = str(uuid.uuid4())
+    session = get_supabase_session() or {}
+    supabase_access_token = session.get("access_token")
+    supabase_user_id = session.get("user_id")
 
     # Check if Verda credentials are available
     client = _get_verda_client()
@@ -2659,6 +2676,8 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             _deploy_and_start_training,
             job_id=job_id,
             request=request,
+            supabase_access_token=supabase_access_token,
+            supabase_user_id=supabase_user_id,
         )
 
         return JobCreateResponse(
@@ -2816,6 +2835,7 @@ def _create_instance(
 def _create_job_with_progress(
     request_data: dict,
     emit_progress: Callable[[dict], None],
+    supabase_session: Optional[dict] = None,
 ) -> dict:
     """Create a training job with progress callbacks.
 
@@ -2838,379 +2858,391 @@ def _create_job_with_progress(
         JobCreateRequest,
     )
 
-    emit_progress({"type": "start", "message": "ジョブ作成を開始..."})
-
-    # Parse request data
-    try:
-        emit_progress({"type": "validating", "message": "設定を検証中..."})
-
-        job_name = request_data.get("job_name")
-        if not job_name:
-            emit_progress({"type": "error", "error": "ジョブ名が指定されていません"})
-            return {"success": False, "error": "ジョブ名が指定されていません"}
-
-        dataset_data = request_data.get("dataset", {})
-        policy_data = request_data.get("policy", {})
-        training_data = request_data.get("training", {})
-        cloud_data = request_data.get("cloud", {})
-        checkpoint_repo_id = request_data.get("checkpoint_repo_id")
-        wandb_enable = request_data.get("wandb_enable", True)
-
-        # Build config objects
-        dataset = DatasetConfig(
-            id=dataset_data.get("id", ""),
-            source=dataset_data.get("source", "r2"),
-            hf_repo_id=dataset_data.get("hf_repo_id"),
-            video_backend=dataset_data.get("video_backend"),
-        )
-        policy = PolicyConfig(
-            type=policy_data.get("type", "act"),
-            pretrained_path=policy_data.get("pretrained_path"),
-            compile_model=policy_data.get("compile_model"),
-            gradient_checkpointing=policy_data.get("gradient_checkpointing"),
-            dtype=policy_data.get("dtype"),
-            use_amp=policy_data.get("use_amp"),
-        )
-        training = TrainingParams(
-            steps=training_data.get("steps"),
-            batch_size=training_data.get("batch_size"),
-            save_freq=training_data.get("save_freq"),
-            log_freq=training_data.get("log_freq"),
-            num_workers=training_data.get("num_workers"),
-            save_checkpoint=training_data.get("save_checkpoint"),
-        )
-        validation_data = request_data.get("validation", {})
-        early_stopping_data = request_data.get("early_stopping", {})
-        cloud = CloudConfig(
-            gpu_model=cloud_data.get("gpu_model", "H100"),
-            gpus_per_instance=cloud_data.get("gpus_per_instance", 1),
-            storage_size=cloud_data.get("storage_size"),
-            location=cloud_data.get("location", "auto"),
-            is_spot=cloud_data.get("is_spot", True),
-        )
-
-        job_id = str(uuid.uuid4())
-
-        emit_progress({"type": "validated", "message": "設定OK"})
-
-    except Exception as e:
-        emit_progress({"type": "error", "error": f"設定検証エラー: {e}"})
-        return {"success": False, "error": str(e)}
-
-    # Get Verda client
-    client = _get_verda_client()
-    if not client:
-        emit_progress({"type": "error", "error": "Verda認証情報が設定されていません"})
-        return {"success": False, "error": "Verda認証情報が設定されていません"}
-
-    # Track instance_id for cleanup on failure
-    instance_id: Optional[str] = None
-
-    def cleanup_instance_on_failure(error_msg: str) -> dict:
-        """Clean up instance if creation succeeded but subsequent steps failed."""
-        nonlocal instance_id
-        if instance_id:
-            emit_progress({"type": "cleanup", "message": f"エラー発生のためインスタンスを削除中: {instance_id}"})
-            logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
-            _update_cleanup_status(job_id, "running")
-            cleanup_ok = _delete_verda_instance(instance_id)
-            _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
-        return {"success": False, "error": error_msg}
+    token = set_request_session(supabase_session)
+    supabase_access_token = None
+    supabase_user_id = None
+    if supabase_session:
+        supabase_access_token = supabase_session.get("access_token")
+        supabase_user_id = supabase_session.get("user_id")
 
     try:
-        # Select instance type
-        emit_progress({"type": "selecting_instance", "message": "インスタンスタイプを選択中..."})
-        instance_type = _select_instance_type(client, cloud.gpu_model, cloud.gpus_per_instance)
-        emit_progress({
-            "type": "instance_selected",
-            "message": f"インスタンスタイプ: {instance_type}",
-            "instance_type": instance_type,
-        })
+        emit_progress({"type": "start", "message": "ジョブ作成を開始..."})
 
-        # Get SSH key
-        emit_progress({"type": "getting_ssh_key", "message": "SSHキーを取得中..."})
-        ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
-        ssh_private_key = os.environ.get(
-            "VERDA_SSH_PRIVATE_KEY",
-            str(Path.home() / ".ssh" / "id_rsa"),
-        )
-        if not ssh_key_name:
-            emit_progress({"type": "error", "error": "VERDA_SSH_KEY_NAMEが設定されていません"})
-            return {"success": False, "error": "VERDA_SSH_KEY_NAMEが設定されていません"}
-        ssh_key_id = _get_ssh_key_id(client, ssh_key_name)
+        # Parse request data
+        try:
+            emit_progress({"type": "validating", "message": "設定を検証中..."})
 
-        # Find location
-        emit_progress({"type": "finding_location", "message": "利用可能なロケーションを検索中..."})
-        location = _find_location(client, instance_type, cloud.location, cloud.is_spot)
-        emit_progress({
-            "type": "location_found",
-            "message": f"ロケーション: {location}",
-            "location": location,
-        })
+            job_name = request_data.get("job_name")
+            if not job_name:
+                emit_progress({"type": "error", "error": "ジョブ名が指定されていません"})
+                return {"success": False, "error": "ジョブ名が指定されていません"}
 
-        # Create instance
-        emit_progress({"type": "creating_instance", "message": "インスタンスを作成中..."})
-        instance_id = _create_instance(
-            client,
-            instance_type=instance_type,
-            ssh_key_id=ssh_key_id,
-            location=location,
-            is_spot=cloud.is_spot,
-            storage_size=cloud.storage_size,
-            hostname=f"train-{job_id[:16]}",
-        )
-        emit_progress({
-            "type": "instance_created",
-            "message": f"インスタンス作成完了: {instance_id}",
-            "instance_id": instance_id,
-        })
+            dataset_data = request_data.get("dataset", {})
+            policy_data = request_data.get("policy", {})
+            training_data = request_data.get("training", {})
+            cloud_data = request_data.get("cloud", {})
+            checkpoint_repo_id = request_data.get("checkpoint_repo_id")
+            wandb_enable = request_data.get("wandb_enable", True)
 
-        request_model = JobCreateRequest(
-            job_name=job_name,
-            dataset=dataset,
-            policy=policy,
-            training=training,
-            validation=ValidationConfig(**validation_data) if validation_data else ValidationConfig(),
-            early_stopping=(
-                EarlyStoppingConfig(**early_stopping_data) if early_stopping_data else EarlyStoppingConfig()
-            ),
-            cloud=cloud,
-            checkpoint_repo_id=checkpoint_repo_id,
-            wandb_enable=wandb_enable,
-        )
-        training_config = _build_pipeline_config(request_model, job_id)
+            # Build config objects
+            dataset = DatasetConfig(
+                id=dataset_data.get("id", ""),
+                source=dataset_data.get("source", "r2"),
+                hf_repo_id=dataset_data.get("hf_repo_id"),
+                video_backend=dataset_data.get("video_backend"),
+            )
+            policy = PolicyConfig(
+                type=policy_data.get("type", "act"),
+                pretrained_path=policy_data.get("pretrained_path"),
+                compile_model=policy_data.get("compile_model"),
+                gradient_checkpointing=policy_data.get("gradient_checkpointing"),
+                dtype=policy_data.get("dtype"),
+                use_amp=policy_data.get("use_amp"),
+            )
+            training = TrainingParams(
+                steps=training_data.get("steps"),
+                batch_size=training_data.get("batch_size"),
+                save_freq=training_data.get("save_freq"),
+                log_freq=training_data.get("log_freq"),
+                num_workers=training_data.get("num_workers"),
+                save_checkpoint=training_data.get("save_checkpoint"),
+            )
+            validation_data = request_data.get("validation", {})
+            early_stopping_data = request_data.get("early_stopping", {})
+            cloud = CloudConfig(
+                gpu_model=cloud_data.get("gpu_model", "H100"),
+                gpus_per_instance=cloud_data.get("gpus_per_instance", 1),
+                storage_size=cloud_data.get("storage_size"),
+                location=cloud_data.get("location", "auto"),
+                is_spot=cloud_data.get("is_spot", True),
+            )
 
-        # Save job info
-        now = datetime.now().isoformat()
-        job_data = {
-            "job_id": job_id,
-            "job_name": job_name,
-            "instance_id": instance_id,
-            "ip": None,
-            "status": "starting",
-            "mode": "train",
-            "project_id": _resolve_project_id(dataset.id),
-            "ssh_user": "root",
-            "ssh_private_key": ssh_private_key,
-            "remote_base_dir": "/root/.physical-ai",
-            "checkpoint_repo_id": checkpoint_repo_id,
-            "created_at": now,
-            "updated_at": now,
-            "gpu_model": cloud.gpu_model,
-            "gpus_per_instance": cloud.gpus_per_instance,
-            "policy_type": policy.type,
-            "dataset_id": dataset.id,
-            "training_config": training_config,
-        }
-        _save_job(job_data)
+            job_id = str(uuid.uuid4())
 
-        # Wait for IP (up to 15 minutes)
-        emit_progress({"type": "waiting_ip", "message": "IPアドレス割り当て待機中...", "elapsed": 0, "timeout": 900})
-        ip = None
-        start_time = time.time()
-        deadline = start_time + IP_WAIT_TIMEOUT_SEC
-        while time.time() < deadline:
-            try:
-                instance = client.instances.get_by_id(instance_id)
-                if getattr(instance, "ip", None):
-                    ip = instance.ip
-                    break
-            except Exception:
-                pass
-            elapsed = int(time.time() - start_time)
-            emit_progress({
-                "type": "waiting_ip",
-                "message": f"IPアドレス割り当て待機中... ({elapsed}秒経過)",
-                "elapsed": elapsed,
-                "timeout": 900,
-            })
-            time.sleep(15)
+            emit_progress({"type": "validated", "message": "設定OK"})
 
-        if not ip:
-            job_data["status"] = "failed"
-            job_data["failure_reason"] = "IP_TIMEOUT"
-            job_data["error_message"] = "IP取得タイムアウト"
-            job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
-            emit_progress({"type": "error", "error": "IP取得タイムアウト (15分)"})
-            return cleanup_instance_on_failure("IP取得タイムアウト (15分)")
+        except Exception as e:
+            emit_progress({"type": "error", "error": f"設定検証エラー: {e}"})
+            return {"success": False, "error": str(e)}
 
-        emit_progress({"type": "ip_assigned", "message": f"IP取得完了: {ip}", "ip": ip})
+        # Get Verda client
+        client = _get_verda_client()
+        if not client:
+            emit_progress({"type": "error", "error": "Verda認証情報が設定されていません"})
+            return {"success": False, "error": "Verda認証情報が設定されていません"}
 
-        # Update job with IP
-        job_data["ip"] = ip
-        job_data["status"] = "deploying"
-        _save_job(job_data)
+        # Track instance_id for cleanup on failure
+        instance_id: Optional[str] = None
 
-        # SSH deployment using SSHConnection and RemoteExecutor
-        ssh_user = "root"
-
-        # Wait for SSH (up to 5 minutes)
-        emit_progress({"type": "connecting_ssh", "message": "SSH接続中...", "attempt": 0, "max_attempts": 30})
-        conn: Optional[SSHConnection] = None
-        start_time = time.time()
-        ssh_deadline = start_time + SSH_WAIT_TIMEOUT_SEC
-        attempt = 0
-        while time.time() < ssh_deadline:
-            attempt += 1
-            try:
-                conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
-                break
-            except Exception:
-                elapsed = int(time.time() - start_time)
-                emit_progress({
-                    "type": "connecting_ssh",
-                    "message": f"SSH接続中... (試行 {attempt}/30, {elapsed}秒経過)",
-                    "attempt": attempt,
-                    "max_attempts": 30,
-                    "elapsed": elapsed,
-                })
-                time.sleep(10)
-
-        if not conn:
-            job_data["status"] = "failed"
-            job_data["failure_reason"] = "SSH_TIMEOUT"
-            job_data["error_message"] = "SSH接続タイムアウト"
-            job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
-            emit_progress({"type": "error", "error": "SSH接続タイムアウト (5分)"})
-            return cleanup_instance_on_failure("SSH接続タイムアウト (5分)")
-
-        emit_progress({"type": "ssh_ready", "message": "SSH接続完了"})
+        def cleanup_instance_on_failure(error_msg: str) -> dict:
+            """Clean up instance if creation succeeded but subsequent steps failed."""
+            nonlocal instance_id
+            if instance_id:
+                emit_progress({"type": "cleanup", "message": f"エラー発生のためインスタンスを削除中: {instance_id}"})
+                logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
+                _update_cleanup_status(job_id, "running")
+                cleanup_ok = _delete_verda_instance(instance_id)
+                _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
+            return {"success": False, "error": error_msg}
 
         try:
-            home_dir = conn.resolve_path("$HOME") or "/root"
-            remote_base_dir = f"{home_dir}/.physical-ai"
-            remote_run_dir = f"{remote_base_dir}/run"
-            job_data["remote_base_dir"] = remote_base_dir
+            # Select instance type
+            emit_progress({"type": "selecting_instance", "message": "インスタンスタイプを選択中..."})
+            instance_type = _select_instance_type(client, cloud.gpu_model, cloud.gpus_per_instance)
+            emit_progress({
+                "type": "instance_selected",
+                "message": f"インスタンスタイプ: {instance_type}",
+                "instance_type": instance_type,
+            })
+
+            # Get SSH key
+            emit_progress({"type": "getting_ssh_key", "message": "SSHキーを取得中..."})
+            ssh_key_name = os.environ.get("VERDA_SSH_KEY_NAME", "")
+            ssh_private_key = os.environ.get(
+                "VERDA_SSH_PRIVATE_KEY",
+                str(Path.home() / ".ssh" / "id_rsa"),
+            )
+            if not ssh_key_name:
+                emit_progress({"type": "error", "error": "VERDA_SSH_KEY_NAMEが設定されていません"})
+                return {"success": False, "error": "VERDA_SSH_KEY_NAMEが設定されていません"}
+            ssh_key_id = _get_ssh_key_id(client, ssh_key_name)
+
+            # Find location
+            emit_progress({"type": "finding_location", "message": "利用可能なロケーションを検索中..."})
+            location = _find_location(client, instance_type, cloud.location, cloud.is_spot)
+            emit_progress({
+                "type": "location_found",
+                "message": f"ロケーション: {location}",
+                "location": location,
+            })
+
+            # Create instance
+            emit_progress({"type": "creating_instance", "message": "インスタンスを作成中..."})
+            instance_id = _create_instance(
+                client,
+                instance_type=instance_type,
+                ssh_key_id=ssh_key_id,
+                location=location,
+                is_spot=cloud.is_spot,
+                storage_size=cloud.storage_size,
+                hostname=f"train-{job_id[:16]}",
+            )
+            emit_progress({
+                "type": "instance_created",
+                "message": f"インスタンス作成完了: {instance_id}",
+                "instance_id": instance_id,
+            })
+
+            request_model = JobCreateRequest(
+                job_name=job_name,
+                dataset=dataset,
+                policy=policy,
+                training=training,
+                validation=ValidationConfig(**validation_data) if validation_data else ValidationConfig(),
+                early_stopping=(
+                    EarlyStoppingConfig(**early_stopping_data) if early_stopping_data else EarlyStoppingConfig()
+                ),
+                cloud=cloud,
+                checkpoint_repo_id=checkpoint_repo_id,
+                wandb_enable=wandb_enable,
+            )
+            training_config = _build_pipeline_config(request_model, job_id)
+
+            # Save job info
+            now = datetime.now().isoformat()
+            job_data = {
+                "job_id": job_id,
+                "job_name": job_name,
+                "instance_id": instance_id,
+                "ip": None,
+                "status": "starting",
+                "mode": "train",
+                "project_id": _resolve_project_id(dataset.id),
+                "ssh_user": "root",
+                "ssh_private_key": ssh_private_key,
+                "remote_base_dir": "/root/.physical-ai",
+                "checkpoint_repo_id": checkpoint_repo_id,
+                "created_at": now,
+                "updated_at": now,
+                "gpu_model": cloud.gpu_model,
+                "gpus_per_instance": cloud.gpus_per_instance,
+                "policy_type": policy.type,
+                "dataset_id": dataset.id,
+                "training_config": training_config,
+            }
             _save_job(job_data)
 
-            # Create remote directory
-            emit_progress({"type": "deploying", "message": "リモートディレクトリを作成中..."})
-            conn.mkdir_p(remote_run_dir)
+            # Wait for IP (up to 15 minutes)
+            emit_progress({"type": "waiting_ip", "message": "IPアドレス割り当て待機中...", "elapsed": 0, "timeout": 900})
+            ip = None
+            start_time = time.time()
+            deadline = start_time + IP_WAIT_TIMEOUT_SEC
+            while time.time() < deadline:
+                try:
+                    instance = client.instances.get_by_id(instance_id)
+                    if getattr(instance, "ip", None):
+                        ip = instance.ip
+                        break
+                except Exception:
+                    pass
+                elapsed = int(time.time() - start_time)
+                emit_progress({
+                    "type": "waiting_ip",
+                    "message": f"IPアドレス割り当て待機中... ({elapsed}秒経過)",
+                    "elapsed": elapsed,
+                    "timeout": 900,
+                })
+                time.sleep(15)
 
-            # Upload remote scripts
-            emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "setup_env.sh"})
-            setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
-            entry_path = REMOTE_SCRIPTS_DIR / "entry.py"
-            run_training_path = REMOTE_SCRIPTS_DIR / "run_training.sh"
+            if not ip:
+                job_data["status"] = "failed"
+                job_data["failure_reason"] = "IP_TIMEOUT"
+                job_data["error_message"] = "IP取得タイムアウト"
+                job_data["completed_at"] = datetime.now().isoformat()
+                _save_job(job_data)
+                emit_progress({"type": "error", "error": "IP取得タイムアウト (15分)"})
+                return cleanup_instance_on_failure("IP取得タイムアウト (15分)")
 
-            if setup_env_path.exists():
-                conn.upload_file(setup_env_path, f"{remote_run_dir}/setup_env.sh")
-            emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "entry.py"})
-            if entry_path.exists():
-                conn.upload_file(entry_path, f"{remote_run_dir}/entry.py")
-            emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "run_training.sh"})
-            if run_training_path.exists():
-                conn.upload_file(run_training_path, f"{remote_run_dir}/run_training.sh")
+            emit_progress({"type": "ip_assigned", "message": f"IP取得完了: {ip}", "ip": ip})
 
-            # Generate and upload .env file
-            emit_progress({"type": "deploying", "message": "環境変数をアップロード中...", "file": ".env"})
-            env_content = _generate_env_file(
-                job_id,
-                instance_id,
-                policy.type if policy else None,
-            )
-            conn.upload_content(env_content, f"{remote_run_dir}/.env")
+            # Update job with IP
+            job_data["ip"] = ip
+            job_data["status"] = "deploying"
+            _save_job(job_data)
 
-            # Generate and upload instance_info.env
-            emit_progress({"type": "deploying", "message": "インスタンス情報をアップロード中...", "file": "instance_info.env"})
-            instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
-            conn.upload_content(instance_info, f"{remote_run_dir}/instance_info.env")
+            # SSH deployment using SSHConnection and RemoteExecutor
+            ssh_user = "root"
 
-            # Make scripts executable
-            conn.exec_command(f"chmod +x {remote_run_dir}/setup_env.sh")
-            conn.exec_command(f"chmod +x {remote_run_dir}/run_training.sh")
+            # Wait for SSH (up to 5 minutes)
+            emit_progress({"type": "connecting_ssh", "message": "SSH接続中...", "attempt": 0, "max_attempts": 30})
+            conn: Optional[SSHConnection] = None
+            start_time = time.time()
+            ssh_deadline = start_time + SSH_WAIT_TIMEOUT_SEC
+            attempt = 0
+            while time.time() < ssh_deadline:
+                attempt += 1
+                try:
+                    conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
+                    break
+                except Exception:
+                    elapsed = int(time.time() - start_time)
+                    emit_progress({
+                        "type": "connecting_ssh",
+                        "message": f"SSH接続中... (試行 {attempt}/30, {elapsed}秒経過)",
+                        "attempt": attempt,
+                        "max_attempts": 30,
+                        "elapsed": elapsed,
+                    })
+                    time.sleep(10)
 
-            # Run setup synchronously and stream logs
-            emit_progress({"type": "setting_up", "message": "環境構築中..."})
+            if not conn:
+                job_data["status"] = "failed"
+                job_data["failure_reason"] = "SSH_TIMEOUT"
+                job_data["error_message"] = "SSH接続タイムアウト"
+                job_data["completed_at"] = datetime.now().isoformat()
+                _save_job(job_data)
+                emit_progress({"type": "error", "error": "SSH接続タイムアウト (5分)"})
+                return cleanup_instance_on_failure("SSH接続タイムアウト (5分)")
 
-            def _emit_setup_log(line: str) -> None:
-                line = line.strip()
-                if line:
-                    emit_progress({"type": "training_log", "message": line})
+            emit_progress({"type": "ssh_ready", "message": "SSH接続完了"})
 
-            setup_cmd = f"cd {remote_run_dir} && timeout {SETUP_TIMEOUT_SEC}s bash setup_env.sh train 2>&1"
-            setup_exit_code = run_remote_command(
-                conn,
-                setup_cmd,
-                stream_output=False,
-                on_stdout=_emit_setup_log,
-            )
-            if setup_exit_code != 0:
-                if setup_exit_code == 124:
+            try:
+                home_dir = conn.resolve_path("$HOME") or "/root"
+                remote_base_dir = f"{home_dir}/.physical-ai"
+                remote_run_dir = f"{remote_base_dir}/run"
+                job_data["remote_base_dir"] = remote_base_dir
+                _save_job(job_data)
+
+                # Create remote directory
+                emit_progress({"type": "deploying", "message": "リモートディレクトリを作成中..."})
+                conn.mkdir_p(remote_run_dir)
+
+                # Upload remote scripts
+                emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "setup_env.sh"})
+                setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
+                entry_path = REMOTE_SCRIPTS_DIR / "entry.py"
+                run_training_path = REMOTE_SCRIPTS_DIR / "run_training.sh"
+
+                if setup_env_path.exists():
+                    conn.upload_file(setup_env_path, f"{remote_run_dir}/setup_env.sh")
+                emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "entry.py"})
+                if entry_path.exists():
+                    conn.upload_file(entry_path, f"{remote_run_dir}/entry.py")
+                emit_progress({"type": "deploying", "message": "スクリプトをアップロード中...", "file": "run_training.sh"})
+                if run_training_path.exists():
+                    conn.upload_file(run_training_path, f"{remote_run_dir}/run_training.sh")
+
+                # Generate and upload .env file
+                emit_progress({"type": "deploying", "message": "環境変数をアップロード中...", "file": ".env"})
+                env_content = _generate_env_file(
+                    job_id,
+                    instance_id,
+                    policy.type if policy else None,
+                    supabase_access_token=supabase_access_token,
+                    supabase_user_id=supabase_user_id,
+                )
+                conn.upload_content(env_content, f"{remote_run_dir}/.env")
+
+                # Generate and upload instance_info.env
+                emit_progress({"type": "deploying", "message": "インスタンス情報をアップロード中...", "file": "instance_info.env"})
+                instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
+                conn.upload_content(instance_info, f"{remote_run_dir}/instance_info.env")
+
+                # Make scripts executable
+                conn.exec_command(f"chmod +x {remote_run_dir}/setup_env.sh")
+                conn.exec_command(f"chmod +x {remote_run_dir}/run_training.sh")
+
+                # Run setup synchronously and stream logs
+                emit_progress({"type": "setting_up", "message": "環境構築中..."})
+
+                def _emit_setup_log(line: str) -> None:
+                    line = line.strip()
+                    if line:
+                        emit_progress({"type": "training_log", "message": line})
+
+                setup_cmd = f"cd {remote_run_dir} && timeout {SETUP_TIMEOUT_SEC}s bash setup_env.sh train 2>&1"
+                setup_exit_code = run_remote_command(
+                    conn,
+                    setup_cmd,
+                    stream_output=False,
+                    on_stdout=_emit_setup_log,
+                )
+                if setup_exit_code != 0:
+                    if setup_exit_code == 124:
+                        job_data["status"] = "failed"
+                        job_data["failure_reason"] = "SETUP_TIMEOUT"
+                        job_data["error_message"] = "環境構築がタイムアウトしました"
+                        job_data["completed_at"] = datetime.now().isoformat()
+                        _save_job(job_data)
+                        _upload_remote_logs_to_r2(conn, job_data)
+                        emit_progress({"type": "error", "error": "環境構築がタイムアウトしました"})
+                        return cleanup_instance_on_failure("環境構築がタイムアウトしました")
                     job_data["status"] = "failed"
-                    job_data["failure_reason"] = "SETUP_TIMEOUT"
-                    job_data["error_message"] = "環境構築がタイムアウトしました"
+                    job_data["failure_reason"] = "SETUP_FAILED"
+                    job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                     job_data["completed_at"] = datetime.now().isoformat()
                     _save_job(job_data)
                     _upload_remote_logs_to_r2(conn, job_data)
-                    emit_progress({"type": "error", "error": "環境構築がタイムアウトしました"})
-                    return cleanup_instance_on_failure("環境構築がタイムアウトしました")
-                job_data["status"] = "failed"
-                job_data["failure_reason"] = "SETUP_FAILED"
-                job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
-                job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
-                _upload_remote_logs_to_r2(conn, job_data)
-                emit_progress({"type": "error", "error": "環境構築に失敗しました"})
-                return cleanup_instance_on_failure("環境構築に失敗しました")
+                    emit_progress({"type": "error", "error": "環境構築に失敗しました"})
+                    return cleanup_instance_on_failure("環境構築に失敗しました")
 
-            # Start training in separate tmux session
-            executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
-            emit_progress({"type": "starting_training", "message": "学習を開始中..."})
-            success = executor.run_background(
-                "bash run_training.sh train",
-                session_name=TMUX_TRAIN_SESSION_NAME,
-            )
-            if not success:
-                emit_progress({"type": "training_log", "message": "警告: 学習用tmuxセッションの開始を確認できませんでした"})
-            else:
-                job_data["status"] = "starting"
-                _save_job(job_data)
+                # Start training in separate tmux session
+                executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
+                emit_progress({"type": "starting_training", "message": "学習を開始中..."})
+                success = executor.run_background(
+                    "bash run_training.sh train",
+                    session_name=TMUX_TRAIN_SESSION_NAME,
+                )
+                if not success:
+                    emit_progress({"type": "training_log", "message": "警告: 学習用tmuxセッションの開始を確認できませんでした"})
+                else:
+                    job_data["status"] = "starting"
+                    _save_job(job_data)
 
-            emit_progress({
-                "type": "complete",
-                "message": "学習プロセスを起動しました。リモート側の開始確認待ちです。",
-                "job_id": job_id,
-                "instance_id": instance_id,
-                "ip": ip,
-                "status": "starting",
-            })
+                emit_progress({
+                    "type": "complete",
+                    "message": "学習プロセスを起動しました。リモート側の開始確認待ちです。",
+                    "job_id": job_id,
+                    "instance_id": instance_id,
+                    "ip": ip,
+                    "status": "starting",
+                })
 
-            return {
-                "success": True,
-                "job_id": job_id,
-                "instance_id": instance_id,
-                "ip": ip,
-                "status": "starting",
-            }
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "instance_id": instance_id,
+                    "ip": ip,
+                    "status": "starting",
+                }
 
-        finally:
-            conn.disconnect()
+            finally:
+                conn.disconnect()
 
-    except HTTPException as e:
-        if instance_id:
-            job_data = _load_job(job_id, include_deleted=True)
-            if job_data:
-                job_data["status"] = "failed"
-                job_data["failure_reason"] = "VERDA_ERROR"
-                job_data["error_message"] = e.detail
-                job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
-        emit_progress({"type": "error", "error": e.detail})
-        return cleanup_instance_on_failure(e.detail)
-    except Exception as e:
-        if instance_id:
-            job_data = _load_job(job_id, include_deleted=True)
-            if job_data:
-                job_data["status"] = "failed"
-                job_data["failure_reason"] = "UNKNOWN"
-                job_data["error_message"] = str(e)
-                job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
-        emit_progress({"type": "error", "error": str(e)})
-        return cleanup_instance_on_failure(str(e))
+        except HTTPException as e:
+            if instance_id:
+                job_data = _load_job(job_id, include_deleted=True)
+                if job_data:
+                    job_data["status"] = "failed"
+                    job_data["failure_reason"] = "VERDA_ERROR"
+                    job_data["error_message"] = e.detail
+                    job_data["completed_at"] = datetime.now().isoformat()
+                    _save_job(job_data)
+            emit_progress({"type": "error", "error": e.detail})
+            return cleanup_instance_on_failure(e.detail)
+        except Exception as e:
+            if instance_id:
+                job_data = _load_job(job_id, include_deleted=True)
+                if job_data:
+                    job_data["status"] = "failed"
+                    job_data["failure_reason"] = "UNKNOWN"
+                    job_data["error_message"] = str(e)
+                    job_data["completed_at"] = datetime.now().isoformat()
+                    _save_job(job_data)
+            emit_progress({"type": "error", "error": str(e)})
+            return cleanup_instance_on_failure(str(e))
+    finally:
+        reset_request_session(token)
 
 
 @router.websocket("/ws/create-job")
@@ -3253,6 +3285,24 @@ async def websocket_create_job(websocket: WebSocket):
     logger.info("WebSocket create-job client connected")
 
     try:
+        access_token = websocket.query_params.get("access_token")
+        auth_header = websocket.headers.get("authorization")
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                access_token = parts[1]
+        if not access_token:
+            access_token = websocket.cookies.get(ACCESS_COOKIE_NAME)
+        refresh_token = websocket.cookies.get(REFRESH_COOKIE_NAME)
+        supabase_session = build_session_from_tokens(access_token, refresh_token)
+        if not supabase_session or not supabase_session.get("user_id"):
+            await websocket.send_json({
+                "type": "error",
+                "error": "認証情報がありません。ログインし直してください。",
+            })
+            await websocket.close()
+            return
+
         # Wait for job creation request
         data = await websocket.receive_json()
 
@@ -3274,7 +3324,7 @@ async def websocket_create_job(websocket: WebSocket):
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
                 _executor,
-                lambda: _create_job_with_progress(data, emit_progress)
+                lambda: _create_job_with_progress(data, emit_progress, supabase_session)
             )
 
         # Start job creation task
@@ -3324,165 +3374,176 @@ async def websocket_create_job(websocket: WebSocket):
             pass
 
 
-async def _deploy_and_start_training(job_id: str, request: JobCreateRequest) -> None:
+async def _deploy_and_start_training(
+    job_id: str,
+    request: JobCreateRequest,
+    supabase_access_token: Optional[str] = None,
+    supabase_user_id: Optional[str] = None,
+) -> None:
     """Background task to deploy and start training.
 
     This waits for the instance IP, uploads files, and starts training.
     Uses SSHConnection and RemoteExecutor for consistency with other code paths.
     """
-    job_data = _load_job(job_id)
-    if not job_data:
-        return
-
-    client = _get_verda_client()
-    if not client:
-        job_data["status"] = "failed"
-        job_data["failure_reason"] = "VERDA_ERROR"
-        job_data["completed_at"] = datetime.now().isoformat()
-        _save_job(job_data)
-        return
-
-    instance_id = job_data["instance_id"]
-
-    def cleanup_on_failure(error_msg: str) -> None:
-        """Clean up instance on deployment failure."""
-        logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
-        _update_cleanup_status(job_id, "running")
-        cleanup_ok = _delete_verda_instance(instance_id)
-        _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
-
+    session = build_session_from_tokens(supabase_access_token)
+    token = set_request_session(session)
     try:
-        # Wait for IP (up to 15 minutes)
-        ip = None
-        deadline = time.time() + IP_WAIT_TIMEOUT_SEC
-        while time.time() < deadline:
-            try:
-                instance = client.instances.get_by_id(instance_id)
-                if getattr(instance, "ip", None):
-                    ip = instance.ip
-                    break
-            except Exception:
-                pass
-            time.sleep(15)
-
-        if not ip:
-            job_data["status"] = "failed"
-            job_data["failure_reason"] = "IP_TIMEOUT"
-            job_data["error_message"] = "IP取得タイムアウト"
-            job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
-            cleanup_on_failure("IP取得タイムアウト")
+        job_data = _load_job(job_id)
+        if not job_data:
             return
 
-        # Update job with IP
-        job_data["ip"] = ip
-        job_data["status"] = "deploying"
-        _save_job(job_data)
-
-        # SSH deployment using SSHConnection
-        ssh_user = job_data.get("ssh_user", "root")
-        ssh_private_key = job_data.get("ssh_private_key", str(Path.home() / ".ssh" / "id_rsa"))
-
-        # Wait for SSH to be ready (up to 5 minutes)
-        conn: Optional[SSHConnection] = None
-        ssh_deadline = time.time() + SSH_WAIT_TIMEOUT_SEC
-        while time.time() < ssh_deadline:
-            try:
-                conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
-                break
-            except Exception:
-                time.sleep(10)
-
-        if not conn:
+        client = _get_verda_client()
+        if not client:
             job_data["status"] = "failed"
-            job_data["failure_reason"] = "SSH_TIMEOUT"
-            job_data["error_message"] = "SSH接続タイムアウト"
+            job_data["failure_reason"] = "VERDA_ERROR"
             job_data["completed_at"] = datetime.now().isoformat()
             _save_job(job_data)
-            cleanup_on_failure("SSH接続タイムアウト")
             return
+
+        instance_id = job_data["instance_id"]
+
+        def cleanup_on_failure(error_msg: str) -> None:
+            """Clean up instance on deployment failure."""
+            logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
+            _update_cleanup_status(job_id, "running")
+            cleanup_ok = _delete_verda_instance(instance_id)
+            _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
 
         try:
-            home_dir = conn.resolve_path("$HOME") or "/root"
-            remote_base_dir = f"{home_dir}/.physical-ai"
-            remote_run_dir = f"{remote_base_dir}/run"
-            job_data["remote_base_dir"] = remote_base_dir
+            # Wait for IP (up to 15 minutes)
+            ip = None
+            deadline = time.time() + IP_WAIT_TIMEOUT_SEC
+            while time.time() < deadline:
+                try:
+                    instance = client.instances.get_by_id(instance_id)
+                    if getattr(instance, "ip", None):
+                        ip = instance.ip
+                        break
+                except Exception:
+                    pass
+                time.sleep(15)
+
+            if not ip:
+                job_data["status"] = "failed"
+                job_data["failure_reason"] = "IP_TIMEOUT"
+                job_data["error_message"] = "IP取得タイムアウト"
+                job_data["completed_at"] = datetime.now().isoformat()
+                _save_job(job_data)
+                cleanup_on_failure("IP取得タイムアウト")
+                return
+
+            # Update job with IP
+            job_data["ip"] = ip
+            job_data["status"] = "deploying"
             _save_job(job_data)
 
-            # Create remote directory
-            conn.mkdir_p(remote_run_dir)
+            # SSH deployment using SSHConnection
+            ssh_user = job_data.get("ssh_user", "root")
+            ssh_private_key = job_data.get("ssh_private_key", str(Path.home() / ".ssh" / "id_rsa"))
 
-            # Upload remote scripts
-            setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
-            entry_path = REMOTE_SCRIPTS_DIR / "entry.py"
-            run_training_path = REMOTE_SCRIPTS_DIR / "run_training.sh"
+            # Wait for SSH to be ready (up to 5 minutes)
+            conn: Optional[SSHConnection] = None
+            ssh_deadline = time.time() + SSH_WAIT_TIMEOUT_SEC
+            while time.time() < ssh_deadline:
+                try:
+                    conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
+                    break
+                except Exception:
+                    time.sleep(10)
 
-            if setup_env_path.exists():
-                conn.upload_file(setup_env_path, f"{remote_run_dir}/setup_env.sh")
-            if entry_path.exists():
-                conn.upload_file(entry_path, f"{remote_run_dir}/entry.py")
-            if run_training_path.exists():
-                conn.upload_file(run_training_path, f"{remote_run_dir}/run_training.sh")
+            if not conn:
+                job_data["status"] = "failed"
+                job_data["failure_reason"] = "SSH_TIMEOUT"
+                job_data["error_message"] = "SSH接続タイムアウト"
+                job_data["completed_at"] = datetime.now().isoformat()
+                _save_job(job_data)
+                cleanup_on_failure("SSH接続タイムアウト")
+                return
 
-            # Generate and upload .env file
-            instance_id = job_data["instance_id"]
-            env_content = _generate_env_file(
-                job_id,
-                instance_id,
-                request.policy.type if request.policy else None,
-            )
-            conn.upload_content(env_content, f"{remote_run_dir}/.env")
+            try:
+                home_dir = conn.resolve_path("$HOME") or "/root"
+                remote_base_dir = f"{home_dir}/.physical-ai"
+                remote_run_dir = f"{remote_base_dir}/run"
+                job_data["remote_base_dir"] = remote_base_dir
+                _save_job(job_data)
 
-            # Generate and upload instance_info.env
-            instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
-            conn.upload_content(instance_info, f"{remote_run_dir}/instance_info.env")
+                # Create remote directory
+                conn.mkdir_p(remote_run_dir)
 
-            # Make scripts executable
-            conn.exec_command(f"chmod +x {remote_run_dir}/setup_env.sh")
-            conn.exec_command(f"chmod +x {remote_run_dir}/run_training.sh")
+                # Upload remote scripts
+                setup_env_path = REMOTE_SCRIPTS_DIR / "setup_env.sh"
+                entry_path = REMOTE_SCRIPTS_DIR / "entry.py"
+                run_training_path = REMOTE_SCRIPTS_DIR / "run_training.sh"
 
-            # Run setup synchronously
-            setup_cmd = f"cd {remote_run_dir} && timeout {SETUP_TIMEOUT_SEC}s bash setup_env.sh train 2>&1"
-            setup_exit_code = run_remote_command(
-                conn,
-                setup_cmd,
-                stream_output=False,
-            )
-            if setup_exit_code != 0:
-                if setup_exit_code == 124:
+                if setup_env_path.exists():
+                    conn.upload_file(setup_env_path, f"{remote_run_dir}/setup_env.sh")
+                if entry_path.exists():
+                    conn.upload_file(entry_path, f"{remote_run_dir}/entry.py")
+                if run_training_path.exists():
+                    conn.upload_file(run_training_path, f"{remote_run_dir}/run_training.sh")
+
+                # Generate and upload .env file
+                env_content = _generate_env_file(
+                    job_id,
+                    instance_id,
+                    request.policy.type if request.policy else None,
+                    supabase_access_token=supabase_access_token,
+                    supabase_user_id=supabase_user_id,
+                )
+                conn.upload_content(env_content, f"{remote_run_dir}/.env")
+
+                # Generate and upload instance_info.env
+                instance_info = _generate_instance_info_env(job_id, instance_id, auto_delete=True)
+                conn.upload_content(instance_info, f"{remote_run_dir}/instance_info.env")
+
+                # Make scripts executable
+                conn.exec_command(f"chmod +x {remote_run_dir}/setup_env.sh")
+                conn.exec_command(f"chmod +x {remote_run_dir}/run_training.sh")
+
+                # Run setup synchronously
+                setup_cmd = f"cd {remote_run_dir} && timeout {SETUP_TIMEOUT_SEC}s bash setup_env.sh train 2>&1"
+                setup_exit_code = run_remote_command(
+                    conn,
+                    setup_cmd,
+                    stream_output=False,
+                )
+                if setup_exit_code != 0:
+                    if setup_exit_code == 124:
+                        job_data["status"] = "failed"
+                        job_data["failure_reason"] = "SETUP_TIMEOUT"
+                        job_data["error_message"] = "環境構築がタイムアウトしました"
+                        job_data["completed_at"] = datetime.now().isoformat()
+                        _save_job(job_data)
+                        _upload_remote_logs_to_r2(conn, job_data)
+                        cleanup_on_failure("環境構築がタイムアウトしました")
+                        return
                     job_data["status"] = "failed"
-                    job_data["failure_reason"] = "SETUP_TIMEOUT"
-                    job_data["error_message"] = "環境構築がタイムアウトしました"
+                    job_data["failure_reason"] = "SETUP_FAILED"
+                    job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                     job_data["completed_at"] = datetime.now().isoformat()
                     _save_job(job_data)
                     _upload_remote_logs_to_r2(conn, job_data)
-                    cleanup_on_failure("環境構築がタイムアウトしました")
+                    cleanup_on_failure("環境構築に失敗しました")
                     return
-                job_data["status"] = "failed"
-                job_data["failure_reason"] = "SETUP_FAILED"
-                job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
-                job_data["completed_at"] = datetime.now().isoformat()
+
+                # Start training using RemoteExecutor with tmux
+                executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
+                executor.run_background("bash run_training.sh train", session_name=TMUX_TRAIN_SESSION_NAME)
+                job_data["status"] = "starting"
                 _save_job(job_data)
-                _upload_remote_logs_to_r2(conn, job_data)
-                cleanup_on_failure("環境構築に失敗しました")
-                return
 
-            # Start training using RemoteExecutor with tmux
-            executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
-            executor.run_background("bash run_training.sh train", session_name=TMUX_TRAIN_SESSION_NAME)
-            job_data["status"] = "starting"
+            finally:
+                conn.disconnect()
+
+        except Exception as e:
+            job_data["status"] = "failed"
+            job_data["failure_reason"] = "UNKNOWN"
+            job_data["error_message"] = str(e)
+            job_data["completed_at"] = datetime.now().isoformat()
             _save_job(job_data)
-
-        finally:
-            conn.disconnect()
-
-    except Exception as e:
-        job_data["status"] = "failed"
-        job_data["failure_reason"] = "UNKNOWN"
-        job_data["error_message"] = str(e)
-        job_data["completed_at"] = datetime.now().isoformat()
-        _save_job(job_data)
-        cleanup_on_failure(str(e))
+            cleanup_on_failure(str(e))
+    finally:
+        reset_request_session(token)
 
 
 # --- Checkpoint API ---

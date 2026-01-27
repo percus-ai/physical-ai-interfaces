@@ -26,8 +26,10 @@
       </p>
     </div>
     <div class="flex gap-3">
-      <Button.Root class="btn-primary">新規学習</Button.Root>
-      <Button.Root class="btn-ghost">継続学習</Button.Root>
+      <Button.Root class="btn-primary" href="/train/new">新規学習</Button.Root>
+      <Button.Root class="btn-ghost opacity-50 cursor-not-allowed" disabled title="準備中">
+        継続学習
+      </Button.Root>
     </div>
   </div>
 </section>
@@ -68,20 +70,23 @@
 <section class="card p-6">
   <div class="flex items-center justify-between">
     <h2 class="text-xl font-semibold text-slate-900">学習ジョブ一覧</h2>
-    <Button.Root class="btn-ghost">更新</Button.Root>
+    <button class="btn-ghost" type="button" on:click={() => jobsQuery.refetch()}>更新</button>
   </div>
   <div class="mt-4 space-y-3 text-sm text-slate-600">
     {#if $jobsQuery.isLoading}
       <p>読み込み中...</p>
     {:else if $jobsQuery.data?.jobs?.length}
       {#each $jobsQuery.data.jobs as job}
-        <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+        <a
+          class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3 transition hover:border-brand/40 hover:bg-white"
+          href={`/train/jobs/${job.job_id}`}
+        >
           <div>
             <p class="font-semibold text-slate-800">{job.job_name}</p>
             <p class="text-xs text-slate-500">{job.dataset_id ?? '-'} / {job.policy_type ?? '-'}</p>
           </div>
           <span class="chip">{job.status}</span>
-        </div>
+        </a>
       {/each}
     {:else}
       <p>学習ジョブがありません。</p>

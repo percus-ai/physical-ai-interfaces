@@ -26,3 +26,12 @@ class AuthStatusResponse(BaseModel):
     authenticated: bool = Field(..., description="Whether session is available")
     user_id: str | None = Field(None, description="Supabase user id")
     expires_at: int | None = Field(None, description="Access token expiry (unix time)")
+
+
+class AuthTokenResponse(BaseModel):
+    """Supabase auth token response (for WebSocket clients)."""
+
+    access_token: str = Field(..., description="Access token")
+    refresh_token: str | None = Field(None, description="Refresh token (optional)")
+    user_id: str | None = Field(None, description="Supabase user id")
+    expires_at: int | None = Field(None, description="Access token expiry (unix time)")

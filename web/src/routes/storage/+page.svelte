@@ -33,7 +33,7 @@
       <p class="mt-2 text-sm text-slate-600">データセット・モデル・アーカイブの状況をまとめて確認します。</p>
     </div>
     <div class="flex flex-wrap gap-2">
-      <Button.Root class="btn-ghost">アーカイブ一覧</Button.Root>
+      <Button.Root class="btn-ghost" href="/storage/archive">アーカイブ一覧</Button.Root>
       <Button.Root class="btn-ghost">ストレージ使用量</Button.Root>
     </div>
   </div>
@@ -46,7 +46,7 @@
         <h2 class="text-xl font-semibold text-slate-900">データセット</h2>
         <p class="text-xs text-slate-500">最新のデータセットを一覧表示</p>
       </div>
-      <Button.Root class="btn-ghost">管理</Button.Root>
+      <Button.Root class="btn-ghost" href="/storage/datasets">管理</Button.Root>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
       {#if $datasetsQuery.isLoading}
@@ -108,7 +108,7 @@
         <h2 class="text-xl font-semibold text-slate-900">モデル管理</h2>
         <p class="text-xs text-slate-500">最新のモデルを一覧表示</p>
       </div>
-      <Button.Root class="btn-ghost">管理</Button.Root>
+      <Button.Root class="btn-ghost" href="/storage/models">管理</Button.Root>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
       {#if $modelsQuery.isLoading}
@@ -142,7 +142,7 @@
         <h2 class="text-xl font-semibold text-slate-900">アーカイブ一覧</h2>
         <p class="text-xs text-slate-500">アーカイブ済みのデータを表示</p>
       </div>
-      <Button.Root class="btn-ghost">管理</Button.Root>
+      <Button.Root class="btn-ghost" href="/storage/archive">管理</Button.Root>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
       {#if $archiveQuery.isLoading}

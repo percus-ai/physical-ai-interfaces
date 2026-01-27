@@ -44,17 +44,24 @@ def extract_refresh_token(request: Request) -> Optional[str]:
     return request.cookies.get(REFRESH_COOKIE_NAME)
 
 
-def build_session_from_request(request: Request) -> Optional[dict[str, Any]]:
-    access_token = extract_access_token(request)
+def build_session_from_tokens(
+    access_token: Optional[str],
+    refresh_token: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
     if not access_token:
         return None
     payload = _decode_jwt_payload(access_token) or {}
     user_id = payload.get("sub")
     expires_at = payload.get("exp")
-    session = {
+    return {
         "access_token": access_token,
-        "refresh_token": extract_refresh_token(request),
+        "refresh_token": refresh_token,
         "expires_at": expires_at,
         "user_id": user_id,
     }
-    return session
+
+
+def build_session_from_request(request: Request) -> Optional[dict[str, Any]]:
+    access_token = extract_access_token(request)
+    refresh_token = extract_refresh_token(request)
+    return build_session_from_tokens(access_token, refresh_token)
