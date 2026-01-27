@@ -3,12 +3,7 @@
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
   import { formatDate } from '$lib/format';
-  import { GPU_MODELS, POLICY_TYPES } from '$lib/policies';
-
-  const datasetsQuery = createQuery({
-    queryKey: ['storage', 'datasets'],
-    queryFn: () => api.storage.datasets()
-  });
+  import { GPU_MODELS } from '$lib/policies';
 
   const jobsQuery = createQuery({
     queryKey: ['training', 'jobs'],
@@ -27,49 +22,12 @@
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">モデル学習</h1>
       <p class="mt-2 text-sm text-slate-600">
-        CLIのPOLICY_TYPESに準拠したポリシー一覧と、学習ジョブの状態を確認します。
+        利用可能なポリシー一覧と、学習ジョブの状態を確認します。
       </p>
     </div>
     <div class="flex gap-3">
       <Button.Root class="btn-primary">新規学習</Button.Root>
       <Button.Root class="btn-ghost">継続学習</Button.Root>
-    </div>
-  </div>
-</section>
-
-<section class="grid gap-6 lg:grid-cols-[1fr_1fr]">
-  <div class="card p-6">
-    <h3 class="text-lg font-semibold text-slate-900">ポリシー候補 (CLI基準)</h3>
-    <div class="mt-4 space-y-3 text-sm text-slate-600">
-      {#each POLICY_TYPES as policy}
-        <div class="rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-          <div class="flex items-center justify-between">
-            <p class="font-semibold text-slate-800">{policy.displayName}</p>
-            <span class="chip">{policy.id}</span>
-          </div>
-          <p class="mt-2 text-xs text-slate-500">
-            steps: {policy.defaultSteps} / batch: {policy.defaultBatchSize} / save: {policy.defaultSaveFreq}
-          </p>
-        </div>
-      {/each}
-    </div>
-  </div>
-
-  <div class="card p-6">
-    <h3 class="text-lg font-semibold text-slate-900">データセット候補</h3>
-    <div class="mt-4 space-y-2 text-sm text-slate-600">
-      {#if $datasetsQuery.isLoading}
-        <p>読み込み中...</p>
-      {:else if $datasetsQuery.data?.datasets?.length}
-        {#each $datasetsQuery.data.datasets as dataset}
-          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-2">
-            <span>{dataset.id}</span>
-            <span class="chip">{dataset.status}</span>
-          </div>
-        {/each}
-      {:else}
-        <p>データセットがありません。</p>
-      {/if}
     </div>
   </div>
 </section>
@@ -95,7 +53,7 @@
   </div>
 
   <div class="card p-6">
-    <h3 class="text-lg font-semibold text-slate-900">GPU モデル (CLI基準)</h3>
+    <h3 class="text-lg font-semibold text-slate-900">GPU モデル一覧 (Provider: Verda)</h3>
     <div class="mt-4 space-y-2 text-sm text-slate-600">
       {#each GPU_MODELS as gpu}
         <div class="rounded-xl border border-slate-200/60 bg-white/70 px-4 py-2">

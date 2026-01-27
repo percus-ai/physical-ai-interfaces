@@ -53,15 +53,9 @@
         <p class="text-base font-semibold text-slate-800">{$recordingsQuery.data?.total ?? 0}</p>
       </div>
       <div>
-        <p class="label">最新録画</p>
+        <p class="label">最新データセットID</p>
         <p class="text-base font-semibold text-slate-800">
-          {formatDate($recordingsQuery.data?.recordings?.[0]?.created_at)}
-        </p>
-      </div>
-      <div>
-        <p class="label">最新プロジェクト</p>
-        <p class="text-base font-semibold text-slate-800">
-          {$recordingsQuery.data?.recordings?.[0]?.project_id ?? '-'}
+          {$recordingsQuery.data?.recordings?.[0]?.recording_id ?? '-'}
         </p>
       </div>
     </div>
@@ -77,7 +71,7 @@
     <table class="min-w-full text-sm">
       <thead class="text-left text-xs uppercase tracking-widest text-slate-400">
         <tr>
-          <th class="pb-3">セッション</th>
+          <th class="pb-3">データセットID</th>
           <th class="pb-3">プロジェクト</th>
           <th class="pb-3">サイズ</th>
           <th class="pb-3">作成日時</th>

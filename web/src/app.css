@@ -20,14 +20,31 @@
   --brand-ink: #1e2a5a;
   --mint: #30d5c8;
   --sunset: #ff8b5c;
+  --app-header-height: 4.5rem;
+  --app-shell-gap: 1.5rem;
+  --app-shell-height: calc(100vh - var(--app-header-height) - (var(--app-shell-gap) * 2));
+  --app-bg: radial-gradient(circle at 10% 20%, #eef3ff 0%, transparent 55%),
+    radial-gradient(circle at 90% 10%, #e8fff8 0%, transparent 40%),
+    linear-gradient(160deg, var(--bg) 0%, var(--bg-accent) 100%);
+}
+
+html {
+  background: var(--app-bg);
+  overflow-y: scroll;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 body {
   font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
-  background: radial-gradient(circle at 10% 20%, #eef3ff 0%, transparent 55%),
-    radial-gradient(circle at 90% 10%, #e8fff8 0%, transparent 40%),
-    linear-gradient(160deg, var(--bg) 0%, var(--bg-accent) 100%);
+  background: var(--app-bg);
   color: var(--ink);
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 h1, h2, h3, h4 {
@@ -61,6 +78,9 @@ h1, h2, h3, h4 {
   }
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-brand/40 hover:text-brand;
+  }
+  .btn-card {
+    @apply items-start justify-between rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 text-left text-sm font-semibold text-slate-700 shadow-sm transition hover:border-brand/40 hover:text-slate-900;
   }
   .glass {
     @apply rounded-3xl border border-white/60 bg-white/50 backdrop-blur;

@@ -41,7 +41,7 @@
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">環境設定</h1>
-      <p class="mt-2 text-sm text-slate-600">CLIの設定画面に合わせたWebUI版設定。</p>
+      <p class="mt-2 text-sm text-slate-600">接続先やアプリ設定を管理します。</p>
     </div>
     <Button.Root class="btn-ghost" href="/auth">ログアウト</Button.Root>
   </div>

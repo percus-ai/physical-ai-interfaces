@@ -1,6 +1,6 @@
-# WebUI 共通化メモ
+# WebUI 開発メモ
 
-CLIとWebUIで共通化すべきが後回しの項目をここに記録。
+WebUIの設計・実装で後回しの項目をここに記録。
 
 ## 既にAPI連携済み
 - /api/analytics/overview
@@ -15,11 +15,11 @@ CLIとWebUIで共通化すべきが後回しの項目をここに記録。
 - /api/teleop/local/sessions
 - /api/inference/models, /api/inference/sessions
 
-## CLI値を参照している箇所
+## フロント定義を参照している箇所
 - POLICY_TYPES / GPU_MODELS / GPU_COUNTS: `interfaces/web/src/lib/policies.ts`
 
 ## バックエンドへ寄せる候補（未整備/不足）
-- ポリシー種別・推奨パラメータ一覧（CLIの POLICY_TYPES をAPIで返す）
+- ポリシー種別・推奨パラメータ一覧（POLICY_TYPES をAPIで返す）
 - 学習ジョブ作成ウィザードのデフォルト値（steps/batch/save_freq）
 - テレオペ/推論の詳細セッション状態（WebSocket進行状況）
 - 録画進行中のステータス/アップロード進捗

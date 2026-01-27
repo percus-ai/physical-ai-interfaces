@@ -29,13 +29,13 @@
   <div class="flex flex-wrap items-start justify-between gap-6">
     <div class="space-y-3">
       <p class="section-title">Overview</p>
-      <h1 class="text-3xl font-semibold text-slate-900">PerCUs Web Console</h1>
+      <h1 class="text-3xl font-semibold text-slate-900">Phi Web Console</h1>
       <p class="max-w-xl text-sm text-slate-600">
-        CLIと同等の運用フローをブラウザで再現するための統合コンソールです。各メニューの状態確認と、
+        運用フローをブラウザでまとめて扱う統合コンソールです。各メニューの状態確認と、
         よく使う操作へのショートカットを用意しています。
       </p>
       <div class="flex flex-wrap gap-3">
-        <span class="chip">CLI互換フロー</span>
+        <span class="chip">統合コンソール</span>
         <span class="chip">SvelteKit + Svelte 5</span>
         <span class="chip">TanStack Query</span>
       </div>

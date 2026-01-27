@@ -55,7 +55,7 @@
         <p class="text-base font-semibold text-slate-800">{$infoQuery.data?.info?.lerobot_version ?? '-'}</p>
       </div>
       <div>
-        <p class="label">PerCUs AI</p>
+        <p class="label">Daihen Physical AI</p>
         <p class="text-base font-semibold text-slate-800">{$infoQuery.data?.info?.percus_ai_version ?? '-'}</p>
       </div>
     </div>

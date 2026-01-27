@@ -1,0 +1,41 @@
+<script lang="ts">
+  import { Button } from 'bits-ui';
+</script>
+
+<section class="card-strong p-8">
+  <p class="section-title">HuggingFace</p>
+  <h1 class="mt-2 text-3xl font-semibold text-slate-900">モデルをインポート</h1>
+  <p class="mt-2 text-sm text-slate-600">HuggingFace からモデルを取り込みます。</p>
+</section>
+
+<section class="card p-6">
+  <div class="grid gap-4 sm:grid-cols-2">
+    <div>
+      <p class="label">repo_id</p>
+      <input class="input mt-2" placeholder="username/model" />
+    </div>
+    <div>
+      <p class="label">project</p>
+      <input class="input mt-2" placeholder="project_id" />
+    </div>
+    <div>
+      <p class="label">model name</p>
+      <input class="input mt-2" placeholder="model_name" />
+    </div>
+    <div>
+      <p class="label">dataset_id (optional)</p>
+      <input class="input mt-2" placeholder="project/dataset" />
+    </div>
+    <div>
+      <p class="label">force overwrite</p>
+      <select class="input mt-2">
+        <option>false</option>
+        <option>true</option>
+      </select>
+    </div>
+  </div>
+  <div class="mt-6 flex gap-3">
+    <Button.Root class="btn-primary">インポート</Button.Root>
+    <Button.Root class="btn-ghost" href="/storage">戻る</Button.Root>
+  </div>
+</section>

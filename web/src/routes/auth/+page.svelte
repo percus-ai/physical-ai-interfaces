@@ -7,7 +7,7 @@
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">ログアウト</h1>
-      <p class="mt-2 text-sm text-slate-600">CLIのログアウト操作に対応する画面です。</p>
+      <p class="mt-2 text-sm text-slate-600">現在のセッションを終了します。</p>
     </div>
   </div>
 </section>
