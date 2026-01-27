@@ -1,0 +1,68 @@
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --bg: #f4f6fb;
+  --bg-accent: #e7edf8;
+  --ink: #0c0d10;
+  --ink-soft: #4a5363;
+  --card: #ffffff;
+  --card-edge: rgba(12, 13, 16, 0.08);
+  --brand: #5b7cfa;
+  --brand-ink: #1e2a5a;
+  --mint: #30d5c8;
+  --sunset: #ff8b5c;
+}
+
+body {
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  background: radial-gradient(circle at 10% 20%, #eef3ff 0%, transparent 55%),
+    radial-gradient(circle at 90% 10%, #e8fff8 0%, transparent 40%),
+    linear-gradient(160deg, var(--bg) 0%, var(--bg-accent) 100%);
+  color: var(--ink);
+}
+
+h1, h2, h3, h4 {
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-slate-200/70 bg-white/80 shadow-sm backdrop-blur;
+  }
+  .card-strong {
+    @apply rounded-2xl border border-slate-200/60 bg-white shadow-glow;
+  }
+  .section-title {
+    @apply text-sm font-semibold uppercase tracking-[0.2em] text-slate-500;
+  }
+  .chip {
+    @apply inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600;
+  }
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30;
+  }
+  .label {
+    @apply text-xs font-semibold uppercase tracking-widest text-slate-500;
+  }
+  .divider {
+    @apply h-px w-full bg-slate-200/70;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-glow transition hover:translate-y-[-1px] hover:shadow-lg;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-brand/40 hover:text-brand;
+  }
+  .glass {
+    @apply rounded-3xl border border-white/60 bg-white/50 backdrop-blur;
+  }
+}
