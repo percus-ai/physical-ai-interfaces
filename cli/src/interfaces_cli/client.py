@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 import websocket
 
+from interfaces_cli.auth_session import clear_session, load_session, save_session
+
 
 def get_backend_url() -> str:
     """Get backend URL from environment or default."""
@@ -30,6 +32,25 @@ class PhiClient:
         """
         self.base_url = base_url or get_backend_url()
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self._session: Optional[Dict[str, Any]] = load_session()
+        self._apply_session()
+
+    def _apply_session(self) -> None:
+        token = None
+        if self._session:
+            token = self._session.get("access_token")
+        if token:
+            self._client.headers["Authorization"] = f"Bearer {token}"
+        else:
+            self._client.headers.pop("Authorization", None)
+
+    def _update_session(self, session: Optional[Dict[str, Any]]) -> None:
+        self._session = session
+        if session:
+            save_session(session)
+        else:
+            clear_session()
+        self._apply_session()
 
     def close(self) -> None:
         """Close the HTTP client."""
@@ -66,15 +87,28 @@ class PhiClient:
         response = self._client.post(
             "/api/auth/login",
             json={"email": email, "password": password},
+            headers={"X-Client": "cli"},
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        access_token = data.get("access_token")
+        if access_token:
+            session = {
+                "access_token": access_token,
+                "refresh_token": data.get("refresh_token"),
+                "expires_at": data.get("expires_at"),
+                "user_id": data.get("user_id"),
+            }
+            self._update_session(session)
+        return data
 
     def auth_logout(self) -> Dict[str, Any]:
         """POST /api/auth/logout - Logout."""
         response = self._client.post("/api/auth/logout")
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        self._update_session(None)
+        return data
 
     # =========================================================================
     # Analytics

@@ -68,15 +68,13 @@ from interfaces_backend.api import (
     training_router,
     user_router,
 )
-from interfaces_backend.core.auth import load_supabase_session
+from interfaces_backend.core.request_auth import build_session_from_request
+from percus_ai.db import reset_request_session, set_request_session
 
 app = FastAPI(
     title="Physical AI API",
     version="0.1.0",
 )
-
-# Load cached Supabase session if available.
-load_supabase_session()
 
 # CORS for web/tauri clients
 app.add_middleware(
@@ -86,6 +84,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def attach_supabase_session(request, call_next):
+    session = build_session_from_request(request)
+    token = set_request_session(session)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_request_session(token)
+    return response
 
 # Include API routers
 app.include_router(analytics_router)
