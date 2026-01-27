@@ -1,5 +1,18 @@
 <script lang="ts">
   import { Button } from 'bits-ui';
+  import { createQuery } from '@tanstack/svelte-query';
+  import { api } from '$lib/api/client';
+  import { formatBytes, formatDate } from '$lib/format';
+
+  const projectsQuery = createQuery({
+    queryKey: ['projects'],
+    queryFn: api.projects.list
+  });
+
+  const recordingsQuery = createQuery({
+    queryKey: ['recordings'],
+    queryFn: api.recording.list
+  });
 </script>
 
 <section class="card-strong p-8">
@@ -7,7 +20,7 @@
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">データ録画</h1>
-      <p class="mt-2 text-sm text-slate-600">プロジェクト別の録画セッション作成と進行状況を確認。</p>
+      <p class="mt-2 text-sm text-slate-600">プロジェクト一覧と録画セッションの状況を表示します。</p>
     </div>
     <Button.Root class="btn-primary">新規録画を開始</Button.Root>
   </div>
@@ -15,52 +28,41 @@
 
 <section class="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
   <div class="card p-6">
-    <h2 class="text-xl font-semibold text-slate-900">録画設定</h2>
-    <div class="mt-4 grid gap-4 sm:grid-cols-2">
-      <div>
-        <p class="label">プロジェクト</p>
-        <select class="input mt-2">
-          <option>0001_black_cube_to_tray</option>
-          <option>0002_stack_blocks</option>
-          <option>import from YAML</option>
-        </select>
-      </div>
-      <div>
-        <p class="label">エピソード数</p>
-        <input class="input mt-2" value="1" />
-      </div>
-      <div>
-        <p class="label">エピソード時間 (秒)</p>
-        <input class="input mt-2" value="60" />
-      </div>
-      <div>
-        <p class="label">リセット時間 (秒)</p>
-        <input class="input mt-2" value="10" />
-      </div>
-    </div>
-    <div class="mt-6 flex flex-wrap gap-3">
-      <Button.Root class="btn-primary">録画開始</Button.Root>
-      <Button.Root class="btn-ghost">シミュレーション</Button.Root>
+    <h2 class="text-xl font-semibold text-slate-900">プロジェクト一覧</h2>
+    <div class="mt-4 space-y-3 text-sm text-slate-600">
+      {#if $projectsQuery.isLoading}
+        <p>読み込み中...</p>
+      {:else if $projectsQuery.data?.projects?.length}
+        {#each $projectsQuery.data.projects as project}
+          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+            <span class="font-semibold text-slate-800">{project}</span>
+            <span class="chip">プロジェクト</span>
+          </div>
+        {/each}
+      {:else}
+        <p>プロジェクトがありません。</p>
+      {/if}
     </div>
   </div>
 
   <div class="card p-6">
-    <h2 class="text-xl font-semibold text-slate-900">アップロード状況</h2>
+    <h2 class="text-xl font-semibold text-slate-900">録画サマリ</h2>
     <div class="mt-4 space-y-4 text-sm text-slate-600">
       <div>
-        <p class="label">現在のファイル</p>
-        <p class="text-base font-semibold text-slate-800">episode_0004.mp4</p>
+        <p class="label">総録画数</p>
+        <p class="text-base font-semibold text-slate-800">{$recordingsQuery.data?.total ?? 0}</p>
       </div>
       <div>
-        <p class="label">転送進行</p>
-        <div class="mt-2 h-2 w-full rounded-full bg-slate-200">
-          <div class="h-2 w-2/3 rounded-full bg-brand"></div>
-        </div>
-        <p class="mt-2 text-xs text-slate-500">640MB / 1.0GB</p>
+        <p class="label">最新録画</p>
+        <p class="text-base font-semibold text-slate-800">
+          {formatDate($recordingsQuery.data?.recordings?.[0]?.created_at)}
+        </p>
       </div>
       <div>
-        <p class="label">ファイル数</p>
-        <p class="text-base font-semibold text-slate-800">3 / 12</p>
+        <p class="label">最新プロジェクト</p>
+        <p class="text-base font-semibold text-slate-800">
+          {$recordingsQuery.data?.recordings?.[0]?.project_id ?? '-'}
+        </p>
       </div>
     </div>
   </div>
@@ -78,22 +80,24 @@
           <th class="pb-3">セッション</th>
           <th class="pb-3">プロジェクト</th>
           <th class="pb-3">サイズ</th>
-          <th class="pb-3">状態</th>
+          <th class="pb-3">作成日時</th>
         </tr>
       </thead>
       <tbody class="text-slate-600">
-        <tr class="border-t border-slate-200/60">
-          <td class="py-3">20260126_2032_user1</td>
-          <td class="py-3">black_cube_to_tray</td>
-          <td class="py-3">12.4 GB</td>
-          <td class="py-3"><span class="chip">完了</span></td>
-        </tr>
-        <tr class="border-t border-slate-200/60">
-          <td class="py-3">20260126_1510_user2</td>
-          <td class="py-3">stack_blocks</td>
-          <td class="py-3">8.9 GB</td>
-          <td class="py-3"><span class="chip">アップロード中</span></td>
-        </tr>
+        {#if $recordingsQuery.isLoading}
+          <tr><td class="py-3" colspan="4">読み込み中...</td></tr>
+        {:else if $recordingsQuery.data?.recordings?.length}
+          {#each $recordingsQuery.data.recordings as recording}
+            <tr class="border-t border-slate-200/60">
+              <td class="py-3">{recording.recording_id}</td>
+              <td class="py-3">{recording.project_id}</td>
+              <td class="py-3">{formatBytes((recording.size_mb ?? 0) * 1024 * 1024)}</td>
+              <td class="py-3">{formatDate(recording.created_at)}</td>
+            </tr>
+          {/each}
+        {:else}
+          <tr><td class="py-3" colspan="4">録画がありません。</td></tr>
+        {/if}
       </tbody>
     </table>
   </div>

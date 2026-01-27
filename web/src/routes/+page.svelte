@@ -1,5 +1,28 @@
 <script lang="ts">
   import { Button } from 'bits-ui';
+  import { createQuery } from '@tanstack/svelte-query';
+  import { api } from '$lib/api/client';
+  import { formatBytes, formatDate, formatPercent } from '$lib/format';
+
+  const overviewQuery = createQuery({
+    queryKey: ['analytics', 'overview'],
+    queryFn: api.analytics.overview
+  });
+
+  const systemHealthQuery = createQuery({
+    queryKey: ['system', 'health'],
+    queryFn: api.system.health
+  });
+
+  const resourcesQuery = createQuery({
+    queryKey: ['system', 'resources'],
+    queryFn: api.system.resources
+  });
+
+  const storageUsageQuery = createQuery({
+    queryKey: ['storage', 'usage'],
+    queryFn: api.storage.usage
+  });
 </script>
 
 <section class="card-strong p-8">
@@ -55,20 +78,30 @@
   <div class="card p-6">
     <p class="section-title">Recent Activity</p>
     <h3 class="mt-2 text-lg font-semibold text-slate-900">最新の操作ログ</h3>
-    <div class="mt-4 space-y-3 text-sm text-slate-600">
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>録画: 0001_black_cube_to_tray</span>
-        <span class="chip">進行中</span>
+    {#if $overviewQuery.isLoading}
+      <p class="mt-4 text-sm text-slate-500">読み込み中...</p>
+    {:else if $overviewQuery.data}
+      <div class="mt-4 space-y-3 text-sm text-slate-600">
+        <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+          <span>プロジェクト数</span>
+          <span class="chip">{$overviewQuery.data.stats?.total_projects ?? 0}</span>
+        </div>
+        <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+          <span>エピソード数</span>
+          <span class="chip">{$overviewQuery.data.stats?.total_episodes ?? 0}</span>
+        </div>
+        <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+          <span>学習ジョブ数</span>
+          <span class="chip">{$overviewQuery.data.stats?.total_training_jobs ?? 0}</span>
+        </div>
+        <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+          <span>モデル数</span>
+          <span class="chip">{$overviewQuery.data.stats?.total_models ?? 0}</span>
+        </div>
       </div>
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>学習: pi05_a1b2c3_260109_143052</span>
-        <span class="chip">待機</span>
-      </div>
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>データセット: project/session_20260107</span>
-        <span class="chip">完了</span>
-      </div>
-    </div>
+    {:else}
+      <p class="mt-4 text-sm text-slate-500">データがありません。</p>
+    {/if}
   </div>
   <div class="card p-6">
     <p class="section-title">System</p>
@@ -76,15 +109,30 @@
     <div class="mt-4 space-y-4 text-sm text-slate-600">
       <div>
         <p class="label">Backend</p>
-        <p class="text-base font-semibold text-slate-800">http://localhost:8000</p>
+        <p class="text-base font-semibold text-slate-800">
+          {$systemHealthQuery.data?.status ?? 'unknown'}
+        </p>
       </div>
       <div>
-        <p class="label">GPU Pool</p>
-        <p class="text-base font-semibold text-slate-800">H100 / A100 / B200</p>
+        <p class="label">CPU使用率</p>
+        <p class="text-base font-semibold text-slate-800">
+          {formatPercent($resourcesQuery.data?.resources?.cpu_percent)}
+        </p>
       </div>
       <div>
-        <p class="label">Storage</p>
-        <p class="text-base font-semibold text-slate-800">R2 (s3://daihen/v2)</p>
+        <p class="label">メモリ使用量</p>
+        <p class="text-base font-semibold text-slate-800">
+          {formatBytes(($resourcesQuery.data?.resources?.memory_used_gb ?? 0) * 1024 ** 3)} / {formatBytes(($resourcesQuery.data?.resources?.memory_total_gb ?? 0) * 1024 ** 3)}
+        </p>
+      </div>
+      <div>
+        <p class="label">ストレージ</p>
+        <p class="text-base font-semibold text-slate-800">
+          {formatBytes($storageUsageQuery.data?.datasets_size_bytes)}
+        </p>
+      </div>
+      <div class="text-xs text-slate-500">
+        更新: {formatDate($resourcesQuery.data?.timestamp)}
       </div>
     </div>
     <div class="mt-6">

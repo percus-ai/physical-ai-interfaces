@@ -2,15 +2,29 @@
 
 CLIとWebUIで共通化すべきが後回しの項目をここに記録。
 
-## バックエンドへ寄せる候補
-- ポリシー種別・推奨パラメータ一覧（train: POLICY_TYPES）
-- GPUモデル / GPU数 / torch nightly要否（train: GPU_MODELS, GPU_COUNTS）
-- データセット一覧、プロジェクト一覧（record/storage/setup）
-- 学習ジョブ一覧とステータス（train）
-- デバイス検出 / シリアルポート一覧 / カメラ一覧（setup）
-- ストレージ使用量 / アーカイブ一覧（storage）
-- テレオペ・推論のセッション状態（operate）
+## 既にAPI連携済み
+- /api/analytics/overview
+- /api/system/health, /api/system/resources, /api/system/info, /api/system/gpu, /api/system/logs
+- /api/projects (一覧)
+- /api/recording/recordings
+- /api/storage/datasets, /api/storage/models, /api/storage/usage, /api/storage/archive
+- /api/training/jobs, /api/training/gpu-availability
+- /api/config, /api/config/environments
+- /api/user/config, /api/user/devices
+- /api/hardware, /api/hardware/cameras, /api/hardware/serial-ports
+- /api/teleop/local/sessions
+- /api/inference/models, /api/inference/sessions
 
-## UIでの仮置き
-- 画面内の一覧・数値はダミー表示
-- API連携は `src/lib/api/client.ts` を入口に統一
+## CLI値を参照している箇所
+- POLICY_TYPES / GPU_MODELS / GPU_COUNTS: `interfaces/web/src/lib/policies.ts`
+
+## バックエンドへ寄せる候補（未整備/不足）
+- ポリシー種別・推奨パラメータ一覧（CLIの POLICY_TYPES をAPIで返す）
+- 学習ジョブ作成ウィザードのデフォルト値（steps/batch/save_freq）
+- テレオペ/推論の詳細セッション状態（WebSocket進行状況）
+- 録画進行中のステータス/アップロード進捗
+
+## UIでの残タスク
+- ボタン操作（開始/停止/作成/削除/編集）
+- リアルタイム更新（WebSocket購読）
+- エラーハンドリングとトースト

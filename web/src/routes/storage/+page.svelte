@@ -1,5 +1,28 @@
 <script lang="ts">
   import { Button } from 'bits-ui';
+  import { createQuery } from '@tanstack/svelte-query';
+  import { api } from '$lib/api/client';
+  import { formatBytes } from '$lib/format';
+
+  const datasetsQuery = createQuery({
+    queryKey: ['storage', 'datasets'],
+    queryFn: () => api.storage.datasets()
+  });
+
+  const modelsQuery = createQuery({
+    queryKey: ['storage', 'models'],
+    queryFn: api.storage.models
+  });
+
+  const usageQuery = createQuery({
+    queryKey: ['storage', 'usage'],
+    queryFn: api.storage.usage
+  });
+
+  const archiveQuery = createQuery({
+    queryKey: ['storage', 'archive'],
+    queryFn: api.storage.archive
+  });
 </script>
 
 <section class="card-strong p-8">
@@ -23,14 +46,18 @@
       </div>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>project/session_20260107 (12.4GB)</span>
-        <span class="chip">active</span>
-      </div>
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>project/session_20260105 (8.1GB)</span>
-        <span class="chip">active</span>
-      </div>
+      {#if $datasetsQuery.isLoading}
+        <p>読み込み中...</p>
+      {:else if $datasetsQuery.data?.datasets?.length}
+        {#each $datasetsQuery.data.datasets as dataset}
+          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+            <span>{dataset.id} ({formatBytes(dataset.size_bytes)})</span>
+            <span class="chip">{dataset.status}</span>
+          </div>
+        {/each}
+      {:else}
+        <p>データセットがありません。</p>
+      {/if}
     </div>
   </div>
 
@@ -39,15 +66,19 @@
     <div class="mt-4 space-y-4 text-sm text-slate-600">
       <div>
         <p class="label">データセット</p>
-        <p class="text-base font-semibold text-slate-800">2.1 TB / 6.0 TB</p>
+        <p class="text-base font-semibold text-slate-800">{formatBytes($usageQuery.data?.datasets_size_bytes)}</p>
       </div>
       <div>
         <p class="label">モデル</p>
-        <p class="text-base font-semibold text-slate-800">820 GB / 2.0 TB</p>
+        <p class="text-base font-semibold text-slate-800">{formatBytes($usageQuery.data?.models_size_bytes)}</p>
       </div>
       <div>
         <p class="label">アーカイブ</p>
-        <p class="text-base font-semibold text-slate-800">410 GB</p>
+        <p class="text-base font-semibold text-slate-800">{formatBytes($usageQuery.data?.archive_size_bytes)}</p>
+      </div>
+      <div>
+        <p class="label">合計</p>
+        <p class="text-base font-semibold text-slate-800">{formatBytes($usageQuery.data?.total_size_bytes)}</p>
       </div>
     </div>
   </div>
@@ -60,14 +91,18 @@
       <Button.Root class="btn-ghost">同期</Button.Root>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>pi05_base_finetuned_v2</span>
-        <span class="chip">R2</span>
-      </div>
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>act_policy_20260120</span>
-        <span class="chip">local</span>
-      </div>
+      {#if $modelsQuery.isLoading}
+        <p>読み込み中...</p>
+      {:else if $modelsQuery.data?.models?.length}
+        {#each $modelsQuery.data.models as model}
+          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+            <span>{model.id}</span>
+            <span class="chip">{model.status}</span>
+          </div>
+        {/each}
+      {:else}
+        <p>モデルがありません。</p>
+      {/if}
     </div>
   </div>
 
@@ -77,14 +112,24 @@
       <Button.Root class="btn-ghost">一覧</Button.Root>
     </div>
     <div class="mt-4 space-y-3 text-sm text-slate-600">
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>archive/datasets/20251230</span>
-        <span class="chip">32 items</span>
-      </div>
-      <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
-        <span>archive/models/20251201</span>
-        <span class="chip">9 items</span>
-      </div>
+      {#if $archiveQuery.isLoading}
+        <p>読み込み中...</p>
+      {:else if $archiveQuery.data?.datasets?.length || $archiveQuery.data?.models?.length}
+        {#each $archiveQuery.data.datasets ?? [] as dataset}
+          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+            <span>{dataset.id}</span>
+            <span class="chip">dataset</span>
+          </div>
+        {/each}
+        {#each $archiveQuery.data.models ?? [] as model}
+          <div class="flex items-center justify-between rounded-xl border border-slate-200/60 bg-white/70 px-4 py-3">
+            <span>{model.id}</span>
+            <span class="chip">model</span>
+          </div>
+        {/each}
+      {:else}
+        <p>アーカイブは空です。</p>
+      {/if}
     </div>
   </div>
 </section>
