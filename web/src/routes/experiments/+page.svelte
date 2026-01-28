@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { Button } from 'bits-ui';
+  import { Button, DropdownMenu } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
   import { formatDate, formatPercent } from '$lib/format';
+  import { goto } from '$app/navigation';
 
   type ModelSummary = {
     id: string;
@@ -66,8 +67,16 @@
   let summariesLoading = false;
   let summariesError = '';
   let summaryKey = '';
+  let experimentsError = '';
 
   $: experiments = $experimentsQuery.data?.experiments ?? [];
+  $: experimentsError =
+    $experimentsQuery.isError
+      ? $experimentsQuery.error instanceof Error
+        ? $experimentsQuery.error.message
+        : '実験一覧の取得に失敗しました。'
+      : '';
+  $: displayCount = experimentsError ? '-' : String(experiments.length);
   $: {
     const key = experiments.map((exp) => exp.id).join('|');
     if (key !== summaryKey) {
@@ -177,11 +186,14 @@
     </label>
     <div class="text-sm text-slate-600">
       <p class="label">表示件数</p>
-      <p class="mt-2 text-xl font-semibold text-slate-800">{experiments.length}</p>
+      <p class="mt-2 text-xl font-semibold text-slate-800">{displayCount}</p>
       {#if summariesLoading}
         <p class="mt-1 text-xs text-slate-500">集計を取得中...</p>
       {:else if summariesError}
         <p class="mt-1 text-xs text-rose-600">{summariesError}</p>
+      {/if}
+      {#if experimentsError}
+        <p class="mt-1 text-xs text-rose-600">{experimentsError}</p>
       {/if}
     </div>
   </div>
@@ -210,6 +222,8 @@
       <tbody class="text-slate-600">
         {#if $experimentsQuery.isLoading}
           <tr><td class="py-3" colspan="9">読み込み中...</td></tr>
+        {:else if experimentsError}
+          <tr><td class="py-3" colspan="9">実験一覧の取得に失敗しました。</td></tr>
         {:else if experiments.length}
           {#each experiments as exp}
             <tr class="border-t border-slate-200/60">
@@ -230,11 +244,33 @@
               <td class="py-3">{summariesLoading ? '-' : analysisById[exp.id] ? 'あり' : 'なし'}</td>
               <td class="py-3">{formatDate(exp.updated_at)}</td>
               <td class="py-3">
-                <div class="flex flex-wrap gap-2">
-                  <a class="btn-ghost text-xs" href={`/experiments/${exp.id}`}>詳細</a>
-                  <a class="btn-ghost text-xs" href={`/experiments/${exp.id}/evaluations`}>評価</a>
-                  <a class="btn-ghost text-xs" href={`/experiments/${exp.id}/analyses`}>考察</a>
-                </div>
+                <DropdownMenu.Root>
+                  <DropdownMenu.Trigger class="btn-ghost text-xs">操作</DropdownMenu.Trigger>
+                  <DropdownMenu.Content
+                    class="z-50 min-w-[140px] rounded-xl border border-slate-200/80 bg-white/95 p-2 text-xs text-slate-700 shadow-lg backdrop-blur"
+                    sideOffset={6}
+                    align="end"
+                  >
+                    <DropdownMenu.Item
+                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      onSelect={() => goto(`/experiments/${exp.id}`)}
+                    >
+                      詳細
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      onSelect={() => goto(`/experiments/${exp.id}/evaluations`)}
+                    >
+                      評価
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      onSelect={() => goto(`/experiments/${exp.id}/analyses`)}
+                    >
+                      考察
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Root>
               </td>
             </tr>
           {/each}
