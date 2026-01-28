@@ -28,9 +28,6 @@
   let metricsLoading = false;
   let metricsError = '';
 
-  let progress: { step?: string; loss?: string } | null = null;
-  let progressLoading = false;
-
   let copied = false;
   let autoRefresh = true;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -71,7 +68,10 @@
   const wsUrl = (path: string) => getBackendUrl().replace(/^http/, 'ws') + path;
 
   const refresh = async () => {
-    await jobQuery.refetch();
+    const refetch = $jobQuery?.refetch;
+    if (typeof refetch === 'function') {
+      await refetch();
+    }
   };
 
   const stopJob = async () => {
@@ -112,18 +112,6 @@
       metricsError = error instanceof Error ? error.message : 'メトリクス取得に失敗しました。';
     } finally {
       metricsLoading = false;
-    }
-  };
-
-  const fetchProgress = async () => {
-    progressLoading = true;
-    try {
-      const result = await api.training.progress(jobId);
-      progress = result as typeof progress;
-    } catch {
-      progress = null;
-    } finally {
-      progressLoading = false;
     }
   };
 
@@ -206,8 +194,7 @@
     if (refreshTimer || !autoRefresh) return;
     refreshTimer = setInterval(() => {
       if (!autoRefresh || !isRunning) return;
-      jobQuery.refetch();
-      fetchProgress();
+      $jobQuery?.refetch?.();
       refreshTick += 1;
       if (refreshTick % 3 === 0) {
         fetchMetrics();
@@ -231,7 +218,6 @@
   }
 
   onMount(() => {
-    fetchProgress();
     fetchMetrics();
     if (isRunning) {
       startAutoRefresh();
@@ -348,6 +334,41 @@
     </section>
 
     <section class="card p-6">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-xl font-semibold text-slate-900">ログ内容</h2>
+        <span class="text-xs text-slate-500">表示: {logsType === 'training' ? '学習ログ' : 'セットアップログ'}</span>
+      </div>
+      <div class="mt-4 space-y-4 text-sm text-slate-600">
+        {#if logsError}
+          <p class="text-sm text-rose-600">{logsError}</p>
+        {/if}
+        {#if streamError}
+          <p class="text-sm text-rose-600">{streamError}</p>
+        {/if}
+        {#if isRunning}
+          <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-xs text-slate-600">
+            <p class="label">ログ {logsSource === 'r2' ? '(R2)' : ''}</p>
+            {#if logs}
+              <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{logs}</pre>
+            {:else}
+              <p class="mt-2 text-xs text-slate-500">ログは未取得です。</p>
+            {/if}
+          </div>
+          <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-xs text-slate-600">
+            <p class="label">ストリーミングログ</p>
+            {#if streamLines.length}
+              <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{streamLines.join('\n')}</pre>
+            {:else}
+              <p class="mt-2 text-xs text-slate-500">ストリーミングは停止中です。</p>
+            {/if}
+          </div>
+        {:else}
+          <p class="text-sm text-slate-500">実行中ではないため、ログはダウンロードのみ対応しています。</p>
+        {/if}
+      </div>
+    </section>
+
+    <section class="card p-6">
       <div class="flex items-center justify-between">
         <h2 class="text-xl font-semibold text-slate-900">設定</h2>
       </div>
@@ -439,6 +460,9 @@
           </select>
         </label>
         {#if isRunning}
+          <button class="btn-ghost" type="button" on:click={downloadLogs}>
+            ログをダウンロード
+          </button>
           <label class="text-sm font-semibold text-slate-700">
             <span class="label">取得行数</span>
             <input class="input mt-2" type="number" min="1" bind:value={logLines} />
@@ -459,24 +483,6 @@
           <button class="btn-primary" type="button" on:click={downloadLogs}>
             ログをダウンロード
           </button>
-        {/if}
-        {#if logsError}
-          <p class="text-sm text-rose-600">{logsError}</p>
-        {/if}
-        {#if isRunning && logs}
-          <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-xs text-slate-600">
-            <p class="label">ログ {logsSource === 'r2' ? '(R2)' : ''}</p>
-            <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{logs}</pre>
-          </div>
-        {/if}
-        {#if isRunning && streamError}
-          <p class="text-sm text-rose-600">{streamError}</p>
-        {/if}
-        {#if isRunning && streamLines.length}
-          <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-xs text-slate-600">
-            <p class="label">ストリーミングログ</p>
-            <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{streamLines.join('\n')}</pre>
-          </div>
         {/if}
       </div>
     </section>

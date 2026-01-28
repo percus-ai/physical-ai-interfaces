@@ -403,6 +403,7 @@ def _generate_env_file(
     policy_type: Optional[str],
     auto_delete: bool = True,
     supabase_access_token: Optional[str] = None,
+    supabase_refresh_token: Optional[str] = None,
     supabase_user_id: Optional[str] = None,
 ) -> str:
     """Generate .env file content with required credentials."""
@@ -500,15 +501,18 @@ def _generate_env_file(
 
     # Supabase credentials for remote status updates
     supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
-    if supabase_url and supabase_key:
+    supabase_secret_key = os.environ.get("SUPABASE_SECRET_KEY")
+    supabase_anon_key = os.environ.get("SUPABASE_ANON_KEY")
+    if supabase_url and (supabase_secret_key or supabase_anon_key):
         lines.append(f"SUPABASE_URL={supabase_url}")
-        if os.environ.get("SUPABASE_SERVICE_ROLE_KEY"):
-            lines.append(f"SUPABASE_SERVICE_ROLE_KEY={supabase_key}")
-        else:
-            lines.append(f"SUPABASE_ANON_KEY={supabase_key}")
+        if supabase_secret_key:
+            lines.append(f"SUPABASE_SECRET_KEY={supabase_secret_key}")
+        if supabase_anon_key:
+            lines.append(f"SUPABASE_ANON_KEY={supabase_anon_key}")
     if supabase_access_token:
         lines.append(f"SUPABASE_ACCESS_TOKEN={supabase_access_token}")
+    if supabase_refresh_token:
+        lines.append(f"SUPABASE_REFRESH_TOKEN={supabase_refresh_token}")
     if supabase_user_id:
         lines.append(f"SUPABASE_USER_ID={supabase_user_id}")
 
@@ -801,6 +805,26 @@ def _check_instance_via_api(instance_id: str) -> Optional[str]:
         return instance.status
     except Exception:
         return None
+
+
+def _refresh_job_status_from_instance(job_data: dict) -> Optional[str]:
+    instance_id = job_data.get("instance_id")
+    if not instance_id:
+        return None
+    instance_status = _check_instance_via_api(instance_id)
+    if instance_status is None:
+        job_data["status"] = "terminated"
+        job_data["termination_reason"] = "INSTANCE_NOT_FOUND"
+        job_data["completed_at"] = datetime.now().isoformat()
+        _save_job(job_data)
+        return instance_status
+    if instance_status in ("offline", "error", "discontinued"):
+        job_data["status"] = "terminated"
+        job_data["termination_reason"] = "INSTANCE_TERMINATED"
+        job_data["completed_at"] = datetime.now().isoformat()
+        _save_job(job_data)
+        return instance_status
+    return instance_status
 
 
 def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
@@ -1987,8 +2011,18 @@ async def get_job_logs(
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
+    instance_status = None
+    if job_data.get("status") in ("running", "starting", "deploying"):
+        instance_status = _refresh_job_status_from_instance(job_data)
+
+    remote_allowed = True
+    if instance_status in (None, "offline", "error", "discontinued"):
+        remote_allowed = False
+
     source = "remote"
-    logs = _get_remote_logs(job_data, lines, log_type=log_type)
+    logs = None
+    if remote_allowed:
+        logs = _get_remote_logs(job_data, lines, log_type=log_type)
     if logs is None:
         source = "r2"
         logs = _get_logs_from_r2(job_data, lines, log_type)
@@ -2010,12 +2044,26 @@ async def download_job_logs(
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
+    instance_status = None
+    if job_data.get("status") in ("running", "starting", "deploying"):
+        instance_status = _refresh_job_status_from_instance(job_data)
+
+    remote_allowed = True
+    if instance_status in (None, "offline", "error", "discontinued"):
+        remote_allowed = False
+
     if _should_try_r2_first(job_data):
         logs = _get_full_logs_from_r2(job_data, log_type)
-        if logs is None:
-            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=15)
+        if logs is None and remote_allowed:
+            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=30)
+            if logs is None:
+                logs = _get_remote_logs(job_data, lines=5000, log_type=log_type)
     else:
-        logs = _get_remote_log_file(job_data, log_type=log_type, timeout=15)
+        logs = None
+        if remote_allowed:
+            logs = _get_remote_log_file(job_data, log_type=log_type, timeout=30)
+            if logs is None:
+                logs = _get_remote_logs(job_data, lines=5000, log_type=log_type)
         if logs is None:
             logs = _get_full_logs_from_r2(job_data, log_type)
     if logs is None:
@@ -2570,6 +2618,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
     job_id = str(uuid.uuid4())
     session = get_supabase_session() or {}
     supabase_access_token = session.get("access_token")
+    supabase_refresh_token = session.get("refresh_token")
     supabase_user_id = session.get("user_id")
 
     # Check if Verda credentials are available
@@ -2677,6 +2726,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             job_id=job_id,
             request=request,
             supabase_access_token=supabase_access_token,
+            supabase_refresh_token=supabase_refresh_token,
             supabase_user_id=supabase_user_id,
         )
 
@@ -2860,9 +2910,11 @@ def _create_job_with_progress(
 
     token = set_request_session(supabase_session)
     supabase_access_token = None
+    supabase_refresh_token = None
     supabase_user_id = None
     if supabase_session:
         supabase_access_token = supabase_session.get("access_token")
+        supabase_refresh_token = supabase_session.get("refresh_token")
         supabase_user_id = supabase_session.get("user_id")
 
     try:
@@ -3139,6 +3191,7 @@ def _create_job_with_progress(
                     instance_id,
                     policy.type if policy else None,
                     supabase_access_token=supabase_access_token,
+                    supabase_refresh_token=supabase_refresh_token,
                     supabase_user_id=supabase_user_id,
                 )
                 conn.upload_content(env_content, f"{remote_run_dir}/.env")
@@ -3378,6 +3431,7 @@ async def _deploy_and_start_training(
     job_id: str,
     request: JobCreateRequest,
     supabase_access_token: Optional[str] = None,
+    supabase_refresh_token: Optional[str] = None,
     supabase_user_id: Optional[str] = None,
 ) -> None:
     """Background task to deploy and start training.
@@ -3385,7 +3439,7 @@ async def _deploy_and_start_training(
     This waits for the instance IP, uploads files, and starts training.
     Uses SSHConnection and RemoteExecutor for consistency with other code paths.
     """
-    session = build_session_from_tokens(supabase_access_token)
+    session = build_session_from_tokens(supabase_access_token, supabase_refresh_token)
     token = set_request_session(session)
     try:
         job_data = _load_job(job_id)
@@ -3488,6 +3542,7 @@ async def _deploy_and_start_training(
                     instance_id,
                     request.policy.type if request.policy else None,
                     supabase_access_token=supabase_access_token,
+                    supabase_refresh_token=supabase_refresh_token,
                     supabase_user_id=supabase_user_id,
                 )
                 conn.upload_content(env_content, f"{remote_run_dir}/.env")
