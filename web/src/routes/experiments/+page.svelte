@@ -4,6 +4,10 @@
   import { api } from '$lib/api/client';
   import { formatDate, formatPercent } from '$lib/format';
   import { goto } from '$app/navigation';
+  import CheckCircle from 'phosphor-svelte/lib/CheckCircle';
+  import DotsThree from 'phosphor-svelte/lib/DotsThree';
+  import FileText from 'phosphor-svelte/lib/FileText';
+  import Lightbulb from 'phosphor-svelte/lib/Lightbulb';
 
   type ModelSummary = {
     id: string;
@@ -245,28 +249,37 @@
               <td class="py-3">{formatDate(exp.updated_at)}</td>
               <td class="py-3">
                 <DropdownMenu.Root>
-                  <DropdownMenu.Trigger class="btn-ghost text-xs">操作</DropdownMenu.Trigger>
+                  <DropdownMenu.Trigger
+                    class="btn-ghost h-8 w-8 p-0 text-slate-600"
+                    aria-label="操作メニュー"
+                    title="操作"
+                  >
+                    <DotsThree size={18} weight="bold" />
+                  </DropdownMenu.Trigger>
                   <DropdownMenu.Content
                     class="z-50 min-w-[140px] rounded-xl border border-slate-200/80 bg-white/95 p-2 text-xs text-slate-700 shadow-lg backdrop-blur"
                     sideOffset={6}
                     align="end"
                   >
                     <DropdownMenu.Item
-                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      class="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
                       onSelect={() => goto(`/experiments/${exp.id}`)}
                     >
+                      <FileText size={16} class="text-slate-500" />
                       詳細
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      class="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
                       onSelect={() => goto(`/experiments/${exp.id}/evaluations`)}
                     >
+                      <CheckCircle size={16} class="text-slate-500" />
                       評価
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                      class="cursor-pointer rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
+                      class="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 font-semibold text-slate-700 hover:bg-slate-100"
                       onSelect={() => goto(`/experiments/${exp.id}/analyses`)}
                     >
+                      <Lightbulb size={16} class="text-slate-500" />
                       考察
                     </DropdownMenu.Item>
                   </DropdownMenu.Content>
