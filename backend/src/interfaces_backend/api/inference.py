@@ -29,6 +29,7 @@ from percus_ai.db import get_supabase_client
 from percus_ai.gpu_host.models import StartRequest, StopRequest
 from percus_ai.inference.camera_maps import get_camera_maps_for_model, get_policy_type_from_config
 from percus_ai.storage.paths import get_models_dir, get_project_root
+from percus_ai.storage.r2_db_sync import R2DBSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,10 @@ def _ensure_runner_service() -> None:
 def _resolve_model_path(model_id: str) -> Path:
     model_path = MODELS_DIR / model_id
     if model_path.exists():
+        if not _resolve_model_config_path(model_path):
+            raise HTTPException(status_code=404, detail=f"Model config.json not found: {model_path}")
         return model_path
+
     client = get_supabase_client()
     rows = (
         client.table("models")
@@ -99,13 +103,42 @@ def _resolve_model_path(model_id: str) -> Path:
         .data
         or []
     )
-    if rows:
-        row = rows[0]
-        name = row.get("name")
-        if name:
-            candidate = MODELS_DIR / str(name)
-            if candidate.exists():
-                return candidate
+    if not rows:
+        rows = (
+            client.table("models")
+            .select("*")
+            .eq("name", model_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+    row = rows[0] if rows else {}
+    resolved_id = row.get("id") or model_id
+    model_path = MODELS_DIR / str(resolved_id)
+    if model_path.exists():
+        if not _resolve_model_config_path(model_path):
+            raise HTTPException(status_code=404, detail=f"Model config.json not found: {model_path}")
+        return model_path
+
+    sync_service = R2DBSyncService()
+    sync_result = sync_service.ensure_model_local(str(resolved_id), auto_download=True)
+    if sync_result.success and model_path.exists():
+        if not _resolve_model_config_path(model_path):
+            raise HTTPException(status_code=404, detail=f"Model config.json not found: {model_path}")
+        return model_path
+
+    name = row.get("name")
+    if name:
+        candidate = MODELS_DIR / str(name)
+        if candidate.exists():
+            if not _resolve_model_config_path(candidate):
+                raise HTTPException(status_code=404, detail=f"Model config.json not found: {candidate}")
+            return candidate
+
+    if not sync_result.success:
+        raise HTTPException(status_code=502, detail=f"Model download failed: {sync_result.message}")
     raise HTTPException(status_code=404, detail=f"Model not found locally: {model_id}")
 
 
@@ -143,6 +176,19 @@ def _load_model_config(model_path: Path) -> dict:
         return json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _resolve_model_config_path(model_path: Path) -> Optional[Path]:
+    if model_path.is_file() and model_path.name == "config.json":
+        return model_path
+    if model_path.is_dir():
+        root_config = model_path / "config.json"
+        if root_config.exists():
+            return root_config
+        nested_config = model_path / "pretrained_model" / "config.json"
+        if nested_config.exists():
+            return nested_config
+    return None
 
 
 def _extract_camera_shapes(config: dict) -> dict[str, list[int]]:

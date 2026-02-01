@@ -312,6 +312,17 @@ export const api = {
   },
   inference: {
     models: () => fetchApi('/api/inference/models'),
-    sessions: () => fetchApi('/api/inference/sessions')
+    deviceCompatibility: () => fetchApi('/api/inference/device-compatibility'),
+    runnerStatus: () => fetchApi('/api/inference/runner/status'),
+    runnerStart: (payload: Record<string, unknown>) =>
+      fetchApi('/api/inference/runner/start', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    runnerStop: (payload: Record<string, unknown>) =>
+      fetchApi('/api/inference/runner/stop', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      })
   }
 };
