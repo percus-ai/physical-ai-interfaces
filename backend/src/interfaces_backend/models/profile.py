@@ -105,3 +105,8 @@ class ProfileInstanceStatusResponse(BaseModel):
 class VlaborStatusResponse(BaseModel):
     status: str = Field("unknown", description="running | stopped | unknown")
     service: str = Field("vlabor", description="compose service name")
+    state: Optional[str] = None
+    status_detail: Optional[str] = None
+    running_for: Optional[str] = None
+    created_at: Optional[str] = None
+    container_id: Optional[str] = None

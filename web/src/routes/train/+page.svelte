@@ -95,7 +95,7 @@
 <section class="card p-6">
   <div class="flex items-center justify-between">
     <h2 class="text-xl font-semibold text-slate-900">学習ジョブ一覧</h2>
-    <button class="btn-ghost" type="button" on:click={() => $jobsQuery?.refetch?.()}>更新</button>
+    <Button.Root class="btn-ghost" type="button" onclick={() => $jobsQuery?.refetch?.()}>更新</Button.Root>
   </div>
   <div class="mt-4 space-y-3 text-sm text-slate-600">
     {#if $jobsQuery.isLoading}

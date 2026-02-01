@@ -75,7 +75,7 @@
       <h1 class="text-3xl font-semibold text-slate-900">システム情報</h1>
       <p class="mt-2 text-sm text-slate-600">環境状態と依存関係を可視化。</p>
     </div>
-    <button class="btn-ghost" type="button" on:click={refetchAll}>再チェック</button>
+    <Button.Root class="btn-ghost" type="button" onclick={refetchAll}>再チェック</Button.Root>
   </div>
 </section>
 

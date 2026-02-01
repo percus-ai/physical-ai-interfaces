@@ -213,10 +213,10 @@
   <div class="flex flex-wrap items-center justify-between gap-3">
     <h2 class="text-xl font-semibold text-slate-900">考察ブロック</h2>
     <div class="flex flex-wrap gap-2">
-      <button class="btn-ghost" type="button" on:click={addBlock}>ブロック追加</button>
-      <button class="btn-primary" type="button" on:click={handleSave} disabled={submitting}>
+      <Button.Root class="btn-ghost" type="button" onclick={addBlock}>ブロック追加</Button.Root>
+      <Button.Root class="btn-primary" type="button" onclick={handleSave} disabled={submitting}>
         保存
-      </button>
+      </Button.Root>
     </div>
   </div>
 
@@ -241,9 +241,9 @@
         <div class="rounded-2xl border border-slate-200/70 bg-white/80 p-4 shadow-sm">
           <div class="flex items-center justify-between">
             <p class="font-semibold text-slate-800">ブロック {index + 1}</p>
-            <button class="btn-ghost text-xs" type="button" on:click={() => removeBlock(index)}>
+            <Button.Root class="btn-ghost text-xs" type="button" onclick={() => removeBlock(index)}>
               削除
-            </button>
+            </Button.Root>
           </div>
           <div class="mt-3 grid gap-3">
             <label class="text-sm font-semibold text-slate-700">
@@ -296,15 +296,19 @@
                           準備中
                         </div>
                       {/if}
-                      <button
+                      <Button.Root
                         class="absolute right-1 top-1 rounded-full bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-white opacity-0 transition group-hover:opacity-100"
                         type="button"
-                        on:click|stopPropagation|preventDefault={() => handleRemoveImage(index, key)}
+                        onclick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          handleRemoveImage(index, key);
+                        }}
                         aria-label="画像を削除"
                         title="削除"
                       >
                         削除
-                      </button>
+                      </Button.Root>
                     </div>
                   {/each}
                 </div>

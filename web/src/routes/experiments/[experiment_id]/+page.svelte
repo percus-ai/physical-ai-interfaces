@@ -231,10 +231,10 @@
       <p class="text-sm text-emerald-600">{success}</p>
     {/if}
     <div class="flex flex-wrap gap-3">
-      <button class="btn-primary" type="button" on:click={handleUpdate} disabled={submitting}>
+      <Button.Root class="btn-primary" type="button" onclick={handleUpdate} disabled={submitting}>
         更新
-      </button>
-      <button class="btn-ghost" type="button" on:click={handleDelete}>削除</button>
+      </Button.Root>
+      <Button.Root class="btn-ghost" type="button" onclick={handleDelete}>削除</Button.Root>
     </div>
   </div>
 </section>

@@ -311,8 +311,8 @@
     <div class="flex flex-wrap items-center justify-between gap-3">
       <h2 class="text-xl font-semibold text-slate-900">評価一覧</h2>
       <div class="flex flex-wrap gap-2">
-        <button class="btn-ghost" type="button" on:click={resetFromServer}>最新を反映</button>
-        <button class="btn-ghost" type="button" on:click={handleClear}>全削除</button>
+        <Button.Root class="btn-ghost" type="button" onclick={resetFromServer}>最新を反映</Button.Root>
+        <Button.Root class="btn-ghost" type="button" onclick={handleClear}>全削除</Button.Root>
       </div>
     </div>
 
@@ -394,15 +394,15 @@
                           準備中
                         </div>
                       {/if}
-                      <button
+                      <Button.Root
                         class="absolute right-1 top-1 rounded-full bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-white opacity-0 transition group-hover:opacity-100"
                         type="button"
-                        on:click={() => handleRemoveImage(index, key)}
+                        onclick={() => handleRemoveImage(index, key)}
                         aria-label="画像を削除"
                         title="削除"
                       >
                         削除
-                      </button>
+                      </Button.Root>
                     </div>
                   {/each}
                 </div>
@@ -426,9 +426,9 @@
     </div>
 
     <div class="mt-6 flex flex-wrap gap-3">
-      <button class="btn-primary" type="button" on:click={handleSave} disabled={submitting}>
+      <Button.Root class="btn-primary" type="button" onclick={handleSave} disabled={submitting}>
         保存
-      </button>
+      </Button.Root>
     </div>
   </div>
 

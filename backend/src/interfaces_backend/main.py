@@ -14,6 +14,8 @@ from interfaces_backend.core.logging import setup_file_logging
 setup_file_logging(app_name="backend", console_level=logging.INFO)
 # Set specific loggers to INFO level
 logging.getLogger("interfaces_backend").setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _find_repo_root() -> Path:

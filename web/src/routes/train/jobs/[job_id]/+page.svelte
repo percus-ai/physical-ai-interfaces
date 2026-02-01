@@ -318,7 +318,7 @@
     </div>
     <div class="flex flex-wrap gap-3">
       <Button.Root class="btn-ghost" href="/train">一覧へ戻る</Button.Root>
-      <button class="btn-ghost" type="button" on:click={refresh}>更新</button>
+      <Button.Root class="btn-ghost" type="button" onclick={refresh}>更新</Button.Root>
     </div>
   </div>
 </section>
@@ -360,9 +360,9 @@
     <section class="card p-6">
       <div class="flex items-center justify-between">
         <h2 class="text-xl font-semibold text-slate-900">loss推移</h2>
-        <button class="btn-ghost" type="button" on:click={fetchMetrics} disabled={metricsLoading}>
+        <Button.Root class="btn-ghost" type="button" onclick={fetchMetrics} disabled={metricsLoading}>
           {metricsLoading ? '取得中...' : '更新'}
-        </button>
+        </Button.Root>
       </div>
       {#if metricsError}
         <p class="mt-3 text-sm text-rose-600">{metricsError}</p>
@@ -502,9 +502,9 @@
     <section class="card p-6">
       <h2 class="text-xl font-semibold text-slate-900">操作</h2>
       <div class="mt-4 grid gap-3">
-        <button class="btn-primary" type="button" on:click={stopJob} disabled={!isRunning}>
+        <Button.Root class="btn-primary" type="button" onclick={stopJob} disabled={!isRunning}>
           {isRunning ? 'ジョブを停止' : '停止不可'}
-        </button>
+        </Button.Root>
       </div>
       <p class="mt-3 text-xs text-slate-500">
         停止・削除は実行中ステータスに応じて有効化されます。
@@ -528,29 +528,29 @@
           </select>
         </label>
         {#if isRunning}
-          <button class="btn-ghost" type="button" on:click={downloadLogs}>
+          <Button.Root class="btn-ghost" type="button" onclick={downloadLogs}>
             ログをダウンロード
-          </button>
+          </Button.Root>
           <label class="text-sm font-semibold text-slate-700">
             <span class="label">取得行数</span>
             <input class="input mt-2" type="number" min="1" bind:value={logLines} />
           </label>
-          <button class="btn-ghost" type="button" on:click={fetchLogs} disabled={logsLoading}>
+          <Button.Root class="btn-ghost" type="button" onclick={fetchLogs} disabled={logsLoading}>
             {logsLoading ? '取得中...' : 'ログを取得'}
-          </button>
+          </Button.Root>
           <div class="flex flex-wrap gap-2">
-            <button class="btn-primary" type="button" on:click={startLogStream} disabled={Boolean(streamWs)}>
+            <Button.Root class="btn-primary" type="button" onclick={startLogStream} disabled={Boolean(streamWs)}>
               ストリーミング開始
-            </button>
-            <button class="btn-ghost" type="button" on:click={stopLogStream} disabled={!streamWs}>
+            </Button.Root>
+            <Button.Root class="btn-ghost" type="button" onclick={stopLogStream} disabled={!streamWs}>
               ストリーミング停止
-            </button>
+            </Button.Root>
             <span class="chip">状態: {streamStatus}</span>
           </div>
         {:else}
-          <button class="btn-primary" type="button" on:click={downloadLogs}>
+          <Button.Root class="btn-primary" type="button" onclick={downloadLogs}>
             ログをダウンロード
-          </button>
+          </Button.Root>
         {/if}
       </div>
     </section>
@@ -563,9 +563,9 @@
         <p class="mt-2 font-semibold text-slate-800">{sshCommand || 'IPが取得できていません'}</p>
       </div>
       <div class="mt-4 flex flex-wrap gap-3">
-        <button class="btn-ghost" type="button" on:click={copySshCommand} disabled={!sshCommand}>
+        <Button.Root class="btn-ghost" type="button" onclick={copySshCommand} disabled={!sshCommand}>
           コピー
-        </button>
+        </Button.Root>
         {#if copied}
           <span class="chip">コピーしました</span>
         {/if}

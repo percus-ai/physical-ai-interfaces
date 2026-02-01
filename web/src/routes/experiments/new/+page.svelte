@@ -148,9 +148,9 @@
       <p class="text-sm text-rose-600">{error}</p>
     {/if}
     <div class="mt-2 flex flex-wrap gap-3">
-      <button class="btn-primary" type="submit" disabled={submitting} aria-busy={submitting}>
+      <Button.Root class="btn-primary" type="submit" disabled={submitting} aria-busy={submitting}>
         作成
-      </button>
+      </Button.Root>
       <Button.Root class="btn-ghost" href="/experiments">キャンセル</Button.Root>
     </div>
   </form>

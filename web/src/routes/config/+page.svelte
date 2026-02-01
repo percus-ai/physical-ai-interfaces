@@ -76,8 +76,8 @@
       <input class="input mt-2" bind:value={backendUrl} />
     </div>
     <div class="mt-6 flex flex-wrap gap-3">
-      <button class="btn-primary" type="button" on:click={save}>保存</button>
-      <button class="btn-ghost" type="button" on:click={reset}>デフォルトに戻す</button>
+      <Button.Root class="btn-primary" type="button" onclick={save}>保存</Button.Root>
+      <Button.Root class="btn-ghost" type="button" onclick={reset}>デフォルトに戻す</Button.Root>
       {#if saved}
         <span class="chip">更新しました</span>
       {/if}
@@ -106,7 +106,7 @@
 <section class="card p-6">
   <div class="flex items-center justify-between">
     <h2 class="text-xl font-semibold text-slate-900">ユーザー設定</h2>
-    <button class="btn-ghost" type="button" on:click={refreshUserConfig}>更新</button>
+    <Button.Root class="btn-ghost" type="button" onclick={refreshUserConfig}>更新</Button.Root>
   </div>
   <div class="mt-4 grid gap-4 sm:grid-cols-2">
     <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-sm text-slate-600">

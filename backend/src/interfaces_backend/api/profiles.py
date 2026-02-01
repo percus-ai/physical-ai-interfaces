@@ -59,20 +59,6 @@ def _optional_user_id() -> str | None:
         return None
 
 
-def _restart_vlabor() -> None:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
-    if not compose_file.exists():
-        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "restart", "vlabor"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"vlabor restart failed: {result.stderr.strip()}")
-
-
 def _start_vlabor() -> None:
     repo_root = get_project_root()
     compose_file = repo_root / "docker-compose.ros2.yml"
@@ -85,6 +71,20 @@ def _start_vlabor() -> None:
     )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"vlabor start failed: {result.stderr.strip()}")
+
+
+def _restart_vlabor() -> None:
+    repo_root = get_project_root()
+    compose_file = repo_root / "docker-compose.ros2.yml"
+    if not compose_file.exists():
+        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "restart", "vlabor"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"vlabor restart failed: {result.stderr.strip()}")
 
 
 def _stop_vlabor() -> None:
@@ -117,12 +117,31 @@ def _get_vlabor_status() -> dict:
         data = json.loads(result.stdout)
     except Exception:
         return {"status": "unknown", "service": "vlabor"}
-    if isinstance(data, list) and data:
-        state = (data[0].get("State") or "").lower()
-        if "running" in state:
-            return {"status": "running", "service": "vlabor"}
-        if "exited" in state or "stopped" in state:
-            return {"status": "stopped", "service": "vlabor"}
+
+    entry = None
+    if isinstance(data, list):
+        entry = data[0] if data else None
+    elif isinstance(data, dict):
+        entry = data
+
+    if entry:
+        state_raw = (entry.get("State") or "").lower()
+        status_value = "unknown"
+        if "restarting" in state_raw:
+            status_value = "restarting"
+        elif "running" in state_raw:
+            status_value = "running"
+        elif "exited" in state_raw or "stopped" in state_raw:
+            status_value = "stopped"
+        return {
+            "status": status_value,
+            "service": "vlabor",
+            "state": entry.get("State"),
+            "status_detail": entry.get("Status"),
+            "running_for": entry.get("RunningFor"),
+            "created_at": entry.get("CreatedAt"),
+            "container_id": entry.get("ID"),
+        }
     return {"status": "unknown", "service": "vlabor"}
 
 
@@ -685,10 +704,6 @@ async def stop_vlabor():
     return VlaborStatusResponse(**_get_vlabor_status())
 
 
-@router.post("/vlabor/restart", response_model=VlaborStatusResponse)
-async def restart_vlabor():
-    _restart_vlabor()
-    return VlaborStatusResponse(**_get_vlabor_status())
 
 
 @router.post("/instances", response_model=ProfileInstanceResponse)

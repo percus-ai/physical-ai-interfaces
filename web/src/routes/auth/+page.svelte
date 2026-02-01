@@ -127,15 +127,15 @@
       <p class="mt-4 text-sm text-rose-600">{error}</p>
     {/if}
     <div class="mt-6 flex flex-wrap gap-3">
-      <button
+      <Button.Root
         class="btn-primary"
         type="button"
-        on:click={handleLogout}
+        onclick={handleLogout}
         disabled={submitting}
         aria-busy={submitting}
       >
         ログアウト
-      </button>
+      </Button.Root>
       <Button.Root class="btn-ghost" href="/">戻る</Button.Root>
     </div>
   </section>

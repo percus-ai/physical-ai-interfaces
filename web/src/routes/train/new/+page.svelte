@@ -709,9 +709,9 @@
         {#if submitError}
           <p class="text-sm text-rose-600">{submitError}</p>
         {/if}
-        <button class="btn-primary" type="button" on:click={submit} disabled={submitting}>
+        <Button.Root class="btn-primary" type="button" onclick={submit} disabled={submitting}>
           {submitting ? '作成中...' : '学習を開始'}
-        </button>
+        </Button.Root>
         {#if submitting || createEvents.length}
           <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4 text-xs text-slate-600">
             <div class="flex items-center justify-between">

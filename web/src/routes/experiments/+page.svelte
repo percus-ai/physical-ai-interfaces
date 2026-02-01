@@ -203,8 +203,8 @@
       <p class="text-xs text-slate-500">モデル・プロフィールで絞り込みできます。</p>
     </div>
     <div class="flex flex-wrap gap-2">
-      <button class="btn-ghost" type="button" on:click={resetFilters}>リセット</button>
-      <button class="btn-ghost" type="button" on:click={refreshAll}>更新</button>
+      <Button.Root class="btn-ghost" type="button" onclick={resetFilters}>リセット</Button.Root>
+      <Button.Root class="btn-ghost" type="button" onclick={refreshAll}>更新</Button.Root>
     </div>
   </div>
   <div class="mt-4 grid gap-4 md:grid-cols-3">

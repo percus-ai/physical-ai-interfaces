@@ -100,13 +100,13 @@
   <header class="sticky top-0 z-30 w-full border-b border-white/60 bg-white/70 backdrop-blur h-[var(--app-header-height)]">
     <div class="mx-auto flex h-full max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
       <div class="flex items-center gap-3">
-        <button
+        <Button.Root
           class="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-lg shadow-sm lg:hidden"
-          on:click={() => (mobileOpen = !mobileOpen)}
+          onclick={() => (mobileOpen = !mobileOpen)}
           aria-label="メニューを開く"
         >
           ☰
-        </button>
+        </Button.Root>
         <div>
           <p class="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Daihen Physical AI</p>
           <p class="text-lg font-semibold text-slate-900">Phi Web Console</p>
@@ -158,12 +158,12 @@
       <div class="flex h-full flex-col">
         <div class="mb-6 flex items-center justify-between lg:hidden">
           <p class="text-sm font-semibold text-slate-600">メニュー</p>
-          <button
+          <Button.Root
             class="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm"
-            on:click={closeMobile}
+            onclick={closeMobile}
           >
             閉じる
-          </button>
+          </Button.Root>
         </div>
         <nav class="space-y-2">
           {#each navItems as item}
@@ -213,10 +213,10 @@
   </div>
 
   {#if mobileOpen}
-    <button
+    <Button.Root
       class="fixed inset-0 z-30 bg-slate-900/20 lg:hidden"
-      on:click={closeMobile}
+      onclick={closeMobile}
       aria-label="メニューを閉じる"
-    ></button>
+    ></Button.Root>
   {/if}
 </div>
