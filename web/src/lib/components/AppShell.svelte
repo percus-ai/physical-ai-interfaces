@@ -13,6 +13,7 @@
   let lastPath = '';
   let switchingProfile = false;
   let profileError = '';
+  let immersiveView = false;
 
   type ProfileInstance = {
     id: string;
@@ -67,6 +68,11 @@
       lastPath = currentPath;
       refreshAuth();
     }
+  }
+
+  $: immersiveView = $page.url.pathname.startsWith('/record/sessions/');
+  $: if (immersiveView && mobileOpen) {
+    mobileOpen = false;
   }
 
   onMount(refreshAuth);
@@ -149,10 +155,18 @@
     </div>
   </header>
 
-  <div class="mx-auto grid max-w-7xl gap-6 px-4 py-[var(--app-shell-gap)] sm:px-6 lg:grid-cols-[240px_1fr]">
+  <div
+    class={`mx-auto grid gap-6 px-4 py-[var(--app-shell-gap)] sm:px-6 ${
+      immersiveView ? 'max-w-[1600px] lg:grid-cols-[1fr]' : 'max-w-7xl lg:grid-cols-[240px_1fr]'
+    }`}
+  >
     <aside
-      class={`glass fixed inset-0 z-40 h-full w-full max-w-[280px] overflow-y-auto border-r border-white/70 bg-white/90 p-6 transition lg:sticky lg:inset-auto lg:top-[calc(var(--app-header-height)+var(--app-shell-gap))] lg:h-[var(--app-shell-height)] lg:w-auto lg:max-w-none lg:translate-x-0 ${
+      class={`glass fixed inset-0 z-40 h-full w-full max-w-[280px] overflow-y-auto border-r border-white/70 bg-white/90 p-6 transition ${
         mobileOpen ? 'translate-x-0' : '-translate-x-full'
+      } ${
+        immersiveView
+          ? 'lg:-translate-x-full lg:opacity-0 lg:pointer-events-none'
+          : 'lg:sticky lg:inset-auto lg:top-[calc(var(--app-header-height)+var(--app-shell-gap))] lg:h-[var(--app-shell-height)] lg:w-auto lg:max-w-none lg:translate-x-0'
       }`}
     >
       <div class="flex h-full flex-col">
@@ -207,7 +221,7 @@
       </div>
     </aside>
 
-    <main class="space-y-8">
+    <main class={`space-y-8 ${immersiveView ? 'lg:space-y-6' : ''}`}>
       <slot />
     </main>
   </div>

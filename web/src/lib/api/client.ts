@@ -155,7 +155,47 @@ export const api = {
       fetchApi(`/api/profiles/instances/${instanceId}`, { method: 'PUT', body: JSON.stringify(payload) })
   },
   recording: {
-    list: () => fetchApi('/api/recording/recordings')
+    list: () => fetchApi('/api/recording/recordings'),
+    startSession: (payload: {
+      dataset_name: string;
+      task: string;
+      num_episodes: number;
+      episode_time_s: number;
+      reset_time_s: number;
+    }) =>
+      fetchApi('/api/recording/session/start', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    stopSession: (payload: {
+      dataset_id?: string | null;
+      save_current?: boolean;
+    }) =>
+      fetchApi('/api/recording/session/stop', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    pauseSession: () =>
+      fetchApi('/api/recording/session/pause', {
+        method: 'POST'
+      }),
+    resumeSession: () =>
+      fetchApi('/api/recording/session/resume', {
+        method: 'POST'
+      }),
+    redoEpisode: () =>
+      fetchApi('/api/recording/episode/redo', {
+        method: 'POST'
+      }),
+    cancelEpisode: () =>
+      fetchApi('/api/recording/episode/cancel', {
+        method: 'POST'
+      }),
+    cancelSession: (datasetId?: string) =>
+      fetchApi(`/api/recording/session/cancel${datasetId ? `?dataset_id=${datasetId}` : ''}`, {
+        method: 'POST'
+      }),
+    sessionStatus: () => fetchApi('/api/recording/session/status')
   },
   storage: {
     datasets: (profileInstanceId?: string) =>

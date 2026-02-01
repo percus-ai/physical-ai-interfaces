@@ -1,10 +1,12 @@
-"""Recording API router (lerobot_recorder WebAPI bridge)."""
+"""Recording API router (lerobot_session_recorder WebAPI bridge)."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -15,9 +17,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from percus_ai.db import get_current_user_id, get_supabase_client, upsert_with_owner
+from percus_ai.profiles import ProfileRegistry
 from percus_ai.profiles.models import ProfileInstance
 from percus_ai.storage.naming import generate_dataset_id, validate_dataset_name
-from percus_ai.storage.paths import get_datasets_dir, get_user_config_path
+from percus_ai.storage.paths import get_datasets_dir, get_project_root, get_user_config_path
 from percus_ai.storage.r2_db_sync import R2DBSyncService
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
@@ -30,17 +33,16 @@ _sync_service: Optional[R2DBSyncService] = None
 
 
 class RecordingSessionStartRequest(BaseModel):
-    profile_instance_id: Optional[str] = Field(None, description="Profile instance ID")
     dataset_name: str = Field(..., description="Dataset display name")
     task: str = Field(..., description="Task description")
-    tags: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    num_episodes: int = Field(1, ge=1, description="Number of episodes")
+    episode_time_s: float = Field(60.0, gt=0, description="Episode length in seconds")
+    reset_time_s: float = Field(10.0, ge=0, description="Reset wait time in seconds")
 
 
 class RecordingSessionStopRequest(BaseModel):
     dataset_id: Optional[str] = Field(None, description="Dataset ID (UUID)")
-    tags_append: List[str] = Field(default_factory=list)
-    metadata_append: Dict[str, Any] = Field(default_factory=dict)
+    save_current: bool = Field(True, description="Save current episode before stopping")
 
 
 class RecordingSessionActionResponse(BaseModel):
@@ -102,6 +104,76 @@ def _load_user_config() -> dict:
     }
 
 
+def _start_recorder() -> None:
+    repo_root = get_project_root()
+    compose_file = repo_root / "docker-compose.ros2.yml"
+    if not compose_file.exists():
+        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"lerobot-ros2 start failed: {result.stderr.strip()}")
+
+
+def _get_compose_service_state(service: str) -> dict:
+    repo_root = get_project_root()
+    compose_file = repo_root / "docker-compose.ros2.yml"
+    if not compose_file.exists():
+        return {}
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json", service],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return {}
+    try:
+        data = json.loads(result.stdout)
+    except Exception:
+        return {}
+    if isinstance(data, list):
+        return data[0] if data else {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _ensure_recorder_running() -> None:
+    try:
+        _call_recorder("/api/session/status")
+        return
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+
+    _start_recorder()
+    service_state = _get_compose_service_state("lerobot-ros2")
+    if service_state:
+        state_raw = (service_state.get("State") or "").lower()
+        if "running" not in state_raw:
+            detail = service_state.get("Status") or service_state.get("State") or "unknown"
+            raise HTTPException(status_code=503, detail=f"lerobot-ros2 not running: {detail}")
+    deadline = time.time() + 60
+    last_error: Optional[HTTPException] = None
+    while time.time() < deadline:
+        try:
+            _call_recorder("/api/session/status")
+            return
+        except HTTPException as exc:
+            last_error = exc
+            if exc.status_code != 503:
+                raise
+        time.sleep(1)
+
+    detail = "Recorder unreachable after start"
+    if last_error and last_error.detail:
+        detail = f"{detail}: {last_error.detail}"
+    raise HTTPException(status_code=503, detail=detail)
+
+
 def _call_recorder(path: str, payload: Optional[dict] = None) -> dict:
     url = f"{_RECORDER_URL}{path}"
     data = None
@@ -138,6 +210,77 @@ def _row_to_profile_instance(row: dict) -> ProfileInstance:
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
+
+
+def _resolve_profile_settings(profile_class, instance: ProfileInstance) -> dict:
+    settings: dict = {}
+    if profile_class.defaults:
+        settings.update(profile_class.defaults)
+    if instance.variables:
+        settings.update(instance.variables)
+    return settings
+
+
+def _render_value(value, settings: dict):
+    if isinstance(value, str) and "${" in value:
+        rendered = value
+        for key, val in settings.items():
+            rendered = rendered.replace(f"${{{key}}}", str(val))
+        return rendered
+    return value
+
+
+def _extract_camera_specs(profile_class, settings: dict) -> list[dict]:
+    cameras = []
+    profile = profile_class.profile or {}
+    actions = profile.get("actions") or []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if action.get("type") != "include":
+            continue
+        package = action.get("package")
+        if package not in ("fv_camera", "fv_realsense"):
+            continue
+        args = action.get("args") or {}
+        node_name = _render_value(args.get("node_name"), settings) or ""
+        enabled_raw = action.get("enabled", True)
+        enabled = bool(_render_value(enabled_raw, settings))
+        if not node_name:
+            continue
+        cameras.append({
+            "name": node_name,
+            "package": package,
+            "enabled": enabled,
+        })
+    return cameras
+
+
+def _build_recorder_cameras(profile_class, instance: ProfileInstance) -> tuple[list[dict], dict]:
+    settings = _resolve_profile_settings(profile_class, instance)
+    specs = _extract_camera_specs(profile_class, settings)
+    cameras: list[dict] = []
+    for spec in specs:
+        if not spec.get("enabled", True):
+            continue
+        name = spec.get("name")
+        if not name:
+            continue
+        if spec.get("package") == "fv_realsense":
+            topic = f"/{name}/color/image_raw/compressed"
+        else:
+            topic = f"/{name}/image_raw/compressed"
+        cameras.append({"name": name, "topic": topic})
+    return cameras, settings
+
+
+def _build_arm_namespaces(settings: dict) -> list[str]:
+    namespaces: list[str] = []
+    if bool(settings.get("left_arm_enabled", True)):
+        namespaces.append("left_arm")
+    if bool(settings.get("right_arm_enabled", True)):
+        namespaces.append("right_arm")
+    return namespaces
 
 
 def _resolve_profile_instance(profile_instance_id: Optional[str]) -> ProfileInstance:
@@ -211,17 +354,40 @@ async def start_session(request: RecordingSessionStartRequest):
     if not is_valid:
         raise HTTPException(status_code=400, detail=f"Invalid dataset name: {'; '.join(errors)}")
 
+    _ensure_recorder_running()
+
     dataset_id = generate_dataset_id()
-    profile_instance = _resolve_profile_instance(request.profile_instance_id)
+    profile_instance = _resolve_profile_instance(None)
+    try:
+        profile_class = ProfileRegistry().get_class(profile_instance.class_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Profile class not found") from exc
+
+    cameras, settings = _build_recorder_cameras(profile_class, profile_instance)
+    if not cameras:
+        raise HTTPException(status_code=400, detail="No enabled cameras in active profile")
 
     payload = {
+        "dataset_id": dataset_id,
+        "dataset_name": request.dataset_name,
         "task": request.task,
-        "dataset_name": dataset_id,
-        "tags": request.tags,
-        "metadata": request.metadata,
+        "num_episodes": request.num_episodes,
+        "episode_time_s": request.episode_time_s,
+        "reset_time_s": request.reset_time_s,
+        "cameras": cameras,
+        "metadata": {
+            "num_episodes": request.num_episodes,
+            "episode_time_s": request.episode_time_s,
+            "reset_time_s": request.reset_time_s,
+            "profile_instance_id": profile_instance.id,
+            "profile_class_id": profile_instance.class_id,
+        },
     }
+    arm_namespaces = _build_arm_namespaces(settings)
+    if arm_namespaces:
+        payload["arm_namespaces"] = arm_namespaces
 
-    result = _call_recorder("/api/episode/start", payload)
+    result = _call_recorder("/api/session/start", payload)
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder start failed")
 
@@ -238,14 +404,11 @@ async def start_session(request: RecordingSessionStartRequest):
 @router.post("/session/stop", response_model=RecordingSessionActionResponse)
 async def stop_session(request: RecordingSessionStopRequest):
     _require_user_id()
-    result = _call_recorder(
-        "/api/episode/stop",
-        {"tags_append": request.tags_append, "metadata_append": request.metadata_append},
-    )
+    result = _call_recorder("/api/session/stop", {"save_current": request.save_current})
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder stop failed")
 
-    dataset_id = request.dataset_id or result.get("dataset_name")
+    dataset_id = request.dataset_id or result.get("dataset_id")
     if dataset_id:
         _update_dataset_stats(dataset_id)
 
@@ -268,7 +431,7 @@ async def stop_session(request: RecordingSessionStopRequest):
 @router.post("/session/pause", response_model=RecordingSessionActionResponse)
 async def pause_session():
     _require_user_id()
-    result = _call_recorder("/api/episode/pause", {})
+    result = _call_recorder("/api/session/pause", {})
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder pause failed")
     return RecordingSessionActionResponse(success=True, message="Recording paused", status=result)
@@ -277,16 +440,39 @@ async def pause_session():
 @router.post("/session/resume", response_model=RecordingSessionActionResponse)
 async def resume_session():
     _require_user_id()
-    result = _call_recorder("/api/episode/resume", {})
+    result = _call_recorder("/api/session/resume", {})
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder resume failed")
     return RecordingSessionActionResponse(success=True, message="Recording resumed", status=result)
 
 
+@router.post("/episode/redo", response_model=RecordingSessionActionResponse)
+async def redo_episode():
+    _require_user_id()
+    result = _call_recorder("/api/episode/redo", {})
+    if not result.get("success", False):
+        raise HTTPException(status_code=500, detail=result.get("error") or "Recorder redo failed")
+    return RecordingSessionActionResponse(
+        success=True,
+        message="Episode redo requested",
+        dataset_id=result.get("dataset_id"),
+        status=result,
+    )
+
+
+@router.post("/episode/cancel", response_model=RecordingSessionActionResponse)
+async def cancel_episode():
+    _require_user_id()
+    result = _call_recorder("/api/episode/cancel", {})
+    if not result.get("success", False):
+        raise HTTPException(status_code=500, detail=result.get("error") or "Recorder episode cancel failed")
+    return RecordingSessionActionResponse(success=True, message="Episode cancelled", status=result)
+
+
 @router.post("/session/cancel", response_model=RecordingSessionActionResponse)
 async def cancel_session(dataset_id: Optional[str] = None):
     _require_user_id()
-    result = _call_recorder("/api/episode/cancel", {})
+    result = _call_recorder("/api/session/stop", {"save_current": False})
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
 
@@ -300,8 +486,8 @@ async def cancel_session(dataset_id: Optional[str] = None):
 @router.get("/session/status", response_model=RecordingSessionStatusResponse)
 async def get_session_status():
     _require_user_id()
-    status = _call_recorder("/api/status")
-    dataset_id = status.get("dataset_name")
+    status = _call_recorder("/api/session/status")
+    dataset_id = status.get("dataset_id")
     return RecordingSessionStatusResponse(dataset_id=dataset_id, status=status)
 
 
