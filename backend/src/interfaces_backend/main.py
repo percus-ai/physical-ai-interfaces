@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import time
 from pathlib import Path
 
 import uvicorn
@@ -81,6 +82,7 @@ app = FastAPI(
     title="Physical AI API",
     version="0.1.0",
 )
+SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("PHI_SLOW_REQUEST_THRESHOLD_MS", "1000"))
 
 # CORS for web/tauri clients
 cors_origins = os.environ.get(
@@ -95,6 +97,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_slow_requests(request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - start) * 1000
+        if duration_ms >= SLOW_REQUEST_THRESHOLD_MS:
+            logging.getLogger("interfaces_backend.performance").warning(
+                "Slow request %s %s (exception) %.1fms",
+                request.method,
+                request.url.path,
+                duration_ms,
+            )
+        raise
+    duration_ms = (time.perf_counter() - start) * 1000
+    if duration_ms >= SLOW_REQUEST_THRESHOLD_MS:
+        logging.getLogger("interfaces_backend.performance").warning(
+            "Slow request %s %s %s %.1fms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+    return response
 
 
 @app.middleware("http")
