@@ -1354,19 +1354,40 @@ _gpu_availability_cache_time: float = 0
 _GPU_CACHE_TTL = 600  # 10 minutes
 
 
-def _check_availability_for_config(client, instance_type: str, is_spot: bool) -> list[str]:
-    """Check availability at locations. Returns as soon as one available location is found."""
-    for loc in KNOWN_LOCATIONS:
-        try:
-            if client.instances.is_available(
-                instance_type=instance_type,
-                is_spot=is_spot,
-                location_code=loc,
-            ):
-                return [loc]  # Early exit: found one available location
-        except Exception:
-            pass
-    return []
+def _extract_availability_instance_type(item: object) -> Optional[str]:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("instance_type", "instanceType", "type", "name"):
+            value = item.get(key)
+            if value:
+                return str(value)
+    return None
+
+
+def _fetch_availability_sets(client: VerdaClient) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    spot_available_by_loc = {loc: set() for loc in KNOWN_LOCATIONS}
+    ondemand_available_by_loc = {loc: set() for loc in KNOWN_LOCATIONS}
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {}
+        for loc in KNOWN_LOCATIONS:
+            futures[executor.submit(client.instances.get_availabilities, True, loc)] = (True, loc)
+            futures[executor.submit(client.instances.get_availabilities, False, loc)] = (False, loc)
+
+        for future in as_completed(futures, timeout=30):
+            is_spot, loc = futures[future]
+            try:
+                items = future.result() or []
+            except Exception:
+                continue
+            target = spot_available_by_loc if is_spot else ondemand_available_by_loc
+            for item in items:
+                instance_type = _extract_availability_instance_type(item)
+                if instance_type:
+                    target[loc].add(instance_type)
+
+    return spot_available_by_loc, ondemand_available_by_loc
 
 
 @router.get("/gpu-availability", response_model=GpuAvailabilityResponse)
@@ -1414,47 +1435,21 @@ async def get_gpu_availability():
                         configs_to_check.append((gpu_model, gpu_count, itype, spot_price))
                         break
 
-        # Check availability in parallel using ThreadPoolExecutor
-        # Each config needs 2 checks (spot + on-demand), done in parallel
-        results = {}  # key: (gpu_model, gpu_count) -> {"spot_locs": [], "ondemand_locs": []}
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {}
-            for gpu_model, gpu_count, instance_type, spot_price in configs_to_check:
-                key = (gpu_model, gpu_count)
-                results[key] = {"instance_type": instance_type, "spot_price": spot_price, "spot_locs": [], "ondemand_locs": []}
-
-                # Submit spot check
-                future_spot = executor.submit(_check_availability_for_config, client, instance_type, True)
-                futures[future_spot] = (key, "spot")
-
-                # Submit on-demand check
-                future_ondemand = executor.submit(_check_availability_for_config, client, instance_type, False)
-                futures[future_ondemand] = (key, "ondemand")
-
-            # Collect results
-            for future in as_completed(futures, timeout=30):
-                key, check_type = futures[future]
-                try:
-                    locs = future.result()
-                    if check_type == "spot":
-                        results[key]["spot_locs"] = locs
-                    else:
-                        results[key]["ondemand_locs"] = locs
-                except Exception:
-                    pass
+        spot_available_by_loc, ondemand_available_by_loc = _fetch_availability_sets(client)
 
         # Build response
-        for (gpu_model, gpu_count), data in results.items():
+        for gpu_model, gpu_count, instance_type, spot_price in configs_to_check:
+            spot_locs = [loc for loc in KNOWN_LOCATIONS if instance_type in spot_available_by_loc[loc]]
+            ondemand_locs = [loc for loc in KNOWN_LOCATIONS if instance_type in ondemand_available_by_loc[loc]]
             available.append(GpuAvailabilityInfo(
                 gpu_model=gpu_model,
                 gpu_count=gpu_count,
-                instance_type=data["instance_type"],
-                spot_available=len(data["spot_locs"]) > 0,
-                ondemand_available=len(data["ondemand_locs"]) > 0,
-                spot_locations=data["spot_locs"],
-                ondemand_locations=data["ondemand_locs"],
-                spot_price_per_hour=data["spot_price"],
+                instance_type=instance_type,
+                spot_available=len(spot_locs) > 0,
+                ondemand_available=len(ondemand_locs) > 0,
+                spot_locations=spot_locs,
+                ondemand_locations=ondemand_locs,
+                spot_price_per_hour=spot_price,
             ))
 
         # Update cache
@@ -1750,72 +1745,41 @@ async def websocket_gpu_availability(websocket: WebSocket):
 
         # Check each GPU and stream results
         available = []
-        results = {}  # key: (gpu_model, gpu_count) -> {"spot_locs": [], "ondemand_locs": [], ...}
-
-        # Initialize results dict
-        for gpu_model, gpu_count, instance_type, spot_price in configs_to_check:
-            key = (gpu_model, gpu_count)
-            results[key] = {
-                "instance_type": instance_type,
-                "spot_price": spot_price,
-                "spot_locs": None,
-                "ondemand_locs": None,
-            }
+        for gpu_model, _, _, _ in configs_to_check:
             await websocket.send_json({
                 "type": "checking",
                 "gpu_model": gpu_model,
                 "message": f"{gpu_model}を確認中..."
             })
 
-        # Run checks in parallel and stream results as they complete
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {}
-            for gpu_model, gpu_count, instance_type, spot_price in configs_to_check:
-                key = (gpu_model, gpu_count)
+        spot_available_by_loc, ondemand_available_by_loc = await loop.run_in_executor(
+            _executor, _fetch_availability_sets, client
+        )
 
-                future_spot = executor.submit(_check_availability_for_config, client, instance_type, True)
-                futures[future_spot] = (key, "spot", instance_type, spot_price)
+        for gpu_model, gpu_count, instance_type, spot_price in configs_to_check:
+            spot_locs = [loc for loc in KNOWN_LOCATIONS if instance_type in spot_available_by_loc[loc]]
+            ondemand_locs = [loc for loc in KNOWN_LOCATIONS if instance_type in ondemand_available_by_loc[loc]]
+            spot_available = len(spot_locs) > 0
+            ondemand_available = len(ondemand_locs) > 0
 
-                future_ondemand = executor.submit(_check_availability_for_config, client, instance_type, False)
-                futures[future_ondemand] = (key, "ondemand", instance_type, spot_price)
+            await websocket.send_json({
+                "type": "result",
+                "gpu_model": gpu_model,
+                "gpu_count": gpu_count,
+                "spot_available": spot_available,
+                "ondemand_available": ondemand_available,
+            })
 
-            # Collect results and send as they complete
-            for future in as_completed(futures, timeout=30):
-                key, check_type, instance_type, spot_price = futures[future]
-                gpu_model, gpu_count = key
-
-                try:
-                    locs = future.result()
-                    if check_type == "spot":
-                        results[key]["spot_locs"] = locs
-                    else:
-                        results[key]["ondemand_locs"] = locs
-
-                    # If both checks are done for this GPU, send result
-                    if results[key]["spot_locs"] is not None and results[key]["ondemand_locs"] is not None:
-                        spot_available = len(results[key]["spot_locs"]) > 0
-                        ondemand_available = len(results[key]["ondemand_locs"]) > 0
-
-                        await websocket.send_json({
-                            "type": "result",
-                            "gpu_model": gpu_model,
-                            "gpu_count": gpu_count,
-                            "spot_available": spot_available,
-                            "ondemand_available": ondemand_available,
-                        })
-
-                        available.append(GpuAvailabilityInfo(
-                            gpu_model=gpu_model,
-                            gpu_count=gpu_count,
-                            instance_type=instance_type,
-                            spot_available=spot_available,
-                            ondemand_available=ondemand_available,
-                            spot_locations=results[key]["spot_locs"],
-                            ondemand_locations=results[key]["ondemand_locs"],
-                            spot_price_per_hour=spot_price,
-                        ))
-                except Exception as e:
-                    logger.warning(f"GPU availability check failed for {key}: {e}")
+            available.append(GpuAvailabilityInfo(
+                gpu_model=gpu_model,
+                gpu_count=gpu_count,
+                instance_type=instance_type,
+                spot_available=spot_available,
+                ondemand_available=ondemand_available,
+                spot_locations=spot_locs,
+                ondemand_locations=ondemand_locs,
+                spot_price_per_hour=spot_price,
+            ))
 
         # Update cache
         _gpu_availability_cache = {"available": available}

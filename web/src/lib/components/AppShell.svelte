@@ -15,6 +15,7 @@
   let authenticated = $state(false);
   let switchingProfile = $state(false);
   let profileError = $state('');
+  let profilesReady = $state(false);
   const immersiveView = $derived(
     page.url.pathname.startsWith('/record/sessions/') || page.url.pathname.startsWith('/operate/sessions/')
   );
@@ -31,7 +32,7 @@
     toStore(() => ({
       queryKey: ['profiles', 'instances'],
       queryFn: api.profiles.instances,
-      enabled: authenticated
+      enabled: authenticated && profilesReady
     }))
   );
 
@@ -39,7 +40,7 @@
     toStore(() => ({
       queryKey: ['profiles', 'instances', 'active'],
       queryFn: api.profiles.activeInstance,
-      enabled: authenticated
+      enabled: authenticated && profilesReady
     }))
   );
 
@@ -90,7 +91,7 @@
   let profileStreamActive = false;
 
   $effect(() => {
-    if (authenticated && !profileStreamActive) {
+    if (authenticated && profilesReady && !profileStreamActive) {
       stopProfileStream();
       stopProfileStream = connectStream({
         path: '/api/stream/profiles/active',
@@ -101,7 +102,7 @@
       profileStreamActive = true;
       return;
     }
-    if (!authenticated && profileStreamActive) {
+    if ((!authenticated || !profilesReady) && profileStreamActive) {
       stopProfileStream();
       stopProfileStream = () => {};
       profileStreamActive = false;
@@ -135,6 +136,16 @@
       switchingProfile = false;
     }
   };
+
+  const ensureProfilesLoaded = async () => {
+    if (profilesReady) return;
+    profilesReady = true;
+    try {
+      await Promise.all([$activeProfileQuery?.refetch?.(), $profileInstancesQuery?.refetch?.()]);
+    } catch (err) {
+      console.error(err);
+    }
+  };
 </script>
 
 <div class="min-h-screen">
@@ -159,6 +170,9 @@
           <select
             class="bg-transparent text-sm font-semibold text-slate-700 focus:outline-none h-8"
             on:change={handleProfileChange}
+            on:focus={ensureProfilesLoaded}
+            on:click={ensureProfilesLoaded}
+            on:mouseenter={ensureProfilesLoaded}
             disabled={switchingProfile}
             value={$activeProfileQuery.data?.instance?.id ?? ''}
           >
