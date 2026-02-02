@@ -1,12 +1,10 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { toStore } from 'svelte/store';
+  import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
-  import { connectStream } from '$lib/realtime/stream';
-  import { queryClient } from '$lib/queryClient';
+  import { getRosbridgeClient } from '$lib/recording/rosbridge';
 
   import LayoutNode from '$lib/components/recording/LayoutNode.svelte';
   import BlueprintTree from '$lib/components/recording/BlueprintTree.svelte';
@@ -30,11 +28,6 @@
   } from '$lib/recording/blueprint';
   import { getViewDefinition, getViewOptions } from '$lib/recording/viewRegistry';
 
-  type RecordingSessionStatusResponse = {
-    dataset_id?: string;
-    status?: Record<string, unknown>;
-  };
-
   type ProfileStatusResponse = {
     topics?: string[];
   };
@@ -51,18 +44,22 @@
 
   const sessionId = $derived(page.params.session_id ?? '');
 
-  const statusQuery = createQuery<RecordingSessionStatusResponse>(
-    toStore(() => ({
-      queryKey: ['recording', 'session', sessionId],
-      queryFn: () => api.recording.sessionStatus(sessionId),
-      enabled: Boolean(sessionId)
-    }))
-  );
-
   const topicsQuery = createQuery<ProfileStatusResponse>({
     queryKey: ['profiles', 'instances', 'active', 'status'],
     queryFn: api.profiles.activeStatus
   });
+
+  type RecorderStatus = Record<string, unknown> & {
+    state?: string;
+    status?: string;
+    task?: string;
+    dataset_id?: string;
+    last_error?: string;
+  };
+
+  const STATUS_TOPIC = '/lerobot_recorder/status';
+  let recorderStatus = $state<RecorderStatus | null>(null);
+  let rosbridgeStatus = $state<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>('idle');
 
   let blueprint: BlueprintNode = $state(createDefaultBlueprint());
   let selectedId = $state(blueprint.id);
@@ -128,24 +125,35 @@
     mounted = true;
   });
 
-  let stopRecordingStream = () => {};
-  let lastStreamSessionId = '';
+  const parseRecorderPayload = (msg: Record<string, unknown>): RecorderStatus => {
+    if (typeof msg.data === 'string') {
+      try {
+        return JSON.parse(msg.data) as RecorderStatus;
+      } catch {
+        return { state: 'unknown' };
+      }
+    }
+    return msg as RecorderStatus;
+  };
 
   $effect(() => {
-    if (mounted && sessionId && sessionId !== lastStreamSessionId) {
-      stopRecordingStream();
-      lastStreamSessionId = sessionId;
-      stopRecordingStream = connectStream({
-        path: `/api/stream/recording/sessions/${encodeURIComponent(sessionId)}`,
-        onMessage: (payload) => {
-          queryClient.setQueryData(['recording', 'session', sessionId], payload);
-        }
-      });
-    }
-  });
-
-  onDestroy(() => {
-    stopRecordingStream();
+    if (typeof window === 'undefined') return;
+    const client = getRosbridgeClient();
+    const unsubscribe = client.subscribe(
+      STATUS_TOPIC,
+      (message) => {
+        recorderStatus = parseRecorderPayload(message);
+      },
+      { throttle_rate: 100 }
+    );
+    const offStatus = client.onStatusChange((next) => {
+      rosbridgeStatus = next;
+    });
+    rosbridgeStatus = client.getStatus();
+    return () => {
+      unsubscribe();
+      offStatus();
+    };
   });
 
   $effect(() => {
@@ -245,18 +253,29 @@
     editMode = !editMode;
   };
 
-  $: status = $statusQuery.data?.status ?? {};
-  $: datasetId = $statusQuery.data?.dataset_id ?? sessionId;
-  $: statusState =
-    (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? '';
-  $: statusLabel = STATUS_LABELS[String(statusState)] ?? String(statusState || 'unknown');
-  $: statusDetail =
-    (status as Record<string, unknown>)?.message ??
-    (status as Record<string, unknown>)?.detail ??
-    (status as Record<string, unknown>)?.error ??
-    (status as Record<string, unknown>)?.last_error ??
-    '';
-  $: taskLabel = (status as Record<string, unknown>)?.task ?? '';
+  const status = $derived(recorderStatus ?? {});
+  const datasetId = $derived((status as RecorderStatus)?.dataset_id ?? sessionId);
+  const statusState = $derived((status as RecorderStatus)?.state ?? (status as RecorderStatus)?.status ?? '');
+  const statusLabel = $derived(STATUS_LABELS[String(statusState)] ?? String(statusState || 'unknown'));
+  const statusDetail = $derived((status as RecorderStatus)?.last_error ?? '');
+  const taskLabel = $derived((status as RecorderStatus)?.task ?? '');
+
+  const connectionLabel = $derived(
+    rosbridgeStatus === 'connected'
+      ? '接続中'
+      : rosbridgeStatus === 'connecting'
+        ? '接続中...'
+        : rosbridgeStatus === 'error'
+          ? 'エラー'
+          : '切断中'
+  );
+
+  const handleReconnect = () => {
+    const client = getRosbridgeClient();
+    client.connect().catch(() => {
+      // ignore; connection status handles UI fallback
+    });
+  };
 </script>
 
 <section class="card-strong p-6">
@@ -267,14 +286,13 @@
       <p class="mt-2 text-sm text-slate-600">{taskLabel || 'タスク未設定 / 状態を同期中...'}</p>
       <div class="mt-3 flex flex-wrap gap-2">
         <span class="chip">状態: {statusLabel}</span>
+        <span class="chip">接続: {connectionLabel}</span>
         {#if datasetId}
           <span class="chip">Dataset: {datasetId}</span>
         {/if}
       </div>
-      {#if $statusQuery.isLoading}
-        <p class="mt-2 text-xs text-slate-500">ステータス取得中...</p>
-      {:else if $statusQuery.error}
-        <p class="mt-2 text-xs text-rose-600">ステータス取得に失敗しました。</p>
+      {#if rosbridgeStatus !== 'connected'}
+        <p class="mt-2 text-xs text-rose-600">rosbridge に接続できません。接続を確認してください。</p>
       {/if}
     </div>
     <div class="flex flex-wrap gap-3">
@@ -283,7 +301,7 @@
       </Button.Root>
       <Button.Root class="btn-ghost" href="/record">録画一覧</Button.Root>
       <Button.Root class="btn-ghost" href="/record/new">新規セッション</Button.Root>
-      <Button.Root class="btn-ghost" type="button" onclick={() => $statusQuery.refetch?.()}>更新</Button.Root>
+      <Button.Root class="btn-ghost" type="button" onclick={handleReconnect}>再接続</Button.Root>
     </div>
   </div>
 </section>
@@ -306,6 +324,8 @@
       node={blueprint}
       selectedId={selectedId}
       sessionId={sessionId}
+      recorderStatus={recorderStatus}
+      rosbridgeStatus={rosbridgeStatus}
       mode="recording"
       editMode={editMode}
       onSelect={updateSelection}

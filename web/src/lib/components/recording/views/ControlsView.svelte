@@ -1,35 +1,24 @@
 <script lang="ts">
-  import { createQuery } from '@tanstack/svelte-query';
-  import { toStore } from 'svelte/store';
   import { Button } from 'bits-ui';
   import { api } from '$lib/api/client';
 
-  let { sessionId = '', title = 'Controls', mode = 'recording' }: {
+  let {
+    sessionId = '',
+    title = 'Controls',
+    mode = 'recording',
+    recorderStatus = null,
+    rosbridgeStatus = 'idle'
+  }: {
     sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
+    recorderStatus?: Record<string, unknown> | null;
+    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
   } = $props();
-
-  type RecordingSessionStatusResponse = {
-    dataset_id?: string;
-    status?: Record<string, unknown>;
-  };
-
-  const statusQuery = createQuery<RecordingSessionStatusResponse>(
-    toStore(() => ({
-      queryKey: ['recording', 'session', sessionId],
-      queryFn: () => api.recording.sessionStatus(sessionId),
-      enabled: Boolean(sessionId)
-    }))
-  );
 
   let actionBusy = $state('');
   let actionError = $state('');
   let actionMessage = $state('');
-
-  const refresh = async () => {
-    await $statusQuery?.refetch?.();
-  };
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     actionError = '';
@@ -42,7 +31,6 @@
       actionError = err instanceof Error ? err.message : `${label} に失敗しました。`;
     } finally {
       actionBusy = '';
-      await refresh();
     }
   };
 
@@ -70,17 +58,20 @@
     await runAction('エピソード破棄', () => api.recording.cancelEpisode());
   };
 
-  const status = $derived($statusQuery.data?.status ?? {});
+  const status = $derived(recorderStatus ?? {});
   const statusState = $derived(
     (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? ''
   );
-  const datasetId = $derived($statusQuery.data?.dataset_id ?? sessionId);
+  const datasetId = $derived((status as Record<string, unknown>)?.dataset_id ?? sessionId);
 
   const canPause = $derived(statusState === 'recording');
   const canResume = $derived(statusState === 'paused');
   const canStop = $derived(['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)));
   const canRedo = $derived(Boolean(statusState) && !['recording', 'paused'].includes(String(statusState)));
   const canCancelEpisode = $derived(statusState === 'recording');
+  const connectionWarning = $derived(
+    rosbridgeStatus !== 'connected' ? 'rosbridge が切断されています。状態は更新されません。' : ''
+  );
 </script>
 
 <div class="flex h-full flex-col gap-3">
@@ -94,6 +85,9 @@
   {/if}
   {#if actionMessage}
     <p class="text-xs text-emerald-600">{actionMessage}</p>
+  {/if}
+  {#if connectionWarning}
+    <p class="text-xs text-amber-600">{connectionWarning}</p>
   {/if}
 
   {#if mode !== 'recording'}

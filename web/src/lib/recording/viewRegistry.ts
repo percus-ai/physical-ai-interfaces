@@ -97,7 +97,7 @@ export const viewRegistry: ViewTypeDefinition[] = [
       }
     ],
     defaultConfig: (topics) => ({
-      topic: firstMatch(topics, (t) => t.includes('session_recorder/status')) || firstMatch(topics, statusFilter)
+      topic: firstMatch(topics, (t) => t.includes('lerobot_recorder/status')) || firstMatch(topics, statusFilter)
     })
   },
   {

@@ -301,7 +301,7 @@ export const createDefaultBlueprint = (): BlueprintNode =>
       [0.6, 0.4]
     ),
     createTabsNode([
-      createTabItem('Status', createViewNode('status', { topic: '/lerobot_session_recorder/status' })),
+      createTabItem('Status', createViewNode('status', { topic: '/lerobot_recorder/status' })),
       createTabItem('Controls', createViewNode('controls', {}))
     ]),
     [0.7, 0.3]

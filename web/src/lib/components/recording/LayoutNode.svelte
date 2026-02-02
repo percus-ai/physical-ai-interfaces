@@ -5,14 +5,29 @@
   import { getViewDefinition } from '$lib/recording/viewRegistry';
   import PlaceholderView from '$lib/components/recording/views/PlaceholderView.svelte';
 
-  export let node: BlueprintNode;
-  export let selectedId = '';
-  export let sessionId = '';
-  export let mode: 'recording' | 'operate' = 'recording';
-  export let editMode = true;
-  export let onSelect: (id: string) => void;
-  export let onResize: (id: string, sizes: [number, number]) => void;
-  export let onTabChange: (id: string, activeId: string) => void;
+  let {
+    node,
+    selectedId = '',
+    sessionId = '',
+    recorderStatus = null,
+    rosbridgeStatus = 'idle',
+    mode = 'recording',
+    editMode = true,
+    onSelect,
+    onResize,
+    onTabChange
+  }: {
+    node: BlueprintNode;
+    selectedId?: string;
+    sessionId?: string;
+    recorderStatus?: Record<string, unknown> | null;
+    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
+    mode?: 'recording' | 'operate';
+    editMode?: boolean;
+    onSelect: (id: string) => void;
+    onResize: (id: string, sizes: [number, number]) => void;
+    onTabChange: (id: string, activeId: string) => void;
+  } = $props();
 
   const handleSelect = (event: MouseEvent) => {
     event.stopPropagation();
@@ -32,6 +47,8 @@
     } as Record<string, unknown>;
     if (viewType === 'controls' || viewType === 'progress') {
       baseProps.sessionId = sessionId;
+      baseProps.recorderStatus = recorderStatus;
+      baseProps.rosbridgeStatus = rosbridgeStatus;
     }
     return baseProps;
   };

@@ -273,38 +273,50 @@
     ]);
   };
 
-  $: runnerStatus = $inferenceRunnerStatusQuery.data?.runner_status ?? {};
-  $: teleopSessions = $teleopSessionsQuery.data?.sessions ?? [];
-  $: teleopSession = teleopSessions.find((session) => session.session_id === sessionId) ?? null;
-  $: inferenceMatches = runnerStatus.session_id === sessionId;
+  const runnerStatus = $derived($inferenceRunnerStatusQuery.data?.runner_status ?? {});
+  const teleopSessions = $derived($teleopSessionsQuery.data?.sessions ?? []);
+  const teleopSession = $derived(
+    teleopSessions.find((session) => session.session_id === sessionId) ?? null
+  );
+  const inferenceMatches = $derived(runnerStatus.session_id === sessionId);
 
-  $: resolvedKind =
-    sessionKindParam || (inferenceMatches ? 'inference' : teleopSession ? 'teleop' : '');
-  $: sessionLabel = KIND_LABELS[resolvedKind] ?? 'セッション';
+  const resolvedKind = $derived(
+    sessionKindParam || (inferenceMatches ? 'inference' : teleopSession ? 'teleop' : '')
+  );
+  const sessionLabel = $derived(KIND_LABELS[resolvedKind] ?? 'セッション');
 
-  $: statusLabel = '不明';
-  if (resolvedKind === 'inference') {
-    statusLabel = inferenceMatches && runnerStatus.active ? '実行中' : '停止';
-  } else if (resolvedKind === 'teleop') {
-    statusLabel = teleopSession ? (teleopSession.is_running ? '実行中' : '待機') : '停止';
-  }
+  const statusLabel = $derived.by(() => {
+    if (resolvedKind === 'inference') {
+      return inferenceMatches && runnerStatus.active ? '実行中' : '停止';
+    }
+    if (resolvedKind === 'teleop') {
+      return teleopSession ? (teleopSession.is_running ? '実行中' : '待機') : '停止';
+    }
+    return '不明';
+  });
 
-  $: statusDetail = '';
-  if (resolvedKind === 'inference') {
-    statusDetail = runnerStatus.last_error ?? '';
-  } else if (resolvedKind === 'teleop' && teleopSession?.errors) {
-    statusDetail = `Errors: ${teleopSession.errors}`;
-  }
+  const statusDetail = $derived.by(() => {
+    if (resolvedKind === 'inference') {
+      return runnerStatus.last_error ?? '';
+    }
+    if (resolvedKind === 'teleop' && teleopSession?.errors) {
+      return `Errors: ${teleopSession.errors}`;
+    }
+    return '';
+  });
 
-  $: sessionSubtitle = '';
-  if (resolvedKind === 'inference') {
-    sessionSubtitle = runnerStatus.task ?? '';
-  } else if (resolvedKind === 'teleop' && teleopSession) {
-    const mode = teleopSession.mode ?? 'teleop';
-    const leader = teleopSession.leader_port ?? '-';
-    const follower = teleopSession.follower_port ?? '-';
-    sessionSubtitle = `${mode} / ${leader} → ${follower}`;
-  }
+  const sessionSubtitle = $derived.by(() => {
+    if (resolvedKind === 'inference') {
+      return runnerStatus.task ?? '';
+    }
+    if (resolvedKind === 'teleop' && teleopSession) {
+      const mode = teleopSession.mode ?? 'teleop';
+      const leader = teleopSession.leader_port ?? '-';
+      const follower = teleopSession.follower_port ?? '-';
+      return `${mode} / ${leader} → ${follower}`;
+    }
+    return '';
+  });
 </script>
 
 <section class="card-strong p-6">

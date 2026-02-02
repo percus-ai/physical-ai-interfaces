@@ -1,26 +1,17 @@
 <script lang="ts">
-  import { createQuery } from '@tanstack/svelte-query';
-  import { toStore } from 'svelte/store';
-  import { api } from '$lib/api/client';
-
-  let { sessionId = '', title = 'Progress', mode = 'recording' }: {
+  let {
+    sessionId = '',
+    title = 'Progress',
+    mode = 'recording',
+    recorderStatus = null,
+    rosbridgeStatus = 'idle'
+  }: {
     sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
+    recorderStatus?: Record<string, unknown> | null;
+    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
   } = $props();
-
-  type RecordingSessionStatusResponse = {
-    dataset_id?: string;
-    status?: Record<string, unknown>;
-  };
-
-  const statusQuery = createQuery<RecordingSessionStatusResponse>(
-    toStore(() => ({
-      queryKey: ['recording', 'session', sessionId],
-      queryFn: () => api.recording.sessionStatus(sessionId),
-      enabled: Boolean(sessionId)
-    }))
-  );
 
   const asNumber = (value: unknown, fallback = 0) => {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -28,17 +19,24 @@
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
-  const status = $derived($statusQuery.data?.status ?? {});
+  const status = $derived(recorderStatus ?? {});
   const episodeIndex = $derived(asNumber((status as Record<string, unknown>)?.episode_index ?? 0, 0));
   const episodeCountValue = $derived(asNumber((status as Record<string, unknown>)?.episode_count ?? 0, 0));
   const numEpisodes = $derived(asNumber((status as Record<string, unknown>)?.num_episodes ?? 0, 0));
   const frameCount = $derived(asNumber((status as Record<string, unknown>)?.frame_count ?? 0, 0));
   const episodeTime = $derived(asNumber((status as Record<string, unknown>)?.episode_time_s ?? 0, 0));
   const resetTime = $derived(asNumber((status as Record<string, unknown>)?.reset_time_s ?? 0, 0));
+  const episodeElapsed = $derived(asNumber((status as Record<string, unknown>)?.episode_elapsed_s ?? 0, 0));
+  const episodeRemaining = $derived(asNumber((status as Record<string, unknown>)?.episode_remaining_s ?? 0, 0));
+  const resetElapsed = $derived(asNumber((status as Record<string, unknown>)?.reset_elapsed_s ?? 0, 0));
+  const resetRemaining = $derived(asNumber((status as Record<string, unknown>)?.reset_remaining_s ?? 0, 0));
   const statusState = $derived(
     (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? ''
   );
   const progress = $derived(numEpisodes > 0 ? Math.min(episodeCountValue / numEpisodes, 1) : 0);
+  const connectionWarning = $derived(
+    rosbridgeStatus !== 'connected' ? 'rosbridge が切断されています。状態は更新されません。' : ''
+  );
 </script>
 
 <div class="flex h-full flex-col gap-3">
@@ -51,6 +49,9 @@
       このビューは録画セッションのみ対応しています。
     </div>
   {:else}
+    {#if connectionWarning}
+      <p class="mb-2 text-xs text-amber-600">{connectionWarning}</p>
+    {/if}
     <div class="rounded-2xl border border-slate-200/60 bg-white/70 p-3">
       <div class="flex items-center justify-between text-xs text-slate-500">
         <span>Episode {numEpisodes ? Math.max(episodeIndex, 0) + 1 : '-'}</span>
@@ -67,10 +68,12 @@
         <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
           <p class="label">episode time</p>
           <p class="mt-1 text-sm font-semibold text-slate-800">{episodeTime || '-'}s</p>
+          <p class="text-[11px] text-slate-500">{episodeElapsed.toFixed(1)}s / 残り{episodeRemaining.toFixed(1)}s</p>
         </div>
         <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
           <p class="label">reset</p>
           <p class="mt-1 text-sm font-semibold text-slate-800">{resetTime || '-'}s</p>
+          <p class="text-[11px] text-slate-500">{resetElapsed.toFixed(1)}s / 残り{resetRemaining.toFixed(1)}s</p>
         </div>
         <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
           <p class="label">state</p>

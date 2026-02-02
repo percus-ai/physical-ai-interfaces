@@ -1,6 +1,6 @@
 import { getBackendUrl } from '$lib/config';
 
-type RosbridgeStatus = 'idle' | 'connecting' | 'connected' | 'error';
+type RosbridgeStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
 
 type SubscriptionOptions = {
   type?: string;
@@ -21,19 +21,29 @@ class RosbridgeClient {
   private status: RosbridgeStatus = 'idle';
   private subscriptions = new Map<string, Subscription>();
   private connectPromise: Promise<void> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private statusListeners = new Set<(status: RosbridgeStatus) => void>();
 
   getStatus() {
     return this.status;
+  }
+
+  onStatusChange(handler: (status: RosbridgeStatus) => void) {
+    this.statusListeners.add(handler);
+    return () => {
+      this.statusListeners.delete(handler);
+    };
   }
 
   connect() {
     if (this.status === 'connected' && this.ws) return Promise.resolve();
     if (this.connectPromise) return this.connectPromise;
 
-    this.status = 'connecting';
+    this.updateStatus('connecting');
     const url = this.buildUrl();
     if (!url) {
-      this.status = 'error';
+      this.updateStatus('error');
       return Promise.reject(new Error('rosbridge url not available'));
     }
 
@@ -42,8 +52,9 @@ class RosbridgeClient {
       this.ws = ws;
 
       ws.onopen = () => {
-        this.status = 'connected';
+        this.updateStatus('connected');
         this.connectPromise = null;
+        this.reconnectAttempt = 0;
         for (const sub of this.subscriptions.values()) {
           this.sendSubscribe(sub.topic, sub.options);
         }
@@ -69,15 +80,17 @@ class RosbridgeClient {
       };
 
       ws.onerror = () => {
-        this.status = 'error';
+        this.updateStatus('error');
         this.connectPromise = null;
+        this.scheduleReconnect();
         reject(new Error('rosbridge connection error'));
       };
 
       ws.onclose = () => {
-        this.status = 'idle';
+        this.updateStatus('disconnected');
         this.connectPromise = null;
         this.ws = null;
+        this.scheduleReconnect();
       };
     });
 
@@ -135,6 +148,26 @@ class RosbridgeClient {
   private sendUnsubscribe(topic: string) {
     if (!this.ws || this.status !== 'connected') return;
     this.ws.send(JSON.stringify({ op: 'unsubscribe', topic }));
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer || this.subscriptions.size === 0) return;
+    const delay = Math.min(1000 * 2 ** this.reconnectAttempt, 15000);
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().catch(() => {
+        // retry continues on next schedule
+      });
+    }, delay);
+  }
+
+  private updateStatus(next: RosbridgeStatus) {
+    if (this.status === next) return;
+    this.status = next;
+    for (const listener of this.statusListeners) {
+      listener(next);
+    }
   }
 
   private buildUrl() {
