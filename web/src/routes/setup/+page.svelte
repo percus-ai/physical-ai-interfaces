@@ -1,8 +1,11 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import { Button } from 'bits-ui';
   import { get } from 'svelte/store';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   type ProfileInstanceResponse = {
     instance?: {
@@ -61,12 +64,11 @@
   });
 
   const activeStatusQuery = createQuery<ProfileStatusResponse>({
-    queryKey: ['profiles', 'instances', 'active', 'status', activeProfileId],
+    queryKey: ['profiles', 'instances', 'active', 'status'],
     queryFn: async () => {
       if (!activeProfileId) return { cameras: [], arms: [] };
       return api.profiles.activeStatus();
-    },
-    refetchInterval: 5000
+    }
   });
 
   let restartPending = false;
@@ -76,8 +78,7 @@
 
   const vlaborStatusQuery = createQuery<VlaborStatusResponse>({
     queryKey: ['profiles', 'vlabor', 'status'],
-    queryFn: api.profiles.vlaborStatus,
-    refetchInterval: () => (restartPending || actionPending ? 2000 : false)
+    queryFn: api.profiles.vlaborStatus
   });
 
   type ProfileSettingsState = {
@@ -172,6 +173,21 @@
       await snapshot.refetch();
     }
   }
+
+  let stopVlaborStream = () => {};
+
+  onMount(() => {
+    stopVlaborStream = connectStream({
+      path: '/api/stream/profiles/vlabor',
+      onMessage: (payload) => {
+        queryClient.setQueryData(['profiles', 'vlabor', 'status'], payload);
+      }
+    });
+  });
+
+  onDestroy(() => {
+    stopVlaborStream();
+  });
 
   async function saveProfileSettings() {
     const instance = $activeInstanceQuery.data?.instance;

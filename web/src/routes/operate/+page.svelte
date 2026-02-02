@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   type TeleopSession = {
     session_id?: string;
@@ -86,14 +89,12 @@
 
   const teleopSessionsQuery = createQuery<TeleopSessionsResponse>({
     queryKey: ['teleop', 'sessions'],
-    queryFn: api.teleop.sessions,
-    refetchInterval: 2000
+    queryFn: api.teleop.sessions
   });
 
   const teleopProfileConfigQuery = createQuery<TeleopProfileConfigResponse>({
     queryKey: ['teleop', 'profile-config'],
-    queryFn: api.teleop.profileConfig,
-    refetchInterval: 5000
+    queryFn: api.teleop.profileConfig
   });
 
   const inferenceModelsQuery = createQuery<InferenceModelsResponse>({
@@ -108,14 +109,12 @@
 
   const inferenceRunnerStatusQuery = createQuery<InferenceRunnerStatusResponse>({
     queryKey: ['inference', 'runner', 'status'],
-    queryFn: api.inference.runnerStatus,
-    refetchInterval: 2000
+    queryFn: api.inference.runnerStatus
   });
 
   const operateStatusQuery = createQuery<OperateStatusResponse>({
     queryKey: ['operate', 'status'],
-    queryFn: api.operate.status,
-    refetchInterval: 5000
+    queryFn: api.operate.status
   });
 
   const resolveModelId = (model: InferenceModel) => model.model_id ?? model.name ?? '';
@@ -270,6 +269,24 @@
   $: teleopConfigReady = Boolean(profileConfig?.leader_port && profileConfig?.follower_port);
   $: networkDetails = $operateStatusQuery.data?.network?.details ?? {};
   $: driverDetails = $operateStatusQuery.data?.driver?.details ?? {};
+
+  let stopOperateStream = () => {};
+
+  onMount(() => {
+    stopOperateStream = connectStream({
+      path: '/api/stream/operate/status',
+      onMessage: (payload) => {
+        queryClient.setQueryData(['teleop', 'sessions'], payload.teleop_sessions);
+        queryClient.setQueryData(['teleop', 'profile-config'], payload.teleop_profile_config);
+        queryClient.setQueryData(['inference', 'runner', 'status'], payload.inference_runner_status);
+        queryClient.setQueryData(['operate', 'status'], payload.operate_status);
+      }
+    });
+  });
+
+  onDestroy(() => {
+    stopOperateStream();
+  });
 </script>
 
 <section class="card-strong p-8">

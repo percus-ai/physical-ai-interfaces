@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/stores';
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   import LayoutNode from '$lib/components/recording/LayoutNode.svelte';
   import BlueprintTree from '$lib/components/recording/BlueprintTree.svelte';
@@ -66,21 +68,18 @@
   $: sessionKindParam = $page.url.searchParams.get('kind') ?? '';
 
   const inferenceRunnerStatusQuery = createQuery<InferenceRunnerStatusResponse>({
-    queryKey: ['inference', 'runner', 'status', 'operate-session'],
-    queryFn: api.inference.runnerStatus,
-    refetchInterval: 2000
+    queryKey: ['inference', 'runner', 'status'],
+    queryFn: api.inference.runnerStatus
   });
 
   const teleopSessionsQuery = createQuery<TeleopSessionsResponse>({
-    queryKey: ['teleop', 'sessions', 'operate-session'],
-    queryFn: api.teleop.sessions,
-    refetchInterval: 2000
+    queryKey: ['teleop', 'sessions'],
+    queryFn: api.teleop.sessions
   });
 
   const topicsQuery = createQuery<ProfileStatusResponse>({
-    queryKey: ['profiles', 'instances', 'active', 'status', 'topics', 'operate'],
-    queryFn: api.profiles.activeStatus,
-    refetchInterval: 5000
+    queryKey: ['profiles', 'instances', 'active', 'status'],
+    queryFn: api.profiles.activeStatus
   });
 
   let blueprint: BlueprintNode = createDefaultBlueprint();
@@ -146,6 +145,24 @@
 
   onMount(() => {
     mounted = true;
+  });
+
+  let stopOperateStream = () => {};
+
+  onMount(() => {
+    stopOperateStream = connectStream({
+      path: '/api/stream/operate/status',
+      onMessage: (payload) => {
+        queryClient.setQueryData(['teleop', 'sessions'], payload.teleop_sessions);
+        queryClient.setQueryData(['teleop', 'profile-config'], payload.teleop_profile_config);
+        queryClient.setQueryData(['inference', 'runner', 'status'], payload.inference_runner_status);
+        queryClient.setQueryData(['operate', 'status'], payload.operate_status);
+      }
+    });
+  });
+
+  onDestroy(() => {
+    stopOperateStream();
   });
 
   $: if (

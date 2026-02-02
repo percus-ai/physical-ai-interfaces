@@ -2,16 +2,8 @@
   import '../app.css';
   import AppShell from '$lib/components/AppShell.svelte';
   import { Tooltip } from 'bits-ui';
-  import { QueryClient, QueryClientProvider } from '@tanstack/svelte-query';
-
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: {
-        staleTime: 10_000,
-        refetchOnWindowFocus: false
-      }
-    }
-  });
+  import { QueryClientProvider } from '@tanstack/svelte-query';
+  import { queryClient } from '$lib/queryClient';
 </script>
 
 <QueryClientProvider client={queryClient}>

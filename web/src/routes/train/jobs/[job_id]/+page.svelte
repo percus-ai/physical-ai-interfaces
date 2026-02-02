@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { derived } from 'svelte/store';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
@@ -9,6 +9,8 @@
   import { api } from '$lib/api/client';
   import { getBackendUrl } from '$lib/config';
   import { formatDate } from '$lib/format';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   type JobInfo = {
     job_id?: string;
@@ -73,9 +75,10 @@
   let metricsError = '';
 
   let copied = false;
-  let autoRefresh = true;
-  let refreshTimer: ReturnType<typeof setInterval> | null = null;
-  let refreshTick = 0;
+  type TrainingJobStreamPayload = {
+    job_detail?: JobDetailResponse;
+    metrics?: { train?: MetricPoint[]; val?: MetricPoint[] };
+  };
 
   let streamStatus = 'idle';
   let streamError = '';
@@ -243,31 +246,8 @@
     streamStatus = 'stopped';
   };
 
-  const startAutoRefresh = () => {
-    if (refreshTimer || !autoRefresh) return;
-    refreshTimer = setInterval(() => {
-      if (!autoRefresh || !isRunning) return;
-      $jobQuery?.refetch?.();
-      refreshTick += 1;
-      if (refreshTick % 3 === 0) {
-        fetchMetrics();
-      }
-    }, 5000);
-  };
-
-  const stopAutoRefresh = () => {
-    if (refreshTimer) clearInterval(refreshTimer);
-    refreshTimer = null;
-  };
-
   $: if (!isRunning && streamWs) {
     stopLogStream();
-  }
-
-  $: if (autoRefresh && isRunning) {
-    startAutoRefresh();
-  } else {
-    stopAutoRefresh();
   }
 
   let lastJobId = '';
@@ -285,15 +265,29 @@
     metricsError = '';
   }
 
-  onMount(() => {
-    fetchMetrics();
-    if (isRunning) {
-      startAutoRefresh();
-    }
-  });
+  let stopTrainingStream = () => {};
+  let lastStreamJobId = '';
+
+  $: if (jobId && jobId !== lastStreamJobId) {
+    stopTrainingStream();
+    lastStreamJobId = jobId;
+    stopTrainingStream = connectStream<TrainingJobStreamPayload>({
+      path: `/api/stream/training/jobs/${encodeURIComponent(jobId)}`,
+      onMessage: (payload) => {
+        if (payload.job_detail) {
+          queryClient.setQueryData(['training', 'job', jobId], payload.job_detail);
+        }
+        if (payload.metrics) {
+          metrics = payload.metrics;
+          metricsLoading = false;
+          metricsError = '';
+        }
+      }
+    });
+  }
 
   onDestroy(() => {
-    stopAutoRefresh();
+    stopTrainingStream();
     streamWs?.close();
   });
 </script>
@@ -511,8 +505,8 @@
       </p>
       {#if isRunning}
         <div class="mt-3 flex items-center gap-2 text-xs text-slate-500">
-          <span class="chip">自動更新中</span>
-          <span>5秒間隔で進捗とステータスを更新します。</span>
+          <span class="chip">ストリーミング更新</span>
+          <span>進捗とステータスはストリーミングで更新します。</span>
         </div>
       {/if}
     </section>

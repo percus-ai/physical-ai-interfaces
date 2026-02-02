@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { derived } from 'svelte/store';
   import { page } from '$app/stores';
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   import LayoutNode from '$lib/components/recording/LayoutNode.svelte';
   import BlueprintTree from '$lib/components/recording/BlueprintTree.svelte';
@@ -56,16 +58,14 @@
       return {
         queryKey: ['recording', 'session', currentId],
         queryFn: () => api.recording.sessionStatus(currentId),
-        enabled: Boolean(currentId),
-        refetchInterval: 1500
+        enabled: Boolean(currentId)
       };
     })
   );
 
   const topicsQuery = createQuery<ProfileStatusResponse>({
-    queryKey: ['profiles', 'instances', 'active', 'status', 'topics'],
-    queryFn: api.profiles.activeStatus,
-    refetchInterval: 5000
+    queryKey: ['profiles', 'instances', 'active', 'status'],
+    queryFn: api.profiles.activeStatus
   });
 
   let blueprint: BlueprintNode = createDefaultBlueprint();
@@ -130,6 +130,24 @@
 
   onMount(() => {
     mounted = true;
+  });
+
+  let stopRecordingStream = () => {};
+  let lastStreamSessionId = '';
+
+  $: if (mounted && sessionId && sessionId !== lastStreamSessionId) {
+    stopRecordingStream();
+    lastStreamSessionId = sessionId;
+    stopRecordingStream = connectStream({
+      path: `/api/stream/recording/sessions/${encodeURIComponent(sessionId)}`,
+      onMessage: (payload) => {
+        queryClient.setQueryData(['recording', 'session', sessionId], payload);
+      }
+    });
+  }
+
+  onDestroy(() => {
+    stopRecordingStream();
   });
 
   $: if (mounted && sessionId && sessionId !== lastSessionId) {

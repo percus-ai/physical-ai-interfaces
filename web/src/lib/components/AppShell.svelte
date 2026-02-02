@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/stores';
   import { navItems, quickActions } from '$lib/navigation';
   import { Button } from 'bits-ui';
@@ -7,6 +7,8 @@
   import { createQuery } from '@tanstack/svelte-query';
 
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
+  import { queryClient } from '$lib/queryClient';
 
   let mobileOpen = false;
   let authenticated = false;
@@ -79,6 +81,20 @@
   }
 
   onMount(refreshAuth);
+  let stopProfileStream = () => {};
+
+  onMount(() => {
+    stopProfileStream = connectStream({
+      path: '/api/stream/profiles/active',
+      onMessage: (payload) => {
+        queryClient.setQueryData(['profiles', 'instances', 'active', 'status'], payload);
+      }
+    });
+  });
+
+  onDestroy(() => {
+    stopProfileStream();
+  });
 
   const formatProfileLabel = (profile: ProfileInstance) => {
     const key = profile.class_key ?? 'profile';

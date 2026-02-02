@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from 'bits-ui';
+  import { Button, Tooltip } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
   import { formatBytes, formatDate, formatPercent } from '$lib/format';

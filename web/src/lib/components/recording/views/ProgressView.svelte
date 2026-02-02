@@ -19,8 +19,7 @@
     derived(sessionIdStore, ($sessionId) => ({
       queryKey: ['recording', 'session', $sessionId],
       queryFn: () => api.recording.sessionStatus($sessionId),
-      enabled: Boolean($sessionId),
-      refetchInterval: 1500
+      enabled: Boolean($sessionId)
     }))
   );
 

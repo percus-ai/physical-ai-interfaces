@@ -10,9 +10,8 @@
   };
 
   const statusQuery = createQuery<ProfileStatusResponse>({
-    queryKey: ['profiles', 'instances', 'active', 'status', 'topics'],
-    queryFn: api.profiles.activeStatus,
-    refetchInterval: 5000
+    queryKey: ['profiles', 'instances', 'active', 'status'],
+    queryFn: api.profiles.activeStatus
   });
 </script>
 
