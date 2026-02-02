@@ -29,7 +29,7 @@ from interfaces_backend.models.profile import (
     ProfileDeviceStatusArm,
     VlaborStatusResponse,
 )
-from percus_ai.db import get_current_user_id, get_supabase_client
+from percus_ai.db import get_current_user_id, get_supabase_async_client
 from percus_ai.profiles.models import ProfileClass, ProfileInstance
 from percus_ai.profiles.registry import ProfileRegistry
 from percus_ai.profiles.paths import get_profile_classes_dir
@@ -162,17 +162,15 @@ def _load_profile_class_from_yaml(path: Path) -> ProfileClass:
     )
 
 
-def _ensure_profile_class(profile_class: ProfileClass) -> ProfileClass:
-    client = get_supabase_client()
+async def _ensure_profile_class(profile_class: ProfileClass) -> ProfileClass:
+    client = await get_supabase_async_client()
     rows = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("*")
         .eq("class_key", profile_class.class_key)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if rows:
         row = rows[0]
         return ProfileClass(
@@ -193,17 +191,15 @@ def _ensure_profile_class(profile_class: ProfileClass) -> ProfileClass:
         "profile": profile_class.profile,
         "metadata": profile_class.metadata,
     }
-    client.table("profile_classes").insert(record).execute()
+    await client.table("profile_classes").insert(record).execute()
     rows = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("*")
         .eq("class_key", profile_class.class_key)
         .order("created_at", desc=True)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=500, detail="Failed to load profile class")
     row = rows[0]
@@ -218,7 +214,7 @@ def _ensure_profile_class(profile_class: ProfileClass) -> ProfileClass:
     )
 
 
-def _bootstrap_default_profile() -> ProfileInstance:
+async def _bootstrap_default_profile() -> ProfileInstance:
     classes_dir = get_profile_classes_dir()
     if not classes_dir.exists():
         raise HTTPException(status_code=404, detail="Profile class not found")
@@ -227,7 +223,7 @@ def _bootstrap_default_profile() -> ProfileInstance:
         raise HTTPException(status_code=404, detail="Profile class not found")
 
     profile_class = _load_profile_class_from_yaml(yaml_files[0])
-    profile_class = _ensure_profile_class(profile_class)
+    profile_class = await _ensure_profile_class(profile_class)
 
     instance_id = str(uuid4())
     instance = ProfileInstance(
@@ -261,36 +257,34 @@ def _bootstrap_default_profile() -> ProfileInstance:
     if owner:
         record["owner_user_id"] = owner
 
-    client = get_supabase_client()
-    client.table("profile_instances").insert(record).execute()
-    _set_active_instance(client, instance.id)
+    client = await get_supabase_async_client()
+    await client.table("profile_instances").insert(record).execute()
+    await _set_active_instance(client, instance.id)
     return instance
 
 
-def _ensure_profile_instances() -> None:
+async def _ensure_profile_instances() -> None:
     classes_dir = get_profile_classes_dir()
     if not classes_dir.exists():
         return
     yaml_files = sorted(classes_dir.glob("*.yaml"))
     if not yaml_files:
         return
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     owner = _optional_user_id()
     for path in yaml_files:
         try:
             profile_class = _load_profile_class_from_yaml(path)
         except Exception:
             continue
-        profile_class = _ensure_profile_class(profile_class)
+        profile_class = await _ensure_profile_class(profile_class)
         rows = (
-            client.table("profile_instances")
+            await client.table("profile_instances")
             .select("id")
             .eq("class_id", profile_class.id)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
         if rows:
             continue
         instance = ProfileInstance(
@@ -317,7 +311,7 @@ def _ensure_profile_instances() -> None:
         }
         if owner:
             record["owner_user_id"] = owner
-        client.table("profile_instances").insert(record).execute()
+        await client.table("profile_instances").insert(record).execute()
 
 
 def _resolve_profile_settings(profile_class, instance: ProfileInstance) -> dict:
@@ -426,15 +420,15 @@ def _row_to_profile_instance(row: Dict) -> ProfileInstance:
     )
 
 
-def _set_active_instance(client, instance_id: str) -> None:
-    client.table("profile_instances").update({"is_active": False}).neq("id", instance_id).execute()
-    client.table("profile_instances").update({"is_active": True}).eq("id", instance_id).execute()
+async def _set_active_instance(client, instance_id: str) -> None:
+    await client.table("profile_instances").update({"is_active": False}).neq("id", instance_id).execute()
+    await client.table("profile_instances").update({"is_active": True}).eq("id", instance_id).execute()
 
 
 @router.get("/classes", response_model=ProfileClassesResponse)
 async def list_profile_classes():
     registry = ProfileRegistry()
-    classes = registry.list_classes()
+    classes = await registry.list_classes()
     items = [
         ProfileClassInfo(
             id=cls.id or "",
@@ -450,14 +444,14 @@ async def list_profile_classes():
 @router.get("/classes/{class_id}", response_model=ProfileClassDetailResponse)
 async def get_profile_class(class_id: str):
     registry = ProfileRegistry()
-    profile_class = registry.get_class(class_id)
+    profile_class = await registry.get_class(class_id)
     return ProfileClassDetailResponse(profile_class=profile_class.model_dump())
 
 
 @router.post("/classes", response_model=ProfileClassDetailResponse)
 async def create_profile_class(request: ProfileClassCreateRequest):
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     record = {
         "class_key": request.class_key,
         "version": request.version,
@@ -466,21 +460,19 @@ async def create_profile_class(request: ProfileClassCreateRequest):
         "profile": request.profile,
         "metadata": request.metadata,
     }
-    client.table("profile_classes").insert(record).execute()
+    await client.table("profile_classes").insert(record).execute()
     rows = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("*")
         .eq("class_key", request.class_key)
         .order("created_at", desc=True)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=500, detail="Failed to create profile class")
     row = rows[0]
-    profile_class = ProfileRegistry().get_class(str(row.get("id")))
+    profile_class = await ProfileRegistry().get_class(str(row.get("id")))
     write_profile_class_yaml(profile_class)
     return ProfileClassDetailResponse(profile_class=profile_class.model_dump())
 
@@ -488,16 +480,14 @@ async def create_profile_class(request: ProfileClassCreateRequest):
 @router.put("/classes/{class_id}", response_model=ProfileClassDetailResponse)
 async def update_profile_class(class_id: str, request: ProfileClassUpdateRequest):
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("*")
         .eq("id", class_id)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Profile class not found")
     row = rows[0]
@@ -514,9 +504,9 @@ async def update_profile_class(class_id: str, request: ProfileClassUpdateRequest
         updated["metadata"] = request.metadata
     updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    client.table("profile_classes").update(updated).eq("id", class_id).execute()
+    await client.table("profile_classes").update(updated).eq("id", class_id).execute()
 
-    profile_class = ProfileRegistry().get_class(class_id)
+    profile_class = await ProfileRegistry().get_class(class_id)
     write_profile_class_yaml(profile_class)
     return ProfileClassDetailResponse(profile_class=profile_class.model_dump())
 
@@ -524,20 +514,18 @@ async def update_profile_class(class_id: str, request: ProfileClassUpdateRequest
 @router.delete("/classes/{class_id}")
 async def delete_profile_class(class_id: str):
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("id,class_key")
         .eq("id", class_id)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Profile class not found")
     class_key = rows[0].get("class_key")
-    client.table("profile_classes").delete().eq("id", class_id).execute()
+    await client.table("profile_classes").delete().eq("id", class_id).execute()
     if class_key:
         yaml_path = get_profile_classes_dir() / f"{class_key}.yaml"
         if yaml_path.exists():
@@ -547,10 +535,12 @@ async def delete_profile_class(class_id: str):
 
 @router.get("/instances", response_model=ProfileInstancesResponse)
 async def list_profile_instances():
-    _ensure_profile_instances()
-    client = get_supabase_client()
-    rows = client.table("profile_instances").select("*").order("created_at", desc=True).execute().data or []
-    class_rows = client.table("profile_classes").select("id,class_key").execute().data or []
+    await _ensure_profile_instances()
+    client = await get_supabase_async_client()
+    rows = (
+        await client.table("profile_instances").select("*").order("created_at", desc=True).execute()
+    ).data or []
+    class_rows = (await client.table("profile_classes").select("id,class_key").execute()).data or []
     class_key_map = {str(c.get("id")): c.get("class_key") for c in class_rows}
     items = [
         _record_to_instance(row, class_key_map.get(str(row.get("class_id")), ""))
@@ -561,20 +551,20 @@ async def list_profile_instances():
 
 @router.get("/instances/active", response_model=ProfileInstanceResponse)
 async def get_active_instance():
-    _ensure_profile_instances()
-    client = get_supabase_client()
-    rows = client.table("profile_instances").select("*").eq("is_active", True).limit(1).execute().data or []
+    await _ensure_profile_instances()
+    client = await get_supabase_async_client()
+    rows = (
+        await client.table("profile_instances").select("*").eq("is_active", True).limit(1).execute()
+    ).data or []
     if not rows:
-        instance = _bootstrap_default_profile()
+        instance = await _bootstrap_default_profile()
         class_row = (
-            client.table("profile_classes")
+            await client.table("profile_classes")
             .select("class_key")
             .eq("id", instance.class_id)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
         class_key = class_row[0].get("class_key") if class_row else ""
         instance_model = ProfileInstanceModel(
             id=instance.id,
@@ -591,14 +581,12 @@ async def get_active_instance():
         )
         return ProfileInstanceResponse(instance=instance_model)
     class_row = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("class_key")
         .eq("id", rows[0].get("class_id"))
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     class_key = class_row[0].get("class_key") if class_row else ""
     instance = _record_to_instance(rows[0], class_key)
     return ProfileInstanceResponse(instance=instance)
@@ -606,11 +594,13 @@ async def get_active_instance():
 
 @router.get("/instances/active/status", response_model=ProfileInstanceStatusResponse)
 async def get_active_instance_status():
-    _ensure_profile_instances()
-    client = get_supabase_client()
-    rows = client.table("profile_instances").select("*").eq("is_active", True).limit(1).execute().data or []
+    await _ensure_profile_instances()
+    client = await get_supabase_async_client()
+    rows = (
+        await client.table("profile_instances").select("*").eq("is_active", True).limit(1).execute()
+    ).data or []
     if not rows:
-        instance = _bootstrap_default_profile()
+        instance = await _bootstrap_default_profile()
         rows = [
             {
                 "id": instance.id,
@@ -626,17 +616,15 @@ async def get_active_instance_status():
         ]
     instance_row = rows[0]
     class_row = (
-        client.table("profile_classes")
+        await client.table("profile_classes")
         .select("*")
         .eq("id", instance_row.get("class_id"))
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not class_row:
         raise HTTPException(status_code=404, detail="Profile class not found")
-    profile_class = ProfileRegistry().get_class(str(instance_row.get("class_id")))
+    profile_class = await ProfileRegistry().get_class(str(instance_row.get("class_id")))
     instance = _row_to_profile_instance(instance_row)
     settings = _resolve_profile_settings(profile_class, instance)
 
@@ -710,7 +698,7 @@ async def stop_vlabor():
 async def create_profile_instance(request: ProfileInstanceCreateRequest):
     _require_user_id()
     registry = ProfileRegistry()
-    profile_class = registry.get_class(request.class_id)
+    profile_class = await registry.get_class(request.class_id)
 
     instance_id = str(uuid4())
     instance = ProfileInstance(
@@ -743,10 +731,10 @@ async def create_profile_instance(request: ProfileInstanceCreateRequest):
         "owner_user_id": get_current_user_id(),
     }
 
-    client = get_supabase_client()
-    client.table("profile_instances").insert(record).execute()
+    client = await get_supabase_async_client()
+    await client.table("profile_instances").insert(record).execute()
     if request.activate:
-        _set_active_instance(client, instance.id)
+        await _set_active_instance(client, instance.id)
         _restart_vlabor()
 
     return ProfileInstanceResponse(
@@ -758,8 +746,10 @@ async def create_profile_instance(request: ProfileInstanceCreateRequest):
 @router.put("/instances/{instance_id}", response_model=ProfileInstanceResponse)
 async def update_profile_instance(instance_id: str, request: ProfileInstanceUpdateRequest):
     _require_user_id()
-    client = get_supabase_client()
-    rows = client.table("profile_instances").select("*").eq("id", instance_id).limit(1).execute().data or []
+    client = await get_supabase_async_client()
+    rows = (
+        await client.table("profile_instances").select("*").eq("id", instance_id).limit(1).execute()
+    ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Profile instance not found")
     row = rows[0]
@@ -775,10 +765,10 @@ async def update_profile_instance(instance_id: str, request: ProfileInstanceUpda
         updated["thumbnail_key"] = request.thumbnail_key
     updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    client.table("profile_instances").update(updated).eq("id", instance_id).execute()
+    await client.table("profile_instances").update(updated).eq("id", instance_id).execute()
 
     registry = ProfileRegistry()
-    profile_class = registry.get_class(updated["class_id"])
+    profile_class = await registry.get_class(updated["class_id"])
     instance = ProfileInstance(
         id=instance_id,
         class_id=profile_class.id,
@@ -794,7 +784,7 @@ async def update_profile_instance(instance_id: str, request: ProfileInstanceUpda
     if request.activate:
         write_current_profile_config(profile_class, instance)
         write_profile_instance_snapshot(profile_class, instance)
-        _set_active_instance(client, instance_id)
+        await _set_active_instance(client, instance_id)
         _restart_vlabor()
 
     return ProfileInstanceResponse(

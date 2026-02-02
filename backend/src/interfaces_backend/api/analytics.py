@@ -15,7 +15,7 @@ from interfaces_backend.models.analytics import (
     StorageCategory,
     StorageStatsResponse,
 )
-from percus_ai.db import get_supabase_client
+from percus_ai.db import get_supabase_async_client
 from percus_ai.storage import get_datasets_dir, get_models_dir
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -40,16 +40,22 @@ def _get_dir_size(path: Path) -> float:
     return total
 
 
-def _get_profile_stats() -> list[dict]:
+async def _get_profile_stats() -> list[dict]:
     """Collect statistics for profile instances from DB."""
-    client = get_supabase_client()
-    profile_rows = client.table("profile_instances").select("id,name,updated_at").execute().data or []
-    dataset_rows = client.table("datasets").select(
-        "profile_instance_id,episode_count,size_bytes,updated_at,status",
-    ).execute().data or []
-    model_rows = client.table("models").select(
-        "profile_instance_id,size_bytes,updated_at,status",
-    ).execute().data or []
+    client = await get_supabase_async_client()
+    profile_rows = (
+        await client.table("profile_instances").select("id,name,updated_at").execute()
+    ).data or []
+    dataset_rows = (
+        await client.table("datasets")
+        .select("profile_instance_id,episode_count,size_bytes,updated_at,status")
+        .execute()
+    ).data or []
+    model_rows = (
+        await client.table("models")
+        .select("profile_instance_id,size_bytes,updated_at,status")
+        .execute()
+    ).data or []
 
     stats: dict[str, dict] = {}
     for row in profile_rows:
@@ -138,11 +144,13 @@ def _get_training_stats() -> dict:
 @router.get("/overview", response_model=OverviewResponse)
 async def get_overview():
     """Get overall statistics."""
-    client = get_supabase_client()
-    profiles = client.table("profile_instances").select("id").execute().data or []
-    datasets = client.table("datasets").select("episode_count,size_bytes,status").execute().data or []
-    models = client.table("models").select("size_bytes,status").execute().data or []
-    jobs = client.table("training_jobs").select("status").execute().data or []
+    client = await get_supabase_async_client()
+    profiles = (await client.table("profile_instances").select("id").execute()).data or []
+    datasets = (
+        await client.table("datasets").select("episode_count,size_bytes,status").execute()
+    ).data or []
+    models = (await client.table("models").select("size_bytes,status").execute()).data or []
+    jobs = (await client.table("training_jobs").select("status").execute()).data or []
 
     total_episodes = sum(d.get("episode_count") or 0 for d in datasets if d.get("status") == "active")
     total_models = sum(1 for m in models if m.get("status") == "active")
@@ -173,7 +181,7 @@ async def get_overview():
 @router.get("/profiles", response_model=ProfileStatsResponse)
 async def get_profile_stats():
     """Get per-profile statistics."""
-    profile_stats = _get_profile_stats()
+    profile_stats = await _get_profile_stats()
     profiles = [
         ProfileStats(
             profile_instance_id=p["profile_instance_id"],

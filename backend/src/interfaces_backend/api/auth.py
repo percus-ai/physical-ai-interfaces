@@ -52,9 +52,9 @@ def _extract_user_id(response: Any, session: Any) -> str | None:
 
 
 @router.post("/login", response_model=AuthLoginResponse)
-def login(request: AuthLoginRequest, response: Response, http_request: Request) -> AuthLoginResponse:
-    client = create_supabase_anon_client()
-    supabase_response = client.auth.sign_in_with_password(
+async def login(request: AuthLoginRequest, response: Response, http_request: Request) -> AuthLoginResponse:
+    client = await create_supabase_anon_client()
+    supabase_response = await client.auth.sign_in_with_password(
         {"email": request.email, "password": request.password}
     )
     session = _extract_session(supabase_response)

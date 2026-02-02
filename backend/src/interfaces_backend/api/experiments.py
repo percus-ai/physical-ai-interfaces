@@ -23,7 +23,7 @@ from interfaces_backend.models.experiment import (
     ExperimentModel,
     ExperimentUpdateRequest,
 )
-from percus_ai.db import get_current_user_id, get_supabase_client
+from percus_ai.db import get_current_user_id, get_supabase_async_client
 from percus_ai.storage.s3 import S3Manager
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def _get_r2_version_prefix() -> str:
 async def create_experiment(request: ExperimentCreateRequest):
     """Create a new experiment."""
     user_id = _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     metric_options = (
         request.metric_options
         if request.metric_options is not None
@@ -121,7 +121,7 @@ async def create_experiment(request: ExperimentCreateRequest):
         "owner_user_id": user_id,
         "updated_at": _now_iso(),
     }
-    response = client.table("experiments").insert(record).execute()
+    response = await client.table("experiments").insert(record).execute()
     rows = response.data or []
     if not rows:
         raise HTTPException(status_code=500, detail="Failed to create experiment")
@@ -136,7 +136,7 @@ async def list_experiments(
     offset: int = Query(0, description="Offset"),
 ):
     """List experiments."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     query = client.table("experiments").select("*")
     if model_id:
         query = query.eq("model_id", model_id)
@@ -144,7 +144,7 @@ async def list_experiments(
         query = query.eq("profile_instance_id", profile_instance_id)
     if limit > 0:
         query = query.range(offset, offset + limit - 1)
-    rows = query.execute().data or []
+    rows = (await query.execute()).data or []
     experiments = [_row_to_experiment(row) for row in rows]
     return ExperimentListResponse(experiments=experiments, total=len(experiments))
 
@@ -152,15 +152,13 @@ async def list_experiments(
 @router.get("/{experiment_id}", response_model=ExperimentModel)
 async def get_experiment(experiment_id: str):
     """Get experiment details."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("experiments")
+        await client.table("experiments")
         .select("*")
         .eq("id", experiment_id)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return _row_to_experiment(rows[0])
@@ -170,13 +168,13 @@ async def get_experiment(experiment_id: str):
 async def update_experiment(experiment_id: str, request: ExperimentUpdateRequest):
     """Update experiment details."""
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     update_data["updated_at"] = _now_iso()
     response = (
-        client.table("experiments")
+        await client.table("experiments")
         .update(update_data)
         .eq("id", experiment_id)
         .execute()
@@ -191,27 +189,27 @@ async def update_experiment(experiment_id: str, request: ExperimentUpdateRequest
 async def delete_experiment(experiment_id: str):
     """Delete experiment (cascade deletes evaluations and analyses)."""
     _require_user_id()
-    client = get_supabase_client()
-    existing = client.table("experiments").select("id").eq("id", experiment_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("experiments").select("id").eq("id", experiment_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail="Experiment not found")
-    client.table("experiments").delete().eq("id", experiment_id).execute()
+    await client.table("experiments").delete().eq("id", experiment_id).execute()
     return {"deleted": True}
 
 
 @router.get("/{experiment_id}/evaluations", response_model=ExperimentEvaluationListResponse)
 async def list_experiment_evaluations(experiment_id: str):
     """List evaluations for an experiment."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("experiment_evaluations")
+        await client.table("experiment_evaluations")
         .select("*")
         .eq("experiment_id", experiment_id)
         .order("trial_index")
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     evaluations = [_row_to_evaluation(row) for row in rows]
     return ExperimentEvaluationListResponse(evaluations=evaluations, total=len(evaluations))
 
@@ -222,11 +220,13 @@ async def replace_experiment_evaluations(
 ):
     """Replace all evaluations for an experiment (indices assigned by server)."""
     user_id = _require_user_id()
-    client = get_supabase_client()
-    existing = client.table("experiments").select("id").eq("id", experiment_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("experiments").select("id").eq("id", experiment_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail="Experiment not found")
-    client.table("experiment_evaluations").delete().eq("experiment_id", experiment_id).execute()
+    await client.table("experiment_evaluations").delete().eq("experiment_id", experiment_id).execute()
 
     items = request.items or []
     if items:
@@ -242,22 +242,20 @@ async def replace_experiment_evaluations(
                     "owner_user_id": user_id,
                 }
             )
-        client.table("experiment_evaluations").insert(records).execute()
+        await client.table("experiment_evaluations").insert(records).execute()
     return {"updated": True, "count": len(items)}
 
 
 @router.get("/{experiment_id}/evaluation_summary", response_model=ExperimentEvaluationSummary)
 async def experiment_evaluation_summary(experiment_id: str):
     """Get evaluation summary for an experiment."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("experiment_evaluations")
+        await client.table("experiment_evaluations")
         .select("value")
         .eq("experiment_id", experiment_id)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     total = len(rows)
     counts: dict[str, int] = {}
     for row in rows:
@@ -292,16 +290,14 @@ async def get_experiment_media_urls(request: ExperimentMediaUrlRequest):
 @router.get("/{experiment_id}/analyses", response_model=ExperimentAnalysisListResponse)
 async def list_experiment_analyses(experiment_id: str):
     """List analyses for an experiment."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("experiment_analyses")
+        await client.table("experiment_analyses")
         .select("*")
         .eq("experiment_id", experiment_id)
         .order("block_index")
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     analyses = [_row_to_analysis(row) for row in rows]
     return ExperimentAnalysisListResponse(analyses=analyses, total=len(analyses))
 
@@ -312,11 +308,13 @@ async def replace_experiment_analyses(
 ):
     """Replace all analyses for an experiment (indices assigned by server)."""
     user_id = _require_user_id()
-    client = get_supabase_client()
-    existing = client.table("experiments").select("id").eq("id", experiment_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("experiments").select("id").eq("id", experiment_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail="Experiment not found")
-    client.table("experiment_analyses").delete().eq("experiment_id", experiment_id).execute()
+    await client.table("experiment_analyses").delete().eq("experiment_id", experiment_id).execute()
 
     items = request.items or []
     if items:
@@ -335,7 +333,7 @@ async def replace_experiment_analyses(
                     "updated_at": now_iso,
                 }
             )
-        client.table("experiment_analyses").insert(records).execute()
+        await client.table("experiment_analyses").insert(records).execute()
     return {"updated": True, "count": len(items)}
 
 
@@ -347,13 +345,13 @@ async def update_experiment_analysis(
 ):
     """Update analysis block."""
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     update_data["updated_at"] = _now_iso()
     response = (
-        client.table("experiment_analyses")
+        await client.table("experiment_analyses")
         .update(update_data)
         .eq("experiment_id", experiment_id)
         .eq("block_index", block_index)
@@ -369,9 +367,9 @@ async def update_experiment_analysis(
 async def delete_experiment_analysis(experiment_id: str, block_index: int):
     """Delete analysis block."""
     _require_user_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     response = (
-        client.table("experiment_analyses")
+        await client.table("experiment_analyses")
         .delete()
         .eq("experiment_id", experiment_id)
         .eq("block_index", block_index)
@@ -393,8 +391,10 @@ async def upload_experiment_images(
 ):
     """Upload images to R2 and return keys."""
     _require_user_id()
-    client = get_supabase_client()
-    existing = client.table("experiments").select("id").eq("id", experiment_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("experiments").select("id").eq("id", experiment_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail="Experiment not found")
     if scope not in {"experiment", "evaluation", "analysis"}:

@@ -26,7 +26,7 @@ from interfaces_backend.models.inference import (
     InferenceRunnerStopResponse,
 )
 from interfaces_backend.utils.torch_info import get_torch_info
-from percus_ai.db import get_supabase_client
+from percus_ai.db import get_supabase_async_client
 from percus_ai.gpu_host.models import StartRequest, StopRequest
 from percus_ai.inference.camera_maps import get_camera_maps_for_model, get_policy_type_from_config
 from percus_ai.storage.paths import get_models_dir, get_project_root
@@ -47,10 +47,10 @@ _DEFAULT_ARM_NAMESPACES = ["left_arm", "right_arm"]
 _DEFAULT_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
 
 
-def _list_models() -> list[dict]:
+async def _list_models() -> list[dict]:
     models: list[dict] = []
-    client = get_supabase_client()
-    rows = client.table("models").select("*").eq("status", "active").execute().data or []
+    client = await get_supabase_async_client()
+    rows = (await client.table("models").select("*").eq("status", "active").execute()).data or []
 
     for row in rows:
         model_id = row.get("id")
@@ -87,33 +87,30 @@ def _ensure_runner_service() -> None:
         raise HTTPException(status_code=500, detail=f"runner bridge start failed: {result.stderr.strip()}")
 
 
-def _resolve_model_path(model_id: str) -> Path:
+async def _resolve_model_path(model_id: str) -> Path:
     model_path = MODELS_DIR / model_id
     if model_path.exists():
         if not _resolve_model_config_path(model_path):
             raise HTTPException(status_code=404, detail=f"Model config.json not found: {model_path}")
         return model_path
 
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("models")
+        await client.table("models")
         .select("*")
         .eq("id", model_id)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
-        rows = (
-            client.table("models")
+        response = (
+            await client.table("models")
             .select("*")
             .eq("name", model_id)
             .limit(1)
             .execute()
-            .data
-            or []
         )
+        rows = response.data or []
 
     row = rows[0] if rows else {}
     resolved_id = row.get("id") or model_id
@@ -124,7 +121,7 @@ def _resolve_model_path(model_id: str) -> Path:
         return model_path
 
     sync_service = R2DBSyncService()
-    sync_result = sync_service.ensure_model_local(str(resolved_id), auto_download=True)
+    sync_result = await sync_service.ensure_model_local(str(resolved_id), auto_download=True)
     if sync_result.success and model_path.exists():
         if not _resolve_model_config_path(model_path):
             raise HTTPException(status_code=404, detail=f"Model config.json not found: {model_path}")
@@ -143,22 +140,22 @@ def _resolve_model_path(model_id: str) -> Path:
     raise HTTPException(status_code=404, detail=f"Model not found locally: {model_id}")
 
 
-def _resolve_model_policy_type(model_path: Path, model_id: str, override: str | None) -> str:
+async def _resolve_model_policy_type(
+    model_path: Path, model_id: str, override: str | None
+) -> str:
     if override:
         return override
     policy_type = get_policy_type_from_config(str(model_path))
     if policy_type:
         return policy_type
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("models")
+        await client.table("models")
         .select("*")
         .eq("id", model_id)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if rows and rows[0].get("policy_type"):
         return rows[0]["policy_type"]
     return "unknown"
@@ -216,7 +213,7 @@ def _extract_camera_shapes(config: dict) -> dict[str, list[int]]:
 @router.get("/models", response_model=InferenceModelsResponse)
 async def list_inference_models():
     """List models available for inference."""
-    models_data = _list_models()
+    models_data = await _list_models()
     models = [
         InferenceModelInfo(
             model_id=m.get("model_id", m.get("name", "")),
@@ -290,8 +287,10 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
 
     _ensure_runner_service()
 
-    model_path = _resolve_model_path(request.model_id)
-    policy_type = _resolve_model_policy_type(model_path, request.model_id, request.policy_type)
+    model_path = await _resolve_model_path(request.model_id)
+    policy_type = await _resolve_model_policy_type(
+        model_path, request.model_id, request.policy_type
+    )
     config = _load_model_config(model_path)
     camera_shapes = request.camera_shapes or _extract_camera_shapes(config)
     _, rename_map = get_camera_maps_for_model(str(model_path))

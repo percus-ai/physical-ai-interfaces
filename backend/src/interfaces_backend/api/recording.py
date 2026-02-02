@@ -16,7 +16,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from percus_ai.db import get_current_user_id, get_supabase_client, upsert_with_owner
+from percus_ai.db import get_current_user_id, get_supabase_async_client, upsert_with_owner
 from percus_ai.profiles import ProfileRegistry
 from percus_ai.profiles.models import ProfileInstance
 from percus_ai.storage.naming import generate_dataset_id, validate_dataset_name
@@ -283,34 +283,30 @@ def _build_arm_namespaces(settings: dict) -> list[str]:
     return namespaces
 
 
-def _resolve_profile_instance(profile_instance_id: Optional[str]) -> ProfileInstance:
-    client = get_supabase_client()
+async def _resolve_profile_instance(profile_instance_id: Optional[str]) -> ProfileInstance:
+    client = await get_supabase_async_client()
     if profile_instance_id:
         rows = (
-            client.table("profile_instances")
+            await client.table("profile_instances")
             .select("*")
             .eq("id", profile_instance_id)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
     else:
         rows = (
-            client.table("profile_instances")
+            await client.table("profile_instances")
             .select("*")
             .eq("is_active", True)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Profile instance not found")
     return _row_to_profile_instance(rows[0])
 
 
-def _upsert_dataset_record(
+async def _upsert_dataset_record(
     dataset_id: str,
     dataset_name: str,
     task: str,
@@ -327,10 +323,10 @@ def _upsert_dataset_record(
         "profile_instance_id": profile_instance.id,
         "profile_snapshot": profile_instance.snapshot(),
     }
-    upsert_with_owner("datasets", "id", payload)
+    await upsert_with_owner("datasets", "id", payload)
 
 
-def _update_dataset_stats(dataset_id: str) -> None:
+async def _update_dataset_stats(dataset_id: str) -> None:
     dataset_root = get_datasets_dir() / dataset_id
     if not dataset_root.exists():
         return
@@ -343,7 +339,7 @@ def _update_dataset_stats(dataset_id: str) -> None:
         "status": "active",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    upsert_with_owner("datasets", "id", payload)
+    await upsert_with_owner("datasets", "id", payload)
 
 
 @router.post("/session/start", response_model=RecordingSessionActionResponse)
@@ -357,9 +353,9 @@ async def start_session(request: RecordingSessionStartRequest):
     _ensure_recorder_running()
 
     dataset_id = generate_dataset_id()
-    profile_instance = _resolve_profile_instance(None)
+    profile_instance = await _resolve_profile_instance(None)
     try:
-        profile_class = ProfileRegistry().get_class(profile_instance.class_id)
+        profile_class = await ProfileRegistry().get_class(profile_instance.class_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Profile class not found") from exc
 
@@ -391,7 +387,9 @@ async def start_session(request: RecordingSessionStartRequest):
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder start failed")
 
-    _upsert_dataset_record(dataset_id, request.dataset_name, request.task, profile_instance, "recording")
+    await _upsert_dataset_record(
+        dataset_id, request.dataset_name, request.task, profile_instance, "recording"
+    )
 
     return RecordingSessionActionResponse(
         success=True,
@@ -410,13 +408,13 @@ async def stop_session(request: RecordingSessionStopRequest):
 
     dataset_id = request.dataset_id or result.get("dataset_id")
     if dataset_id:
-        _update_dataset_stats(dataset_id)
+        await _update_dataset_stats(dataset_id)
 
         user_config = _load_user_config()
         if user_config.get("auto_upload_after_recording", True):
             try:
                 sync_service = _get_sync_service()
-                sync_service.upload_dataset_with_progress(dataset_id, None)
+                await sync_service.upload_dataset_with_progress(dataset_id, None)
             except Exception as exc:
                 logger.error("Auto-upload failed for %s: %s", dataset_id, exc)
 
@@ -477,8 +475,8 @@ async def cancel_session(dataset_id: Optional[str] = None):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
 
     if dataset_id:
-        client = get_supabase_client()
-        client.table("datasets").update({"status": "archived"}).eq("id", dataset_id).execute()
+        client = await get_supabase_async_client()
+        await client.table("datasets").update({"status": "archived"}).eq("id", dataset_id).execute()
 
     return RecordingSessionActionResponse(success=True, message="Recording cancelled", dataset_id=dataset_id, status=result)
 
@@ -499,22 +497,20 @@ async def get_session_status(session_id: str):
     return RecordingSessionStatusResponse(dataset_id=active_id, status=status)
 
 
-def _list_recordings() -> List[dict]:
-    client = get_supabase_client()
+async def _list_recordings() -> List[dict]:
+    client = await get_supabase_async_client()
     rows = (
-        client.table("datasets")
+        await client.table("datasets")
         .select("id,name,profile_instance_id,episode_count,size_bytes,created_at,dataset_type,status")
         .eq("dataset_type", "recorded")
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     return [row for row in rows if row.get("status") != "archived"]
 
 
 @router.get("/recordings", response_model=RecordingListResponse)
 async def list_recordings():
-    recordings_data = _list_recordings()
+    recordings_data = await _list_recordings()
     recordings = [
         RecordingInfo(
             recording_id=r.get("id"),
@@ -532,16 +528,14 @@ async def list_recordings():
 
 @router.get("/recordings/{recording_id:path}", response_model=RecordingInfo)
 async def get_recording(recording_id: str):
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("datasets")
+        await client.table("datasets")
         .select("id,name,profile_instance_id,episode_count,size_bytes,created_at")
         .eq("id", recording_id)
         .limit(1)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if not rows:
         raise HTTPException(status_code=404, detail=f"Recording not found: {recording_id}")
     row = rows[0]
@@ -595,6 +589,6 @@ async def delete_recording(recording_id: str):
                 break
             except Exception:
                 continue
-    client = get_supabase_client()
-    client.table("datasets").delete().eq("id", recording_id).execute()
+    client = await get_supabase_async_client()
+    await client.table("datasets").delete().eq("id", recording_id).execute()
     return {"recording_id": recording_id, "message": "Recording deleted"}

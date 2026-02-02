@@ -62,7 +62,6 @@ from percus_ai.storage import get_project_root, get_models_dir
 from percus_ai.db import (
     get_current_user_id,
     get_supabase_async_client,
-    get_supabase_client,
     get_supabase_session,
     reset_request_session,
     set_request_session,
@@ -807,7 +806,7 @@ def _check_instance_via_api(instance_id: str) -> Optional[str]:
         return None
 
 
-def _refresh_job_status_from_instance(job_data: dict) -> Optional[str]:
+async def _refresh_job_status_from_instance(job_data: dict) -> Optional[str]:
     instance_id = job_data.get("instance_id")
     if not instance_id:
         return None
@@ -816,21 +815,21 @@ def _refresh_job_status_from_instance(job_data: dict) -> Optional[str]:
         job_data["status"] = "terminated"
         job_data["termination_reason"] = "INSTANCE_NOT_FOUND"
         job_data["completed_at"] = datetime.now().isoformat()
-        _save_job(job_data)
+        await _save_job(job_data)
         return instance_status
     if instance_status in ("offline", "error", "discontinued"):
         job_data["status"] = "terminated"
         job_data["termination_reason"] = "INSTANCE_TERMINATED"
         job_data["completed_at"] = datetime.now().isoformat()
-        _save_job(job_data)
+        await _save_job(job_data)
         return instance_status
     return instance_status
 
 
-def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
+async def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
     """Load job from DB."""
-    client = get_supabase_client()
-    response = client.table(DB_TABLE).select("*").eq("job_id", job_id).execute()
+    client = await get_supabase_async_client()
+    response = await client.table(DB_TABLE).select("*").eq("job_id", job_id).execute()
     records = response.data or []
     if not records:
         return None
@@ -840,9 +839,8 @@ def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
     return record
 
 
-def _save_job(job_data: dict) -> None:
+async def _save_job(job_data: dict) -> None:
     """Upsert job into DB."""
-    client = get_supabase_client()
     job_data["updated_at"] = datetime.now().isoformat()
 
     fixed_fields = {
@@ -881,41 +879,62 @@ def _save_job(job_data: dict) -> None:
     }
     record = {k: job_data.get(k) for k in fixed_fields if k in job_data}
 
-    upsert_with_owner(DB_TABLE, "job_id", record)
+    await upsert_with_owner(DB_TABLE, "job_id", record)
 
 
-def _update_cleanup_status(job_id: str, status: str) -> None:
-    job_data = _load_job(job_id, include_deleted=True)
+def _run_async(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("Async job helper called from running event loop.")
+
+
+def _load_job_sync(job_id: str, include_deleted: bool = False) -> Optional[dict]:
+    return _run_async(_load_job(job_id, include_deleted=include_deleted))
+
+
+def _save_job_sync(job_data: dict) -> None:
+    _run_async(_save_job(job_data))
+
+
+def _update_cleanup_status_sync(job_id: str, status: str) -> None:
+    _run_async(_update_cleanup_status(job_id, status))
+
+
+def _resolve_profile_info_sync(dataset_id: Optional[str]) -> tuple[Optional[str], Optional[dict]]:
+    return _run_async(_resolve_profile_info(dataset_id))
+
+
+async def _update_cleanup_status(job_id: str, status: str) -> None:
+    job_data = await _load_job(job_id, include_deleted=True)
     if not job_data:
         return
     job_data["cleanup_status"] = status
-    _save_job(job_data)
+    await _save_job(job_data)
 
 
-def _resolve_profile_info(dataset_id: Optional[str]) -> tuple[Optional[str], Optional[dict]]:
+async def _resolve_profile_info(dataset_id: Optional[str]) -> tuple[Optional[str], Optional[dict]]:
     if not dataset_id:
         return None, None
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     rows = (
-        client.table("datasets")
+        await client.table("datasets")
         .select("profile_instance_id,profile_snapshot")
         .eq("id", dataset_id)
         .execute()
-        .data
-        or []
-    )
+    ).data or []
     if rows:
         return rows[0].get("profile_instance_id"), rows[0].get("profile_snapshot")
     return None, None
 
 
-def _upsert_model_for_job(job_data: dict) -> None:
-    client = get_supabase_client()
+async def _upsert_model_for_job(job_data: dict) -> None:
     model_id = job_data.get("model_id") or job_data.get("job_id")
     profile_instance_id = job_data.get("profile_instance_id")
     profile_snapshot = job_data.get("profile_snapshot")
     if not profile_instance_id:
-        profile_instance_id, profile_snapshot = _resolve_profile_info(job_data.get("dataset_id"))
+        profile_instance_id, profile_snapshot = await _resolve_profile_info(job_data.get("dataset_id"))
     if not model_id:
         logger.warning("Model upsert skipped (model_id missing)")
         return
@@ -942,11 +961,11 @@ def _upsert_model_for_job(job_data: dict) -> None:
         "created_at": job_data.get("created_at") or now,
         "updated_at": now,
     }
-    upsert_with_owner("models", "id", payload)
+    await upsert_with_owner("models", "id", payload)
 
 
-def _mark_job_completed(job_id: str, termination_reason: str = "REMOTE_EXIT") -> None:
-    job_data = _load_job(job_id, include_deleted=True)
+async def _mark_job_completed(job_id: str, termination_reason: str = "REMOTE_EXIT") -> None:
+    job_data = await _load_job(job_id, include_deleted=True)
     if not job_data:
         return
     if job_data.get("status") not in ("running", "starting", "deploying"):
@@ -956,19 +975,19 @@ def _mark_job_completed(job_id: str, termination_reason: str = "REMOTE_EXIT") ->
     job_data["completed_at"] = datetime.now().isoformat()
     if not job_data.get("model_id"):
         job_data["model_id"] = job_data.get("job_id")
-    _save_job(job_data)
-    _upsert_model_for_job(job_data)
+    await _save_job(job_data)
+    await _upsert_model_for_job(job_data)
 
 
-def _list_jobs(days: int = 7) -> list[dict]:
+async def _list_jobs(days: int = 7) -> list[dict]:
     """List jobs from DB.
 
     Args:
         days: Return jobs from past N days.
               Running/starting jobs are always included.
     """
-    client = get_supabase_client()
-    response = client.table(DB_TABLE).select("*").is_("deleted_at", "null").execute()
+    client = await get_supabase_async_client()
+    response = await client.table(DB_TABLE).select("*").is_("deleted_at", "null").execute()
     jobs = response.data or []
 
     cutoff_date = datetime.now() - timedelta(days=days)
@@ -1177,7 +1196,7 @@ def _upload_log_file_to_r2(r2: "R2SyncService", local_path: Path, job_id: str) -
         return False
 
 
-def _upload_remote_logs_to_r2(conn: SSHConnection, job_data: dict) -> None:
+async def _upload_remote_logs_to_r2(conn: SSHConnection, job_data: dict) -> None:
     r2 = _get_logs_r2_sync_service()
     if not r2:
         return
@@ -1187,7 +1206,7 @@ def _upload_remote_logs_to_r2(conn: SSHConnection, job_data: dict) -> None:
     remote_base_dir = job_data.get("remote_base_dir", "/root/.physical-ai")
     remote_run_dir = f"{remote_base_dir}/run"
     job_data["log_r2_prefix"] = f"training_logs/{job_id}/"
-    _save_job(job_data)
+    await _save_job(job_data)
 
     for log_type in ("setup", "training"):
         log_name = _get_log_file_name(job_data, log_type)
@@ -1265,11 +1284,11 @@ def _check_logs_in_r2(job_data: dict, log_type: str) -> dict:
     except Exception as e:
         return {"exists": False, "key": key, "error": str(e)}
 
-def _get_remote_progress(job_id: str) -> Optional[dict]:
+async def _get_remote_progress(job_id: str) -> Optional[dict]:
     """Get training progress from Supabase metrics."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     response = (
-        client.table("training_job_metrics")
+        await client.table("training_job_metrics")
         .select("step,loss,metrics")
         .eq("job_id", job_id)
         .eq("split", "train")
@@ -1289,10 +1308,10 @@ def _get_remote_progress(job_id: str) -> Optional[dict]:
     }
 
 
-def _get_latest_metric(job_id: str, split: str) -> Optional[dict]:
-    client = get_supabase_client()
+async def _get_latest_metric(job_id: str, split: str) -> Optional[dict]:
+    client = await get_supabase_async_client()
     response = (
-        client.table("training_job_metrics")
+        await client.table("training_job_metrics")
         .select("step,loss,ts,metrics")
         .eq("job_id", job_id)
         .eq("split", split)
@@ -1306,14 +1325,14 @@ def _get_latest_metric(job_id: str, split: str) -> Optional[dict]:
     return data[0]
 
 
-def _get_latest_metrics(job_id: str) -> tuple[Optional[dict], Optional[dict]]:
-    return _get_latest_metric(job_id, "train"), _get_latest_metric(job_id, "val")
+async def _get_latest_metrics(job_id: str) -> tuple[Optional[dict], Optional[dict]]:
+    return await _get_latest_metric(job_id, "train"), await _get_latest_metric(job_id, "val")
 
 
-def _get_metrics_series(job_id: str, split: str, limit: int) -> list[dict]:
-    client = get_supabase_client()
+async def _get_metrics_series(job_id: str, split: str, limit: int) -> list[dict]:
+    client = await get_supabase_async_client()
     response = (
-        client.table("training_job_metrics")
+        await client.table("training_job_metrics")
         .select("step,loss,ts")
         .eq("job_id", job_id)
         .eq("split", split)
@@ -1391,7 +1410,7 @@ def _fetch_availability_sets(client: VerdaClient) -> tuple[dict[str, set[str]], 
 
 
 @router.get("/gpu-availability", response_model=GpuAvailabilityResponse)
-async def get_gpu_availability():
+def get_gpu_availability():
     """Check GPU availability for main configurations (B300, B200, H200, H100, A100 x1).
 
     Uses parallel API calls and caching (10 min TTL) for fast response.
@@ -1940,7 +1959,7 @@ async def list_jobs(days: int = Query(7, ge=1, le=365)):
     Args:
         days: Return jobs from past N days (running jobs always included)
     """
-    jobs_data = _list_jobs(days)
+    jobs_data = await _list_jobs(days)
     jobs = [JobInfo(**j) for j in jobs_data]
     return JobListResponse(jobs=jobs, total=len(jobs))
 
@@ -1948,21 +1967,21 @@ async def list_jobs(days: int = Query(7, ge=1, le=365)):
 @router.get("/jobs/{job_id}", response_model=JobDetailResponse)
 async def get_job(job_id: str):
     """Get job details with remote status."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     job = JobInfo(**job_data)
     remote_status = None
     progress = None
-    latest_train_metrics, latest_val_metrics = _get_latest_metrics(job_id)
+    latest_train_metrics, latest_val_metrics = await _get_latest_metrics(job_id)
     summary = job_data.get("summary")
     early_stopping = job_data.get("early_stopping")
     training_config = job_data.get("training_config")
 
     # Progress is derived from Supabase metrics
     if job.status in ("running", "starting"):
-        progress = _get_remote_progress(job_id)
+        progress = await _get_remote_progress(job_id)
 
     return JobDetailResponse(
         job=job,
@@ -1983,13 +2002,13 @@ async def get_job_logs(
     log_type: str = Query("training", pattern="^(training|setup)$"),
 ):
     """Get job logs from remote instance."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     instance_status = None
     if job_data.get("status") in ("running", "starting", "deploying"):
-        instance_status = _refresh_job_status_from_instance(job_data)
+        instance_status = await _refresh_job_status_from_instance(job_data)
 
     remote_allowed = True
     if instance_status in (None, "offline", "error", "discontinued"):
@@ -2016,13 +2035,13 @@ async def download_job_logs(
     log_type: str = Query("training", pattern="^(training|setup)$"),
 ):
     """Download full job logs as plain text."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     instance_status = None
     if job_data.get("status") in ("running", "starting", "deploying"):
-        instance_status = _refresh_job_status_from_instance(job_data)
+        instance_status = await _refresh_job_status_from_instance(job_data)
 
     remote_allowed = True
     if instance_status in (None, "offline", "error", "discontinued"):
@@ -2060,7 +2079,7 @@ async def get_job_logs_status(
     log_type: str = Query("training", pattern="^(training|setup)$"),
 ):
     """Check whether logs exist on R2 for this job."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     r2_status = _check_logs_in_r2(job_data, log_type)
@@ -2074,11 +2093,11 @@ async def get_job_logs_status(
 @router.get("/jobs/{job_id}/progress", response_model=JobProgressResponse)
 async def get_job_progress(job_id: str):
     """Get training progress for a job."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
-    progress = _get_remote_progress(job_id)
+    progress = await _get_remote_progress(job_id)
     if progress is None:
         return JobProgressResponse(job_id=job_id)
 
@@ -2088,12 +2107,12 @@ async def get_job_progress(job_id: str):
 @router.get("/jobs/{job_id}/metrics", response_model=JobMetricsResponse)
 async def get_job_metrics(job_id: str, limit: int = Query(1000, ge=1, le=10000)):
     """Get training/validation loss series for a job."""
-    job_data = _load_job(job_id, include_deleted=True)
+    job_data = await _load_job(job_id, include_deleted=True)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
-    train = _get_metrics_series(job_id, "train", limit)
-    val = _get_metrics_series(job_id, "val", limit)
+    train = await _get_metrics_series(job_id, "train", limit)
+    val = await _get_metrics_series(job_id, "val", limit)
     return JobMetricsResponse(job_id=job_id, train=train, val=val)
 
 
@@ -2104,7 +2123,7 @@ async def get_instance_status(job_id: str):
     This endpoint checks the actual cloud instance status and optionally
     the remote training process status via SSH.
     """
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -2157,13 +2176,13 @@ async def get_instance_status(job_id: str):
 @router.post("/jobs/{job_id}/revive", response_model=JobReviveResponse)
 async def revive_job_instance(job_id: str):
     """Revive a terminated instance by restoring its OS volume and starting a CPU instance."""
-    result = _revive_job_with_progress(job_id, lambda _msg: None)
+    result = await _revive_job_with_progress(job_id, lambda _msg: None)
     return JobReviveResponse(**result)
 
 
-def _revive_job_with_progress(job_id: str, emit_progress: Callable[[dict], None]) -> dict:
+async def _revive_job_with_progress(job_id: str, emit_progress: Callable[[dict], None]) -> dict:
     emit_progress({"type": "start", "message": "蘇生を開始しました"})
-    job_data = _load_job(job_id, include_deleted=True)
+    job_data = await _load_job(job_id, include_deleted=True)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -2310,7 +2329,7 @@ async def websocket_revive_job(websocket: WebSocket, job_id: str):
 
     def worker() -> None:
         try:
-            result = _revive_job_with_progress(job_id, emit)
+            result = asyncio.run(_revive_job_with_progress(job_id, emit))
             emit({"type": "complete", "result": result})
         except HTTPException as exc:
             emit({"type": "error", "error": str(exc.detail)})
@@ -2332,7 +2351,7 @@ async def websocket_revive_job(websocket: WebSocket, job_id: str):
 @router.post("/jobs/{job_id}/stop", response_model=JobActionResponse)
 async def stop_job(job_id: str):
     """Stop a running training job."""
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -2348,7 +2367,7 @@ async def stop_job(job_id: str):
         job_data["status"] = "stopped"
         job_data["termination_reason"] = "USER_STOP"
         job_data["completed_at"] = datetime.now().isoformat()
-        _save_job(job_data)
+        await _save_job(job_data)
 
     return JobActionResponse(
         job_id=job_id,
@@ -2426,7 +2445,7 @@ async def delete_job(job_id: str, terminate_instance: bool = True):
         job_id: Job ID to delete
         terminate_instance: If True (default), also terminate the Verda instance
     """
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -2440,10 +2459,10 @@ async def delete_job(job_id: str, terminate_instance: bool = True):
     # Terminate Verda instance if requested and available
     if terminate_instance and instance_id:
         job_data["cleanup_status"] = "running"
-        _save_job(job_data)
+        await _save_job(job_data)
         instance_deleted = _delete_verda_instance(instance_id)
         job_data["cleanup_status"] = "done" if instance_deleted else "failed"
-    _save_job(job_data)
+    await _save_job(job_data)
 
     if instance_id and terminate_instance:
         if instance_deleted:
@@ -2466,7 +2485,7 @@ async def check_all_jobs_status():
 
     This will connect to Verda API and SSH to verify job status.
     """
-    jobs_data = _list_jobs()
+    jobs_data = await _list_jobs()
     updates = []
     checked = 0
 
@@ -2487,7 +2506,7 @@ async def check_all_jobs_status():
             job_data["status"] = "terminated"
             job_data["termination_reason"] = "INSTANCE_NOT_FOUND"
             job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
+            await _save_job(job_data)
             updates.append(
                 JobStatusUpdate(
                     job_id=job_id,
@@ -2504,7 +2523,7 @@ async def check_all_jobs_status():
             job_data["status"] = "terminated"
             job_data["termination_reason"] = "INSTANCE_TERMINATED"
             job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
+            await _save_job(job_data)
             updates.append(
                 JobStatusUpdate(
                     job_id=job_id,
@@ -2533,7 +2552,7 @@ async def check_all_jobs_status():
         remote_status = _check_remote_status(job_data)
 
         if remote_status == "stopped":
-            _mark_job_completed(job_id, termination_reason="REMOTE_EXIT")
+            await _mark_job_completed(job_id, termination_reason="REMOTE_EXIT")
             updates.append(
                 JobStatusUpdate(
                     job_id=job_id,
@@ -2674,7 +2693,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             if request.policy.use_amp is not None:
                 policy_payload["use_amp"] = request.policy.use_amp
 
-        profile_instance_id, profile_snapshot = _resolve_profile_info(
+        profile_instance_id, profile_snapshot = await _resolve_profile_info(
             request.dataset.id if request.dataset else None
         )
         job_data = {
@@ -2698,7 +2717,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             "dataset_id": request.dataset.id if request.dataset else None,
             "training_config": _build_pipeline_config(request, job_id),
         }
-        _save_job(job_data)
+        await _save_job(job_data)
 
         # Start background task to wait for IP and deploy training
         background_tasks.add_task(
@@ -2972,9 +2991,9 @@ def _create_job_with_progress(
             if instance_id:
                 emit_progress({"type": "cleanup", "message": f"エラー発生のためインスタンスを削除中: {instance_id}"})
                 logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
-                _update_cleanup_status(job_id, "running")
+                _update_cleanup_status_sync(job_id, "running")
                 cleanup_ok = _delete_verda_instance(instance_id)
-                _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
+                _update_cleanup_status_sync(job_id, "done" if cleanup_ok else "failed")
             return {"success": False, "error": error_msg}
 
         try:
@@ -3042,7 +3061,7 @@ def _create_job_with_progress(
 
             # Save job info
             now = datetime.now().isoformat()
-            profile_instance_id, profile_snapshot = _resolve_profile_info(dataset.id)
+            profile_instance_id, profile_snapshot = _resolve_profile_info_sync(dataset.id)
             job_data = {
                 "job_id": job_id,
                 "job_name": job_name,
@@ -3064,7 +3083,7 @@ def _create_job_with_progress(
                 "dataset_id": dataset.id,
                 "training_config": training_config,
             }
-            _save_job(job_data)
+            _save_job_sync(job_data)
 
             # Wait for IP (up to 15 minutes)
             emit_progress({"type": "waiting_ip", "message": "IPアドレス割り当て待機中...", "elapsed": 0, "timeout": 900})
@@ -3093,7 +3112,7 @@ def _create_job_with_progress(
                 job_data["failure_reason"] = "IP_TIMEOUT"
                 job_data["error_message"] = "IP取得タイムアウト"
                 job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
+                _save_job_sync(job_data)
                 emit_progress({"type": "error", "error": "IP取得タイムアウト (15分)"})
                 return cleanup_instance_on_failure("IP取得タイムアウト (15分)")
 
@@ -3102,7 +3121,7 @@ def _create_job_with_progress(
             # Update job with IP
             job_data["ip"] = ip
             job_data["status"] = "deploying"
-            _save_job(job_data)
+            _save_job_sync(job_data)
 
             # SSH deployment using SSHConnection and RemoteExecutor
             ssh_user = "root"
@@ -3134,7 +3153,7 @@ def _create_job_with_progress(
                 job_data["failure_reason"] = "SSH_TIMEOUT"
                 job_data["error_message"] = "SSH接続タイムアウト"
                 job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
+                _save_job_sync(job_data)
                 emit_progress({"type": "error", "error": "SSH接続タイムアウト (5分)"})
                 return cleanup_instance_on_failure("SSH接続タイムアウト (5分)")
 
@@ -3145,7 +3164,7 @@ def _create_job_with_progress(
                 remote_base_dir = f"{home_dir}/.physical-ai"
                 remote_run_dir = f"{remote_base_dir}/run"
                 job_data["remote_base_dir"] = remote_base_dir
-                _save_job(job_data)
+                _save_job_sync(job_data)
 
                 # Create remote directory
                 emit_progress({"type": "deploying", "message": "リモートディレクトリを作成中..."})
@@ -3208,16 +3227,16 @@ def _create_job_with_progress(
                         job_data["failure_reason"] = "SETUP_TIMEOUT"
                         job_data["error_message"] = "環境構築がタイムアウトしました"
                         job_data["completed_at"] = datetime.now().isoformat()
-                        _save_job(job_data)
-                        _upload_remote_logs_to_r2(conn, job_data)
+                        _save_job_sync(job_data)
+                        _run_async(_upload_remote_logs_to_r2(conn, job_data))
                         emit_progress({"type": "error", "error": "環境構築がタイムアウトしました"})
                         return cleanup_instance_on_failure("環境構築がタイムアウトしました")
                     job_data["status"] = "failed"
                     job_data["failure_reason"] = "SETUP_FAILED"
                     job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                     job_data["completed_at"] = datetime.now().isoformat()
-                    _save_job(job_data)
-                    _upload_remote_logs_to_r2(conn, job_data)
+                    _save_job_sync(job_data)
+                    _run_async(_upload_remote_logs_to_r2(conn, job_data))
                     emit_progress({"type": "error", "error": "環境構築に失敗しました"})
                     return cleanup_instance_on_failure("環境構築に失敗しました")
 
@@ -3232,7 +3251,7 @@ def _create_job_with_progress(
                     emit_progress({"type": "training_log", "message": "警告: 学習用tmuxセッションの開始を確認できませんでした"})
                 else:
                     job_data["status"] = "starting"
-                    _save_job(job_data)
+                    _save_job_sync(job_data)
 
                 emit_progress({
                     "type": "complete",
@@ -3256,24 +3275,24 @@ def _create_job_with_progress(
 
         except HTTPException as e:
             if instance_id:
-                job_data = _load_job(job_id, include_deleted=True)
+                job_data = _load_job_sync(job_id, include_deleted=True)
                 if job_data:
                     job_data["status"] = "failed"
                     job_data["failure_reason"] = "VERDA_ERROR"
                     job_data["error_message"] = e.detail
                     job_data["completed_at"] = datetime.now().isoformat()
-                    _save_job(job_data)
+                    _save_job_sync(job_data)
             emit_progress({"type": "error", "error": e.detail})
             return cleanup_instance_on_failure(e.detail)
         except Exception as e:
             if instance_id:
-                job_data = _load_job(job_id, include_deleted=True)
+                job_data = _load_job_sync(job_id, include_deleted=True)
                 if job_data:
                     job_data["status"] = "failed"
                     job_data["failure_reason"] = "UNKNOWN"
                     job_data["error_message"] = str(e)
                     job_data["completed_at"] = datetime.now().isoformat()
-                    _save_job(job_data)
+                    _save_job_sync(job_data)
             emit_progress({"type": "error", "error": str(e)})
             return cleanup_instance_on_failure(str(e))
     finally:
@@ -3424,7 +3443,7 @@ async def _deploy_and_start_training(
     session = build_session_from_tokens(supabase_access_token, supabase_refresh_token)
     token = set_request_session(session)
     try:
-        job_data = _load_job(job_id)
+        job_data = await _load_job(job_id)
         if not job_data:
             return
 
@@ -3433,17 +3452,17 @@ async def _deploy_and_start_training(
             job_data["status"] = "failed"
             job_data["failure_reason"] = "VERDA_ERROR"
             job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
+            await _save_job(job_data)
             return
 
         instance_id = job_data["instance_id"]
 
-        def cleanup_on_failure(error_msg: str) -> None:
+        async def cleanup_on_failure(error_msg: str) -> None:
             """Clean up instance on deployment failure."""
             logger.warning(f"Cleaning up instance {instance_id} due to failure: {error_msg}")
-            _update_cleanup_status(job_id, "running")
+            await _update_cleanup_status(job_id, "running")
             cleanup_ok = _delete_verda_instance(instance_id)
-            _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
+            await _update_cleanup_status(job_id, "done" if cleanup_ok else "failed")
 
         try:
             # Wait for IP (up to 15 minutes)
@@ -3464,14 +3483,14 @@ async def _deploy_and_start_training(
                 job_data["failure_reason"] = "IP_TIMEOUT"
                 job_data["error_message"] = "IP取得タイムアウト"
                 job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
-                cleanup_on_failure("IP取得タイムアウト")
+                await _save_job(job_data)
+                await cleanup_on_failure("IP取得タイムアウト")
                 return
 
             # Update job with IP
             job_data["ip"] = ip
             job_data["status"] = "deploying"
-            _save_job(job_data)
+            await _save_job(job_data)
 
             # SSH deployment using SSHConnection
             ssh_user = job_data.get("ssh_user", "root")
@@ -3492,8 +3511,8 @@ async def _deploy_and_start_training(
                 job_data["failure_reason"] = "SSH_TIMEOUT"
                 job_data["error_message"] = "SSH接続タイムアウト"
                 job_data["completed_at"] = datetime.now().isoformat()
-                _save_job(job_data)
-                cleanup_on_failure("SSH接続タイムアウト")
+                await _save_job(job_data)
+                await cleanup_on_failure("SSH接続タイムアウト")
                 return
 
             try:
@@ -3501,7 +3520,7 @@ async def _deploy_and_start_training(
                 remote_base_dir = f"{home_dir}/.physical-ai"
                 remote_run_dir = f"{remote_base_dir}/run"
                 job_data["remote_base_dir"] = remote_base_dir
-                _save_job(job_data)
+                await _save_job(job_data)
 
                 # Create remote directory
                 conn.mkdir_p(remote_run_dir)
@@ -3550,24 +3569,24 @@ async def _deploy_and_start_training(
                         job_data["failure_reason"] = "SETUP_TIMEOUT"
                         job_data["error_message"] = "環境構築がタイムアウトしました"
                         job_data["completed_at"] = datetime.now().isoformat()
-                        _save_job(job_data)
-                        _upload_remote_logs_to_r2(conn, job_data)
-                        cleanup_on_failure("環境構築がタイムアウトしました")
+                        await _save_job(job_data)
+                        await _upload_remote_logs_to_r2(conn, job_data)
+                        await cleanup_on_failure("環境構築がタイムアウトしました")
                         return
                     job_data["status"] = "failed"
                     job_data["failure_reason"] = "SETUP_FAILED"
                     job_data["error_message"] = f"環境構築に失敗しました (exit={setup_exit_code})"
                     job_data["completed_at"] = datetime.now().isoformat()
-                    _save_job(job_data)
-                    _upload_remote_logs_to_r2(conn, job_data)
-                    cleanup_on_failure("環境構築に失敗しました")
+                    await _save_job(job_data)
+                    await _upload_remote_logs_to_r2(conn, job_data)
+                    await cleanup_on_failure("環境構築に失敗しました")
                     return
 
                 # Start training using RemoteExecutor with tmux
                 executor = RemoteExecutor(conn, remote_base_dir=remote_run_dir)
                 executor.run_background("bash run_training.sh train", session_name=TMUX_TRAIN_SESSION_NAME)
                 job_data["status"] = "starting"
-                _save_job(job_data)
+                await _save_job(job_data)
 
             finally:
                 conn.disconnect()
@@ -3577,8 +3596,8 @@ async def _deploy_and_start_training(
             job_data["failure_reason"] = "UNKNOWN"
             job_data["error_message"] = str(e)
             job_data["completed_at"] = datetime.now().isoformat()
-            _save_job(job_data)
-            cleanup_on_failure(str(e))
+            await _save_job(job_data)
+            await cleanup_on_failure(str(e))
     finally:
         reset_request_session(token)
 
@@ -4031,7 +4050,7 @@ async def create_continue_job(
         )
 
         # Save job info (status: starting)
-        profile_instance_id, profile_snapshot = _resolve_profile_info(dataset_id)
+        profile_instance_id, profile_snapshot = await _resolve_profile_info(dataset_id)
         job_data = {
             "job_id": job_id,
             "job_name": job_name,
@@ -4069,7 +4088,7 @@ async def create_continue_job(
                 },
             },
         }
-        _save_job(job_data)
+        await _save_job(job_data)
 
         # TODO: Start background task to wait for IP and deploy continue training
         # For now, return the job info
@@ -4115,7 +4134,7 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
         return
     logger.info(f"WebSocket log stream client connected for job {job_id}")
 
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         await websocket.send_json({"type": "error", "error": f"Job not found: {job_id}"})
         await websocket.close()
@@ -4190,7 +4209,7 @@ async def websocket_stream_logs(websocket: WebSocket, job_id: str):
                         "status": "stream_ended",
                         "message": "ログストリーム終了"
                     })
-                    _mark_job_completed(job_id)
+                    await _mark_job_completed(job_id)
                     break
 
             except Exception as e:
@@ -4260,7 +4279,7 @@ async def websocket_job_session(websocket: WebSocket, job_id: str):
     logger.info(f"WebSocket job session connected for job {job_id}")
 
     # Load job data immediately
-    job_data = _load_job(job_id)
+    job_data = await _load_job(job_id)
     if not job_data:
         await websocket.send_json({"type": "error", "error": f"Job not found: {job_id}"})
         await websocket.close()

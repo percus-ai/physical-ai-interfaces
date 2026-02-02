@@ -81,8 +81,8 @@ def _resolve_robot_preset(profile_class_key: str, settings: dict) -> str:
     return "so101"
 
 
-def _build_profile_teleop_config() -> TeleopProfileConfig:
-    instance, profile_class, settings = get_active_profile_settings()
+async def _build_profile_teleop_config() -> TeleopProfileConfig:
+    instance, profile_class, settings = await get_active_profile_settings()
     profile_class_key = getattr(profile_class, "class_key", "") or ""
 
     leader_port = settings.get("right_serial_port") or settings.get("leader_port") or ""
@@ -230,7 +230,7 @@ async def run_local_teleop(session_id: str, duration_sec: Optional[float] = None
 
 @router.get("/local/profile-config", response_model=TeleopProfileConfigResponse)
 async def get_local_profile_config():
-    config = _build_profile_teleop_config()
+    config = await _build_profile_teleop_config()
     return TeleopProfileConfigResponse(config=config)
 
 
@@ -241,7 +241,7 @@ async def start_local_teleop_from_profile():
     if has_running_local_teleop():
         raise HTTPException(status_code=409, detail="Teleop session is already running")
 
-    config = _build_profile_teleop_config()
+    config = await _build_profile_teleop_config()
     if not config.leader_port or not config.follower_port:
         raise HTTPException(status_code=400, detail="Teleop ports are not configured in the active profile")
 

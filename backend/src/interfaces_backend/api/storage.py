@@ -28,7 +28,7 @@ from interfaces_backend.models.storage import (
     ModelListResponse,
     StorageUsageResponse,
 )
-from percus_ai.db import get_supabase_client, upsert_with_owner
+from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.hash import compute_directory_hash, compute_directory_size
 from percus_ai.storage.hub import download_model, ensure_hf_token, get_local_model_info, upload_model
 from percus_ai.storage.naming import validate_dataset_name, generate_dataset_id
@@ -64,9 +64,9 @@ def _delete_local_model(model_id: str) -> None:
         shutil.rmtree(model_path)
 
 
-def _detach_models_from_dataset(dataset_id: str) -> None:
-    client = get_supabase_client()
-    client.table("models").update({"dataset_id": None}).eq("dataset_id", dataset_id).execute()
+async def _detach_models_from_dataset(dataset_id: str) -> None:
+    client = await get_supabase_async_client()
+    await client.table("models").update({"dataset_id": None}).eq("dataset_id", dataset_id).execute()
 
 
 def _dataset_row_to_info(row: dict) -> DatasetInfo:
@@ -110,19 +110,19 @@ async def list_datasets(
     profile_instance_id: Optional[str] = Query(None, description="Filter by profile instance"),
 ):
     """List datasets from DB."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     query = client.table("datasets").select("*")
     if not include_archived:
         query = query.eq("status", "active")
     if profile_instance_id:
         query = query.eq("profile_instance_id", profile_instance_id)
-    rows = query.execute().data or []
+    rows = (await query.execute()).data or []
 
     datasets = [_dataset_row_to_info(row) for row in rows]
     return DatasetListResponse(datasets=datasets, total=len(datasets))
 
 
-def _merge_datasets(
+async def _merge_datasets(
     request: DatasetMergeRequest,
     progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> DatasetMergeResponse:
@@ -139,12 +139,14 @@ def _merge_datasets(
         raise HTTPException(status_code=400, detail=f"Invalid dataset name: {'; '.join(errors)}")
 
     merged_dataset_id = generate_dataset_id()
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
 
     report({"type": "start", "step": "validate", "message": "Validating datasets"})
     source_rows = []
     for dataset_id in source_dataset_ids:
-        rows = client.table("datasets").select("*").eq("id", dataset_id).execute().data or []
+        rows = (
+            await client.table("datasets").select("*").eq("id", dataset_id).execute()
+        ).data or []
         if not rows:
             raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
         row = rows[0]
@@ -163,7 +165,7 @@ def _merge_datasets(
     sync_service = R2DBSyncService()
     for dataset_id in source_dataset_ids:
         report({"type": "progress", "step": "download", "dataset_id": dataset_id})
-        result = sync_service.ensure_dataset_local(dataset_id, auto_download=True)
+        result = await sync_service.ensure_dataset_local(dataset_id, auto_download=True)
         if not result.success:
             raise HTTPException(status_code=500, detail=f"Dataset download failed: {result.message}")
     report({"type": "step_complete", "step": "download", "message": "Local datasets ready"})
@@ -208,7 +210,7 @@ def _merge_datasets(
         report({**message, "type": type_map.get(msg_type, msg_type), "step": "upload"})
 
     report({"type": "start", "step": "upload", "message": "Uploading merged dataset"})
-    ok, error = sync_service.upload_dataset_with_progress(merged_dataset_id, upload_progress)
+    ok, error = await sync_service.upload_dataset_with_progress(merged_dataset_id, upload_progress)
     if not ok:
         shutil.rmtree(merged_root)
         raise HTTPException(status_code=500, detail=f"R2 upload failed: {error}")
@@ -226,7 +228,7 @@ def _merge_datasets(
         "size_bytes": size_bytes,
         "content_hash": content_hash,
     }
-    upsert_with_owner("datasets", "id", payload)
+    await upsert_with_owner("datasets", "id", payload)
 
     return DatasetMergeResponse(
         success=True,
@@ -240,7 +242,7 @@ def _merge_datasets(
 @router.post("/datasets/merge", response_model=DatasetMergeResponse)
 async def merge_datasets(request: DatasetMergeRequest):
     """Merge multiple datasets into a new dataset."""
-    return _merge_datasets(request)
+    return await _merge_datasets(request)
 
 
 @router.websocket("/ws/merge")
@@ -266,9 +268,12 @@ async def websocket_merge_datasets(websocket: WebSocket):
     def progress_callback(progress: dict) -> None:
         asyncio.run_coroutine_threadsafe(progress_queue.put(progress), main_loop)
 
+    def _merge_datasets_sync() -> DatasetMergeResponse:
+        return asyncio.run(_merge_datasets(request, progress_callback))
+
     async def run_merge() -> None:
         try:
-            result = await main_loop.run_in_executor(_executor, lambda: _merge_datasets(request, progress_callback))
+            result = await main_loop.run_in_executor(_executor, _merge_datasets_sync)
             await progress_queue.put({"type": "complete", **result.model_dump()})
         except HTTPException as e:
             await progress_queue.put({"type": "error", "error": e.detail})
@@ -301,8 +306,8 @@ async def websocket_merge_datasets(websocket: WebSocket):
 @router.get("/datasets/{dataset_id:path}", response_model=DatasetInfo)
 async def get_dataset(dataset_id: str):
     """Get dataset details from DB."""
-    client = get_supabase_client()
-    rows = client.table("datasets").select("*").eq("id", dataset_id).execute().data or []
+    client = await get_supabase_async_client()
+    rows = (await client.table("datasets").select("*").eq("id", dataset_id).execute()).data or []
     if not rows:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
     return _dataset_row_to_info(rows[0])
@@ -311,22 +316,26 @@ async def get_dataset(dataset_id: str):
 @router.delete("/datasets/{dataset_id:path}", response_model=ArchiveResponse)
 async def archive_dataset(dataset_id: str):
     """Archive (soft delete) a dataset."""
-    client = get_supabase_client()
-    existing = client.table("datasets").select("id").eq("id", dataset_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("datasets").select("id").eq("id", dataset_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
-    client.table("datasets").update({"status": "archived"}).eq("id", dataset_id).execute()
+    await client.table("datasets").update({"status": "archived"}).eq("id", dataset_id).execute()
     return ArchiveResponse(id=dataset_id, success=True, message="Dataset archived", status="archived")
 
 
 @router.post("/datasets/{dataset_id:path}/restore", response_model=ArchiveResponse)
 async def restore_dataset(dataset_id: str):
     """Restore dataset from archive."""
-    client = get_supabase_client()
-    existing = client.table("datasets").select("id").eq("id", dataset_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("datasets").select("id").eq("id", dataset_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
-    client.table("datasets").update({"status": "active"}).eq("id", dataset_id).execute()
+    await client.table("datasets").update({"status": "active"}).eq("id", dataset_id).execute()
     return ArchiveResponse(id=dataset_id, success=True, message="Dataset restored", status="active")
 
 
@@ -336,13 +345,13 @@ async def list_models(
     profile_instance_id: Optional[str] = Query(None, description="Filter by profile instance"),
 ):
     """List models from DB."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     query = client.table("models").select("*")
     if not include_archived:
         query = query.eq("status", "active")
     if profile_instance_id:
         query = query.eq("profile_instance_id", profile_instance_id)
-    rows = query.execute().data or []
+    rows = (await query.execute()).data or []
     models = [_model_row_to_info(row) for row in rows]
     return ModelListResponse(models=models, total=len(models))
 
@@ -350,8 +359,8 @@ async def list_models(
 @router.get("/models/{model_id}", response_model=ModelInfo)
 async def get_model(model_id: str):
     """Get model details from DB."""
-    client = get_supabase_client()
-    rows = client.table("models").select("*").eq("id", model_id).execute().data or []
+    client = await get_supabase_async_client()
+    rows = (await client.table("models").select("*").eq("id", model_id).execute()).data or []
     if not rows:
         raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
     return _model_row_to_info(rows[0])
@@ -360,31 +369,35 @@ async def get_model(model_id: str):
 @router.delete("/models/{model_id}", response_model=ArchiveResponse)
 async def archive_model(model_id: str):
     """Archive (soft delete) a model."""
-    client = get_supabase_client()
-    existing = client.table("models").select("id").eq("id", model_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("models").select("id").eq("id", model_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
-    client.table("models").update({"status": "archived"}).eq("id", model_id).execute()
+    await client.table("models").update({"status": "archived"}).eq("id", model_id).execute()
     return ArchiveResponse(id=model_id, success=True, message="Model archived", status="archived")
 
 
 @router.post("/models/{model_id}/restore", response_model=ArchiveResponse)
 async def restore_model(model_id: str):
     """Restore model from archive."""
-    client = get_supabase_client()
-    existing = client.table("models").select("id").eq("id", model_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("models").select("id").eq("id", model_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
-    client.table("models").update({"status": "active"}).eq("id", model_id).execute()
+    await client.table("models").update({"status": "active"}).eq("id", model_id).execute()
     return ArchiveResponse(id=model_id, success=True, message="Model restored", status="active")
 
 
 @router.get("/usage", response_model=StorageUsageResponse)
 async def get_storage_usage():
     """Get storage usage statistics from DB."""
-    client = get_supabase_client()
-    datasets = client.table("datasets").select("size_bytes,status").execute().data or []
-    models = client.table("models").select("size_bytes,status").execute().data or []
+    client = await get_supabase_async_client()
+    datasets = (await client.table("datasets").select("size_bytes,status").execute()).data or []
+    models = (await client.table("models").select("size_bytes,status").execute()).data or []
 
     datasets_size = sum(d.get("size_bytes") or 0 for d in datasets if d.get("status") == "active")
     models_size = sum(m.get("size_bytes") or 0 for m in models if m.get("status") == "active")
@@ -406,9 +419,13 @@ async def get_storage_usage():
 @router.get("/archive", response_model=ArchiveListResponse)
 async def list_archived():
     """List archived datasets and models."""
-    client = get_supabase_client()
-    datasets = client.table("datasets").select("*").eq("status", "archived").execute().data or []
-    models = client.table("models").select("*").eq("status", "archived").execute().data or []
+    client = await get_supabase_async_client()
+    datasets = (
+        await client.table("datasets").select("*").eq("status", "archived").execute()
+    ).data or []
+    models = (
+        await client.table("models").select("*").eq("status", "archived").execute()
+    ).data or []
     dataset_infos = [_dataset_row_to_info(d) for d in datasets]
     model_infos = [_model_row_to_info(m) for m in models]
     return ArchiveListResponse(
@@ -421,26 +438,30 @@ async def list_archived():
 @router.delete("/archive/datasets/{dataset_id:path}", response_model=ArchiveResponse)
 async def delete_archived_dataset(dataset_id: str):
     """Permanently delete an archived dataset."""
-    client = get_supabase_client()
-    existing = client.table("datasets").select("id,status").eq("id", dataset_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("datasets").select("id,status").eq("id", dataset_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
     if existing[0].get("status") != "archived":
         raise HTTPException(status_code=400, detail="Dataset is not archived")
 
-    _detach_models_from_dataset(dataset_id)
+    await _detach_models_from_dataset(dataset_id)
     sync_service = R2DBSyncService()
     sync_service.delete_dataset_remote(dataset_id)
     _delete_local_dataset(dataset_id)
-    client.table("datasets").delete().eq("id", dataset_id).execute()
+    await client.table("datasets").delete().eq("id", dataset_id).execute()
     return ArchiveResponse(id=dataset_id, success=True, message="Dataset deleted", status="deleted")
 
 
 @router.delete("/archive/models/{model_id}", response_model=ArchiveResponse)
 async def delete_archived_model(model_id: str):
     """Permanently delete an archived model."""
-    client = get_supabase_client()
-    existing = client.table("models").select("id,status").eq("id", model_id).execute().data or []
+    client = await get_supabase_async_client()
+    existing = (
+        await client.table("models").select("id,status").eq("id", model_id).execute()
+    ).data or []
     if not existing:
         raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
     if existing[0].get("status") != "archived":
@@ -449,32 +470,36 @@ async def delete_archived_model(model_id: str):
     sync_service = R2DBSyncService()
     sync_service.delete_model_remote(model_id)
     _delete_local_model(model_id)
-    client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
-    client.table("models").delete().eq("id", model_id).execute()
+    await client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
+    await client.table("models").delete().eq("id", model_id).execute()
     return ArchiveResponse(id=model_id, success=True, message="Model deleted", status="deleted")
 
 
 @router.post("/archive/restore", response_model=ArchiveBulkResponse)
 async def restore_archived_items(request: ArchiveBulkRequest):
     """Bulk restore archived datasets/models."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     restored: list[str] = []
     errors: list[str] = []
 
     for dataset_id in request.dataset_ids:
-        existing = client.table("datasets").select("id,status").eq("id", dataset_id).execute().data or []
+        existing = (
+            await client.table("datasets").select("id,status").eq("id", dataset_id).execute()
+        ).data or []
         if not existing:
             errors.append(f"Dataset not found: {dataset_id}")
             continue
-        client.table("datasets").update({"status": "active"}).eq("id", dataset_id).execute()
+        await client.table("datasets").update({"status": "active"}).eq("id", dataset_id).execute()
         restored.append(dataset_id)
 
     for model_id in request.model_ids:
-        existing = client.table("models").select("id,status").eq("id", model_id).execute().data or []
+        existing = (
+            await client.table("models").select("id,status").eq("id", model_id).execute()
+        ).data or []
         if not existing:
             errors.append(f"Model not found: {model_id}")
             continue
-        client.table("models").update({"status": "active"}).eq("id", model_id).execute()
+        await client.table("models").update({"status": "active"}).eq("id", model_id).execute()
         restored.append(model_id)
 
     return ArchiveBulkResponse(
@@ -488,27 +513,31 @@ async def restore_archived_items(request: ArchiveBulkRequest):
 @router.post("/archive/delete", response_model=ArchiveBulkResponse)
 async def delete_archived_items(request: ArchiveBulkRequest):
     """Bulk delete archived datasets/models."""
-    client = get_supabase_client()
+    client = await get_supabase_async_client()
     sync_service = R2DBSyncService()
     deleted: list[str] = []
     errors: list[str] = []
 
     for dataset_id in request.dataset_ids:
-        existing = client.table("datasets").select("id,status").eq("id", dataset_id).execute().data or []
+        existing = (
+            await client.table("datasets").select("id,status").eq("id", dataset_id).execute()
+        ).data or []
         if not existing:
             errors.append(f"Dataset not found: {dataset_id}")
             continue
         if existing[0].get("status") != "archived":
             errors.append(f"Dataset is not archived: {dataset_id}")
             continue
-        _detach_models_from_dataset(dataset_id)
+        await _detach_models_from_dataset(dataset_id)
         sync_service.delete_dataset_remote(dataset_id)
         _delete_local_dataset(dataset_id)
-        client.table("datasets").delete().eq("id", dataset_id).execute()
+        await client.table("datasets").delete().eq("id", dataset_id).execute()
         deleted.append(dataset_id)
 
     for model_id in request.model_ids:
-        existing = client.table("models").select("id,status").eq("id", model_id).execute().data or []
+        existing = (
+            await client.table("models").select("id,status").eq("id", model_id).execute()
+        ).data or []
         if not existing:
             errors.append(f"Model not found: {model_id}")
             continue
@@ -517,8 +546,8 @@ async def delete_archived_items(request: ArchiveBulkRequest):
             continue
         sync_service.delete_model_remote(model_id)
         _delete_local_model(model_id)
-        client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
-        client.table("models").delete().eq("id", model_id).execute()
+        await client.table("training_jobs").update({"model_id": None}).eq("model_id", model_id).execute()
+        await client.table("models").delete().eq("id", model_id).execute()
         deleted.append(model_id)
 
     return ArchiveBulkResponse(
@@ -529,7 +558,7 @@ async def delete_archived_items(request: ArchiveBulkRequest):
     )
 
 
-def _upsert_dataset_from_hf(
+async def _upsert_dataset_from_hf(
     dataset_id: str,
     name: str,
     profile_instance_id: Optional[str],
@@ -544,10 +573,10 @@ def _upsert_dataset_from_hf(
         "source": "huggingface",
         "status": "active",
     }
-    upsert_with_owner("datasets", "id", payload)
+    await upsert_with_owner("datasets", "id", payload)
 
 
-def _upsert_model_from_hf(
+async def _upsert_model_from_hf(
     model_id: str,
     name: str,
     dataset_id: Optional[str],
@@ -566,7 +595,7 @@ def _upsert_model_from_hf(
         "source": "huggingface",
         "status": "active",
     }
-    upsert_with_owner("models", "id", payload)
+    await upsert_with_owner("models", "id", payload)
 
 
 def _report_upload_progress(
@@ -588,7 +617,7 @@ def _report_upload_progress(
     report({**message, "type": type_map.get(msg_type, msg_type), "step": "upload"})
 
 
-def _import_dataset_from_huggingface(
+async def _import_dataset_from_huggingface(
     request: HuggingFaceDatasetImportRequest,
     progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> HuggingFaceTransferResponse:
@@ -625,16 +654,14 @@ def _import_dataset_from_huggingface(
     name = request.dataset_name or request.name or request.repo_id.split("/")[-1]
     profile_snapshot = None
     if request.profile_instance_id:
-        client = get_supabase_client()
+        client = await get_supabase_async_client()
         rows = (
-            client.table("profile_instances")
+            await client.table("profile_instances")
             .select("profile_snapshot,variables,metadata,class_id,class_version")
             .eq("id", request.profile_instance_id)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
         if rows:
             profile_snapshot = {
                 "class_id": rows[0].get("class_id"),
@@ -648,7 +675,7 @@ def _import_dataset_from_huggingface(
             "step": "db_upsert",
             "message": "Registering dataset",
         })
-    _upsert_dataset_from_hf(dataset_id, name, request.profile_instance_id, profile_snapshot)
+    await _upsert_dataset_from_hf(dataset_id, name, request.profile_instance_id, profile_snapshot)
     if progress_callback:
         progress_callback({
             "type": "step_complete",
@@ -657,7 +684,7 @@ def _import_dataset_from_huggingface(
         })
 
     sync_service = R2DBSyncService()
-    ok, error = sync_service.upload_dataset_with_progress(
+    ok, error = await sync_service.upload_dataset_with_progress(
         dataset_id,
         lambda message: _report_upload_progress(message, progress_callback),
     )
@@ -672,7 +699,7 @@ def _import_dataset_from_huggingface(
     )
 
 
-def _import_model_from_huggingface(
+async def _import_model_from_huggingface(
     request: HuggingFaceModelImportRequest,
     progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> HuggingFaceTransferResponse:
@@ -704,16 +731,14 @@ def _import_model_from_huggingface(
     name = request.model_name or model_id
     profile_snapshot = None
     if request.profile_instance_id:
-        client = get_supabase_client()
+        client = await get_supabase_async_client()
         rows = (
-            client.table("profile_instances")
+            await client.table("profile_instances")
             .select("class_id,class_version,variables,metadata")
             .eq("id", request.profile_instance_id)
             .limit(1)
             .execute()
-            .data
-            or []
-        )
+        ).data or []
         if rows:
             profile_snapshot = {
                 "class_id": rows[0].get("class_id"),
@@ -728,7 +753,7 @@ def _import_model_from_huggingface(
             "step": "db_upsert",
             "message": "Registering model",
         })
-    _upsert_model_from_hf(
+    await _upsert_model_from_hf(
         model_id,
         name,
         request.dataset_id,
@@ -744,7 +769,7 @@ def _import_model_from_huggingface(
         })
 
     sync_service = R2DBSyncService()
-    result = sync_service.upload_model(model_id)
+    result = await sync_service.upload_model(model_id)
     if not result.success:
         raise HTTPException(status_code=500, detail=f"R2 upload failed: {result.message}")
 
@@ -756,7 +781,7 @@ def _import_model_from_huggingface(
     )
 
 
-def _export_dataset_to_huggingface(
+async def _export_dataset_to_huggingface(
     dataset_id: str,
     request: HuggingFaceExportRequest,
     progress_callback: Optional[Callable[[dict], None]] = None,
@@ -770,7 +795,7 @@ def _export_dataset_to_huggingface(
             "message": "Checking local dataset cache",
         })
     sync_service = R2DBSyncService()
-    result = sync_service.ensure_dataset_local(dataset_id, auto_download=True)
+    result = await sync_service.ensure_dataset_local(dataset_id, auto_download=True)
     if not result.success:
         raise HTTPException(status_code=500, detail=f"Dataset download failed: {result.message}")
     if progress_callback:
@@ -819,7 +844,7 @@ def _export_dataset_to_huggingface(
     )
 
 
-def _export_model_to_huggingface(
+async def _export_model_to_huggingface(
     model_id: str,
     request: HuggingFaceExportRequest,
     progress_callback: Optional[Callable[[dict], None]] = None,
@@ -833,7 +858,7 @@ def _export_model_to_huggingface(
             "message": "Checking local model cache",
         })
     sync_service = R2DBSyncService()
-    result = sync_service.ensure_model_local(model_id, auto_download=True)
+    result = await sync_service.ensure_model_local(model_id, auto_download=True)
     if not result.success:
         raise HTTPException(status_code=500, detail=f"Model download failed: {result.message}")
     if progress_callback:
@@ -876,22 +901,22 @@ def _export_model_to_huggingface(
 
 @router.post("/huggingface/datasets/import", response_model=HuggingFaceTransferResponse)
 async def import_dataset_from_huggingface(request: HuggingFaceDatasetImportRequest):
-    return _import_dataset_from_huggingface(request)
+    return await _import_dataset_from_huggingface(request)
 
 
 @router.post("/huggingface/models/import", response_model=HuggingFaceTransferResponse)
 async def import_model_from_huggingface(request: HuggingFaceModelImportRequest):
-    return _import_model_from_huggingface(request)
+    return await _import_model_from_huggingface(request)
 
 
 @router.post("/huggingface/datasets/{dataset_id:path}/export", response_model=HuggingFaceTransferResponse)
 async def export_dataset_to_huggingface(dataset_id: str, request: HuggingFaceExportRequest):
-    return _export_dataset_to_huggingface(dataset_id, request)
+    return await _export_dataset_to_huggingface(dataset_id, request)
 
 
 @router.post("/huggingface/models/{model_id}/export", response_model=HuggingFaceTransferResponse)
 async def export_model_to_huggingface(model_id: str, request: HuggingFaceExportRequest):
-    return _export_model_to_huggingface(model_id, request)
+    return await _export_model_to_huggingface(model_id, request)
 
 
 @router.websocket("/ws/huggingface/datasets/import")
@@ -916,12 +941,12 @@ async def websocket_import_dataset_from_huggingface(websocket: WebSocket):
     def progress_callback(progress: dict) -> None:
         asyncio.run_coroutine_threadsafe(progress_queue.put(progress), main_loop)
 
+    def _import_dataset_sync() -> HuggingFaceTransferResponse:
+        return asyncio.run(_import_dataset_from_huggingface(request, progress_callback))
+
     async def run_import() -> None:
         try:
-            result = await main_loop.run_in_executor(
-                _executor,
-                lambda: _import_dataset_from_huggingface(request, progress_callback),
-            )
+            result = await main_loop.run_in_executor(_executor, _import_dataset_sync)
             await progress_queue.put({"type": "complete", **result.model_dump()})
         except HTTPException as e:
             await progress_queue.put({"type": "error", "error": e.detail})
@@ -973,12 +998,12 @@ async def websocket_import_model_from_huggingface(websocket: WebSocket):
     def progress_callback(progress: dict) -> None:
         asyncio.run_coroutine_threadsafe(progress_queue.put(progress), main_loop)
 
+    def _import_model_sync() -> HuggingFaceTransferResponse:
+        return asyncio.run(_import_model_from_huggingface(request, progress_callback))
+
     async def run_import() -> None:
         try:
-            result = await main_loop.run_in_executor(
-                _executor,
-                lambda: _import_model_from_huggingface(request, progress_callback),
-            )
+            result = await main_loop.run_in_executor(_executor, _import_model_sync)
             await progress_queue.put({"type": "complete", **result.model_dump()})
         except HTTPException as e:
             await progress_queue.put({"type": "error", "error": e.detail})
@@ -1034,7 +1059,7 @@ async def websocket_export_dataset_to_huggingface(websocket: WebSocket, dataset_
         try:
             result = await main_loop.run_in_executor(
                 _executor,
-                lambda: _export_dataset_to_huggingface(dataset_id, request, progress_callback),
+                lambda: asyncio.run(_export_dataset_to_huggingface(dataset_id, request, progress_callback)),
             )
             await progress_queue.put({"type": "complete", **result.model_dump()})
         except HTTPException as e:
@@ -1091,7 +1116,7 @@ async def websocket_export_model_to_huggingface(websocket: WebSocket, model_id: 
         try:
             result = await main_loop.run_in_executor(
                 _executor,
-                lambda: _export_model_to_huggingface(model_id, request, progress_callback),
+                lambda: asyncio.run(_export_model_to_huggingface(model_id, request, progress_callback)),
             )
             await progress_queue.put({"type": "complete", **result.model_dump()})
         except HTTPException as e:
