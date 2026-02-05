@@ -30,7 +30,6 @@ from interfaces_backend.models.teleop import (
     RemoteFollowerSession,
     RemoteSessionsResponse,
 )
-from interfaces_backend.clients.runner_bridge import RunnerBridgeClient
 from interfaces_backend.services.profile_settings import get_active_profile_settings
 from percus_ai.teleop import (
     SimpleTeleoperation,
@@ -57,19 +56,6 @@ def _get_running_local_session() -> Optional[dict]:
 
 def has_running_local_teleop() -> bool:
     return _get_running_local_session() is not None
-
-
-def _inference_runner_active() -> bool:
-    runner_client = RunnerBridgeClient()
-    try:
-        status = runner_client.status()
-    except Exception:
-        return False
-    if not isinstance(status, dict):
-        return False
-    if status.get("active") is True:
-        return True
-    return bool(status.get("session_id"))
 
 
 def _resolve_robot_preset(profile_class_key: str, settings: dict) -> str:
@@ -116,8 +102,6 @@ async def start_local_teleop(request: TeleopStartRequest):
     Creates a leader-follower teleoperation session where the follower
     arm mimics the leader arm movements.
     """
-    if _inference_runner_active():
-        raise HTTPException(status_code=409, detail="Inference session is already running")
     if has_running_local_teleop():
         raise HTTPException(status_code=409, detail="Teleop session is already running")
 
@@ -188,9 +172,6 @@ async def run_local_teleop(session_id: str, duration_sec: Optional[float] = None
 
     This runs the teleoperation loop in a background thread.
     """
-    if _inference_runner_active():
-        raise HTTPException(status_code=409, detail="Inference session is already running")
-
     running_session = _get_running_local_session()
     if running_session and running_session.get("session_id") != session_id:
         raise HTTPException(status_code=409, detail="Another teleop session is already running")
@@ -236,8 +217,6 @@ async def get_local_profile_config():
 
 @router.post("/local/start-profile", response_model=TeleopStartResponse)
 async def start_local_teleop_from_profile():
-    if _inference_runner_active():
-        raise HTTPException(status_code=409, detail="Inference session is already running")
     if has_running_local_teleop():
         raise HTTPException(status_code=409, detail="Teleop session is already running")
 

@@ -62,8 +62,6 @@ from interfaces_backend.api import (
     config_router,
     experiments_router,
     hardware_router,
-    inference_router,
-    gpu_host_router,
     operate_router,
     platform_router,
     profiles_router,
@@ -146,8 +144,6 @@ app.include_router(calibration_router)
 app.include_router(config_router)
 app.include_router(experiments_router)
 app.include_router(hardware_router)
-app.include_router(inference_router)
-app.include_router(gpu_host_router)
 app.include_router(operate_router)
 app.include_router(platform_router)
 app.include_router(profiles_router)
