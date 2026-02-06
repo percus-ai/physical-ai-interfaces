@@ -16,7 +16,10 @@ from percus_ai.storage.paths import get_project_root
 
 router = APIRouter(prefix="/api/operate", tags=["operate"])
 
-_ZMQ_ENDPOINT = os.environ.get("RUNNER_BRIDGE_ZMQ_ENDPOINT", "tcp://127.0.0.1:5556")
+_ZMQ_ENDPOINT = os.environ.get(
+    "INFERENCE_BRIDGE_ZMQ_ENDPOINT",
+    os.environ.get("RUNNER_BRIDGE_ZMQ_ENDPOINT", "tcp://127.0.0.1:5556"),
+)
 
 
 def _check_tcp(host: str, port: int, timeout: float = 0.6) -> tuple[bool, str]:

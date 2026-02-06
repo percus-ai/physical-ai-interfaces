@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from interfaces_backend.api.inference import get_inference_runner_status
 from interfaces_backend.api.operate import get_operate_status
 from interfaces_backend.api.profiles import get_active_instance_status, get_vlabor_status
 from interfaces_backend.api.recording import get_session_status
@@ -58,11 +59,13 @@ async def stream_operate_status(request: Request):
     async def build_payload() -> dict:
         teleop_sessions = await list_local_teleop_sessions()
         teleop_profile = await get_local_profile_config()
+        inference_runner_status = await get_inference_runner_status()
         operate_status = await get_operate_status()
 
         return {
             "teleop_sessions": teleop_sessions.model_dump(mode="json"),
             "teleop_profile_config": teleop_profile.model_dump(mode="json"),
+            "inference_runner_status": inference_runner_status.model_dump(mode="json"),
             "operate_status": operate_status.model_dump(mode="json"),
         }
 
