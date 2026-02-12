@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
+from uuid import uuid4
+
 import yaml
 
 from fastapi import APIRouter, HTTPException
@@ -29,6 +30,17 @@ from interfaces_backend.models.profile import (
     ProfileDeviceStatusArm,
     VlaborStatusResponse,
 )
+from interfaces_backend.services.vlabor_runtime import (
+    VlaborCommandError,
+    restart_vlabor as run_vlabor_restart,
+    start_vlabor as run_vlabor_start,
+    stop_vlabor as run_vlabor_stop,
+)
+from interfaces_backend.utils.docker_compose import (
+    build_compose_command,
+    get_vlabor_compose_file,
+    get_vlabor_env_file,
+)
 from percus_ai.db import get_current_user_id, get_supabase_async_client
 from percus_ai.profiles.models import ProfileClass, ProfileInstance
 from percus_ai.profiles.registry import ProfileRegistry
@@ -38,7 +50,6 @@ from percus_ai.profiles.writer import (
     write_current_profile_config,
     write_profile_instance_snapshot,
 )
-from percus_ai.storage.paths import get_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -59,55 +70,40 @@ def _optional_user_id() -> str | None:
         return None
 
 
+def _get_vlabor_compose_cmd(*, strict: bool) -> tuple[list[str], Path]:
+    compose_file = get_vlabor_compose_file()
+    if strict and not compose_file.exists():
+        raise HTTPException(status_code=500, detail=f"{compose_file} not found")
+    return build_compose_command(compose_file, get_vlabor_env_file()), compose_file
+
+
 def _start_vlabor() -> None:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
-    if not compose_file.exists():
-        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "up", "-d", "vlabor"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"vlabor start failed: {result.stderr.strip()}")
+    try:
+        run_vlabor_start()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"vlabor start failed: {exc}") from exc
 
 
 def _restart_vlabor() -> None:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
-    if not compose_file.exists():
-        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "restart", "vlabor"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"vlabor restart failed: {result.stderr.strip()}")
+    try:
+        run_vlabor_restart()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"vlabor restart failed: {exc}") from exc
 
 
 def _stop_vlabor() -> None:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
-    if not compose_file.exists():
-        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "stop", "vlabor"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"vlabor stop failed: {result.stderr.strip()}")
+    try:
+        run_vlabor_stop()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"vlabor stop failed: {exc}") from exc
 
 
 def _get_vlabor_status() -> dict:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
+    compose_cmd, compose_file = _get_vlabor_compose_cmd(strict=False)
     if not compose_file.exists():
         return {"status": "unknown", "service": "vlabor"}
     result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json", "vlabor"],
+        [*compose_cmd, "ps", "--format", "json", "vlabor"],
         capture_output=True,
         text=True,
     )
@@ -368,15 +364,11 @@ def _extract_arm_specs(settings: dict) -> list[dict]:
 
 
 def _fetch_ros2_topics() -> list[str]:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
+    compose_cmd, compose_file = _get_vlabor_compose_cmd(strict=False)
     if not compose_file.exists():
         return []
     cmd = [
-        "docker",
-        "compose",
-        "-f",
-        str(compose_file),
+        *compose_cmd,
         "exec",
         "-T",
         "vlabor",

@@ -12,7 +12,7 @@ WebUIの設計・実装で後回しの項目をここに記録。
 - /api/config, /api/config/environments
 - /api/user/config, /api/user/devices
 - /api/hardware, /api/hardware/cameras, /api/hardware/serial-ports
-- /api/teleop/local/sessions
+- /api/profiles/vlabor/status, /api/profiles/vlabor/start, /api/profiles/vlabor/stop
 - /api/inference/models, /api/inference/sessions
 - /api/webui/blueprints
 
@@ -22,7 +22,7 @@ WebUIの設計・実装で後回しの項目をここに記録。
 ## バックエンドへ寄せる候補（未整備/不足）
 - ポリシー種別・推奨パラメータ一覧（POLICY_TYPES をAPIで返す）
 - 学習ジョブ作成ウィザードのデフォルト値（steps/batch/save_freq）
-- テレオペ/推論の詳細セッション状態（WebSocket進行状況）
+- VLAbor/推論の詳細セッション状態（WebSocket進行状況）
 - 録画進行中のステータス/アップロード進捗
 
 ## UIでの残タスク

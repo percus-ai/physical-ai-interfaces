@@ -1,146 +1,41 @@
-"""Teleoperation API models."""
+"""Teleop session API models."""
 
-from typing import Dict, List, Optional, Any
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
 
-class TeleopStartRequest(BaseModel):
-    """Request to start local teleoperation."""
-
-    leader_port: str = Field(..., description="Leader arm serial port")
-    follower_port: str = Field(..., description="Follower arm serial port")
-    mode: str = Field("simple", description="Teleop mode: simple, visual, bimanual")
-    fps: int = Field(60, ge=1, le=120, description="Control frequency in Hz")
-    robot_preset: str = Field("so101", description="Robot preset: so101, so100")
+class TeleopSessionCreateRequest(BaseModel):
+    profile: Optional[str] = Field(None, description="Optional profile name for VLAbor up script")
+    domain_id: Optional[int] = Field(None, ge=0, description="Optional ROS domain id")
+    dev_mode: bool = Field(False, description="Use docker/vlabor/up --dev")
 
 
-class TeleopSession(BaseModel):
-    """Teleoperation session information."""
-
-    session_id: str = Field(..., description="Session ID")
-    mode: str = Field(..., description="Teleop mode")
-    leader_port: str = Field(..., description="Leader arm port")
-    follower_port: str = Field(..., description="Follower arm port")
-    fps: int = Field(..., description="Control frequency")
-    is_running: bool = Field(..., description="Session is running")
-    started_at: str = Field(..., description="Session start time")
-    iterations: int = Field(0, description="Number of iterations")
-    errors: int = Field(0, description="Error count")
+class TeleopSessionStartRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, description="Teleop session id")
 
 
-class TeleopStartResponse(BaseModel):
-    """Response for teleop start endpoint."""
-
-    session: TeleopSession
-    message: str
+class TeleopSessionStopRequest(BaseModel):
+    session_id: Optional[str] = Field(None, description="Teleop session id")
 
 
-class TeleopStopRequest(BaseModel):
-    """Request to stop teleoperation."""
-
-    session_id: str = Field(..., description="Session ID to stop")
-
-
-class TeleopStopResponse(BaseModel):
-    """Response for teleop stop endpoint."""
-
-    session_id: str
+class TeleopSessionActionResponse(BaseModel):
     success: bool
+    session_id: Optional[str] = None
     message: str
-    total_iterations: int = 0
-    duration_seconds: float = 0.0
+    status: Dict[str, Any] = Field(default_factory=dict)
 
 
-class TeleopSessionsResponse(BaseModel):
-    """Response for sessions list endpoint."""
+class TeleopSessionStatusResponse(BaseModel):
+    active: bool = False
+    session_id: Optional[str] = None
+    state: str = "stopped"
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    profile: Optional[str] = None
+    domain_id: Optional[int] = None
+    dev_mode: bool = False
+    status: Dict[str, Any] = Field(default_factory=dict)
 
-    sessions: List[TeleopSession]
-    total: int
-
-
-class TeleopProfileConfig(BaseModel):
-    """Resolved teleop configuration from the active profile."""
-
-    profile_id: str = Field(..., description="Active profile instance id")
-    profile_class_key: str = Field(..., description="Profile class key")
-    leader_port: str = Field(..., description="Leader arm serial port")
-    follower_port: str = Field(..., description="Follower arm serial port")
-    mode: str = Field("simple", description="Teleop mode")
-    fps: int = Field(60, ge=1, le=120, description="Control frequency in Hz")
-    robot_preset: str = Field("so101", description="Robot preset: so101, so100")
-
-
-class TeleopProfileConfigResponse(BaseModel):
-    """Response for profile-based teleop config endpoint."""
-
-    config: TeleopProfileConfig
-
-
-# Remote teleoperation models
-
-
-class RemoteLeaderStartRequest(BaseModel):
-    """Request to start remote leader server."""
-
-    host: str = Field("0.0.0.0", description="Host to bind")
-    port: int = Field(8080, ge=1024, le=65535, description="Port to bind")
-    fps: int = Field(60, ge=1, le=120, description="Read frequency in Hz")
-    leader_port: str = Field(..., description="Leader arm serial port")
-    camera_id: Optional[int] = Field(None, description="Camera ID for video stream")
-
-
-class RemoteLeaderSession(BaseModel):
-    """Remote leader session information."""
-
-    session_id: str = Field(..., description="Session ID")
-    host: str = Field(..., description="Host address")
-    port: int = Field(..., description="Port number")
-    url: str = Field(..., description="Leader URL for followers")
-    leader_port: str = Field(..., description="Leader arm port")
-    camera_enabled: bool = Field(False, description="Camera streaming enabled")
-    is_running: bool = Field(..., description="Server is running")
-    started_at: str = Field(..., description="Session start time")
-    clients_connected: int = Field(0, description="Number of connected followers")
-
-
-class RemoteLeaderStartResponse(BaseModel):
-    """Response for remote leader start endpoint."""
-
-    session: RemoteLeaderSession
-    message: str
-
-
-class RemoteFollowerStartRequest(BaseModel):
-    """Request to start remote follower client."""
-
-    leader_url: str = Field(..., description="Leader server URL")
-    follower_port: str = Field(..., description="Follower arm serial port")
-    robot_preset: str = Field("so101", description="Robot preset")
-
-
-class RemoteFollowerSession(BaseModel):
-    """Remote follower session information."""
-
-    session_id: str = Field(..., description="Session ID")
-    leader_url: str = Field(..., description="Leader server URL")
-    follower_port: str = Field(..., description="Follower arm port")
-    is_connected: bool = Field(..., description="Connected to leader")
-    is_running: bool = Field(..., description="Client is running")
-    started_at: str = Field(..., description="Session start time")
-    latency_ms: float = Field(0.0, description="Average latency in ms")
-    sync_errors: int = Field(0, description="Sync error count")
-
-
-class RemoteFollowerStartResponse(BaseModel):
-    """Response for remote follower start endpoint."""
-
-    session: RemoteFollowerSession
-    message: str
-
-
-class RemoteSessionsResponse(BaseModel):
-    """Response for remote sessions list endpoint."""
-
-    leaders: List[RemoteLeaderSession]
-    followers: List[RemoteFollowerSession]

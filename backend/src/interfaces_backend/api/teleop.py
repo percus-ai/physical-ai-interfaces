@@ -1,762 +1,177 @@
-"""Teleoperation API router."""
+"""Teleop session control API."""
 
-import uuid
-import asyncio
+from __future__ import annotations
+
 import threading
-import time
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException
 
-logger = logging.getLogger(__name__)
-
+from interfaces_backend.api.profiles import _get_vlabor_status
 from interfaces_backend.models.teleop import (
-    TeleopStartRequest,
-    TeleopStartResponse,
-    TeleopSession,
-    TeleopStopRequest,
-    TeleopStopResponse,
-    TeleopSessionsResponse,
-    TeleopProfileConfig,
-    TeleopProfileConfigResponse,
-    RemoteLeaderStartRequest,
-    RemoteLeaderStartResponse,
-    RemoteLeaderSession,
-    RemoteFollowerStartRequest,
-    RemoteFollowerStartResponse,
-    RemoteFollowerSession,
-    RemoteSessionsResponse,
+    TeleopSessionActionResponse,
+    TeleopSessionCreateRequest,
+    TeleopSessionStartRequest,
+    TeleopSessionStatusResponse,
+    TeleopSessionStopRequest,
 )
-from interfaces_backend.services.profile_settings import get_active_profile_settings
-from percus_ai.teleop import (
-    SimpleTeleoperation,
-    VisualTeleoperation,
-    BimanualTeleoperation,
-    RobotPreset,
+from interfaces_backend.services.vlabor_runtime import (
+    VlaborCommandError,
+    start_vlabor as run_vlabor_start,
+    stop_vlabor as run_vlabor_stop,
 )
-from percus_ai.teleop.common import create_motor_bus, MotorState
+from percus_ai.db import get_current_user_id
 
 router = APIRouter(prefix="/api/teleop", tags=["teleop"])
 
-# In-memory session storage
-_local_sessions: Dict[str, dict] = {}
-_remote_leader_sessions: Dict[str, dict] = {}
-_remote_follower_sessions: Dict[str, dict] = {}
+_SESSION_ID = "teleop"
+_SESSION_LOCK = threading.RLock()
+_ACTIVE_SESSION: dict[str, Any] | None = None
 
 
-def _get_running_local_session() -> Optional[dict]:
-    for session in _local_sessions.values():
-        if session.get("is_running"):
-            return session
-    return None
-
-
-def has_running_local_teleop() -> bool:
-    return _get_running_local_session() is not None
-
-
-def _resolve_robot_preset(profile_class_key: str, settings: dict) -> str:
-    preset = settings.get("robot_preset")
-    if isinstance(preset, str) and preset:
-        return preset
-    if "so100" in profile_class_key:
-        return "so100"
-    return "so101"
-
-
-async def _build_profile_teleop_config() -> TeleopProfileConfig:
-    instance, profile_class, settings = await get_active_profile_settings()
-    profile_class_key = getattr(profile_class, "class_key", "") or ""
-
-    leader_port = settings.get("right_serial_port") or settings.get("leader_port") or ""
-    follower_port = settings.get("left_serial_port") or settings.get("follower_port") or ""
-    mode = settings.get("teleop_mode") or settings.get("mode") or "simple"
-    fps_value = settings.get("teleop_fps") or settings.get("fps") or 60
+def _require_user_id() -> str:
     try:
-        fps = int(fps_value)
-    except (TypeError, ValueError):
-        fps = 60
-    robot_preset = _resolve_robot_preset(profile_class_key, settings)
-
-    return TeleopProfileConfig(
-        profile_id=getattr(instance, "id", "") or "",
-        profile_class_key=profile_class_key,
-        leader_port=str(leader_port),
-        follower_port=str(follower_port),
-        mode=str(mode),
-        fps=fps,
-        robot_preset=str(robot_preset),
-    )
+        return get_current_user_id()
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Login required") from exc
 
 
-# --- Local Teleoperation Endpoints ---
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-@router.post("/local/start", response_model=TeleopStartResponse)
-async def start_local_teleop(request: TeleopStartRequest):
-    """Start local teleoperation session.
+def _status_payload() -> dict[str, Any]:
+    return dict(_get_vlabor_status())
 
-    Creates a leader-follower teleoperation session where the follower
-    arm mimics the leader arm movements.
-    """
-    if has_running_local_teleop():
-        raise HTTPException(status_code=409, detail="Teleop session is already running")
 
-    session_id = str(uuid.uuid4())[:8]
-    now = datetime.now().isoformat()
+def _active_session_copy() -> dict[str, Any] | None:
+    with _SESSION_LOCK:
+        return dict(_ACTIVE_SESSION) if _ACTIVE_SESSION else None
 
-    # Select teleop class based on mode
-    mode = request.mode.lower()
-    if mode == "visual":
-        TeleopClass = VisualTeleoperation
-    elif mode == "bimanual":
-        TeleopClass = BimanualTeleoperation
-    else:
-        TeleopClass = SimpleTeleoperation
 
-    # Get robot preset
-    preset = RobotPreset.SO101
-    if request.robot_preset.lower() == "so100":
-        preset = RobotPreset.SO100
-
+@router.post("/session/create", response_model=TeleopSessionActionResponse)
+async def create_session(request: Optional[TeleopSessionCreateRequest] = None):
+    _require_user_id()
+    payload = request or TeleopSessionCreateRequest()
     try:
-        # Create teleop instance
-        teleop = TeleopClass(
-            leader_port=request.leader_port,
-            follower_port=request.follower_port,
-            fps=request.fps,
-            robot_preset=preset,
-        )
+        run_vlabor_start(profile=payload.profile, domain_id=payload.domain_id, dev_mode=payload.dev_mode)
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create teleop session: {exc}") from exc
 
-        # Store session info (but don't start yet in API - would need background task)
-        session_data = {
-            "session_id": session_id,
-            "mode": mode,
-            "leader_port": request.leader_port,
-            "follower_port": request.follower_port,
-            "fps": request.fps,
-            "is_running": False,  # Would be True when actually running
-            "started_at": now,
-            "iterations": 0,
-            "errors": 0,
-            "teleop": teleop,
-            "thread": None,
+    now = _now_iso()
+    with _SESSION_LOCK:
+        global _ACTIVE_SESSION
+        if _ACTIVE_SESSION and _ACTIVE_SESSION.get("state") == "running":
+            return TeleopSessionActionResponse(
+                success=True,
+                session_id=_SESSION_ID,
+                message="Teleop session already running",
+                status=_status_payload(),
+            )
+        _ACTIVE_SESSION = {
+            "session_id": _SESSION_ID,
+            "state": "created",
+            "created_at": now,
+            "started_at": _ACTIVE_SESSION.get("started_at") if _ACTIVE_SESSION else None,
+            "profile": payload.profile,
+            "domain_id": payload.domain_id,
+            "dev_mode": bool(payload.dev_mode),
         }
-        _local_sessions[session_id] = session_data
 
-        return TeleopStartResponse(
-            session=TeleopSession(
-                session_id=session_id,
-                mode=mode,
-                leader_port=request.leader_port,
-                follower_port=request.follower_port,
-                fps=request.fps,
-                is_running=False,
-                started_at=now,
-                iterations=0,
-                errors=0,
-            ),
-            message="Teleop session created. Call /local/run to start.",
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create teleop: {e}")
-
-
-@router.post("/local/{session_id}/run")
-async def run_local_teleop(session_id: str, duration_sec: Optional[float] = None):
-    """Start running a teleop session.
-
-    This runs the teleoperation loop in a background thread.
-    """
-    running_session = _get_running_local_session()
-    if running_session and running_session.get("session_id") != session_id:
-        raise HTTPException(status_code=409, detail="Another teleop session is already running")
-
-    if session_id not in _local_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    session = _local_sessions[session_id]
-
-    if session.get("is_running"):
-        return {"session_id": session_id, "message": "Already running"}
-
-    teleop = session.get("teleop")
-    if not teleop:
-        raise HTTPException(status_code=500, detail="Teleop instance not found")
-
-    def run_teleop():
-        try:
-            teleop.connect()
-            session["is_running"] = True
-            teleop.run(duration_sec=duration_sec)
-        except Exception as e:
-            session["errors"] = session.get("errors", 0) + 1
-        finally:
-            session["is_running"] = False
-            try:
-                teleop.disconnect()
-            except Exception:
-                pass
-
-    thread = threading.Thread(target=run_teleop, daemon=True)
-    thread.start()
-    session["thread"] = thread
-
-    return {"session_id": session_id, "message": "Teleop started"}
-
-
-@router.get("/local/profile-config", response_model=TeleopProfileConfigResponse)
-async def get_local_profile_config():
-    config = await _build_profile_teleop_config()
-    return TeleopProfileConfigResponse(config=config)
-
-
-@router.post("/local/start-profile", response_model=TeleopStartResponse)
-async def start_local_teleop_from_profile():
-    if has_running_local_teleop():
-        raise HTTPException(status_code=409, detail="Teleop session is already running")
-
-    config = await _build_profile_teleop_config()
-    if not config.leader_port or not config.follower_port:
-        raise HTTPException(status_code=400, detail="Teleop ports are not configured in the active profile")
-
-    start_request = TeleopStartRequest(
-        leader_port=config.leader_port,
-        follower_port=config.follower_port,
-        mode=config.mode,
-        fps=config.fps,
-        robot_preset=config.robot_preset,
-    )
-    start_response = await start_local_teleop(start_request)
-    await run_local_teleop(start_response.session.session_id)
-    return TeleopStartResponse(
-        session=start_response.session,
-        message="Teleop session started from active profile",
-    )
-
-
-@router.post("/local/stop", response_model=TeleopStopResponse)
-async def stop_local_teleop(request: TeleopStopRequest):
-    """Stop a running teleoperation session."""
-    session_id = request.session_id
-
-    if session_id not in _local_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    session = _local_sessions[session_id]
-    teleop = session.get("teleop")
-
-    # Stop teleop
-    if teleop:
-        try:
-            teleop.disconnect()
-        except Exception:
-            pass
-
-    # Calculate duration
-    started_at = session.get("started_at", "")
-    duration = 0.0
-    if started_at:
-        try:
-            start = datetime.fromisoformat(started_at)
-            duration = (datetime.now() - start).total_seconds()
-        except Exception:
-            pass
-
-    iterations = session.get("iterations", 0)
-
-    # Remove session
-    del _local_sessions[session_id]
-
-    return TeleopStopResponse(
-        session_id=session_id,
+    return TeleopSessionActionResponse(
         success=True,
-        message="Teleop stopped",
-        total_iterations=iterations,
-        duration_seconds=duration,
+        session_id=_SESSION_ID,
+        message="Teleop session created",
+        status=_status_payload(),
     )
 
 
-@router.get("/local/status/{session_id}", response_model=TeleopSession)
-async def get_local_teleop_status(session_id: str):
-    """Get status of a local teleoperation session."""
-    if session_id not in _local_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+@router.post("/session/start", response_model=TeleopSessionActionResponse)
+async def start_session(request: TeleopSessionStartRequest):
+    _require_user_id()
+    if request.session_id != _SESSION_ID:
+        raise HTTPException(status_code=404, detail=f"Teleop session not found: {request.session_id}")
 
-    s = _local_sessions[session_id]
-    return TeleopSession(
-        session_id=s["session_id"],
-        mode=s.get("mode", "simple"),
-        leader_port=s.get("leader_port", ""),
-        follower_port=s.get("follower_port", ""),
-        fps=s.get("fps", 60),
-        is_running=s.get("is_running", False),
-        started_at=s.get("started_at", ""),
-        iterations=s.get("iterations", 0),
-        errors=s.get("errors", 0),
-    )
-
-
-@router.get("/local/sessions", response_model=TeleopSessionsResponse)
-async def list_local_teleop_sessions():
-    """List all local teleoperation sessions."""
-    sessions = [
-        TeleopSession(
-            session_id=s["session_id"],
-            mode=s.get("mode", "simple"),
-            leader_port=s.get("leader_port", ""),
-            follower_port=s.get("follower_port", ""),
-            fps=s.get("fps", 60),
-            is_running=s.get("is_running", False),
-            started_at=s.get("started_at", ""),
-            iterations=s.get("iterations", 0),
-            errors=s.get("errors", 0),
-        )
-        for s in _local_sessions.values()
-    ]
-
-    return TeleopSessionsResponse(sessions=sessions, total=len(sessions))
-
-
-# --- Remote Teleoperation Endpoints ---
-
-
-@router.post("/remote/leader/start", response_model=RemoteLeaderStartResponse)
-async def start_remote_leader(request: RemoteLeaderStartRequest):
-    """Start a remote leader server.
-
-    The leader server streams arm positions and optionally camera frames
-    to connected followers.
-    """
-    session_id = str(uuid.uuid4())[:8]
-    now = datetime.now().isoformat()
-
-    url = f"http://{request.host}:{request.port}"
-    if request.host == "0.0.0.0":
-        url = f"http://localhost:{request.port}"
-
-    session_data = {
-        "session_id": session_id,
-        "host": request.host,
-        "port": request.port,
-        "url": url,
-        "leader_port": request.leader_port,
-        "camera_enabled": request.camera_id is not None,
-        "is_running": False,
-        "started_at": now,
-        "clients_connected": 0,
-        "server": None,
-    }
-    _remote_leader_sessions[session_id] = session_data
-
-    # Note: Actual server start would require background process management
-    # For now, just create the session
-
-    return RemoteLeaderStartResponse(
-        session=RemoteLeaderSession(
-            session_id=session_id,
-            host=request.host,
-            port=request.port,
-            url=url,
-            leader_port=request.leader_port,
-            camera_enabled=request.camera_id is not None,
-            is_running=False,
-            started_at=now,
-            clients_connected=0,
-        ),
-        message="Leader session created. Use CLI to start server.",
-    )
-
-
-@router.post("/remote/leader/{session_id}/stop")
-async def stop_remote_leader(session_id: str):
-    """Stop a remote leader server."""
-    if session_id not in _remote_leader_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    session = _remote_leader_sessions[session_id]
-    # Stop server if running
-    server = session.get("server")
-    if server:
-        try:
-            # Would need proper shutdown mechanism
-            pass
-        except Exception:
-            pass
-
-    del _remote_leader_sessions[session_id]
-    return {"session_id": session_id, "message": "Leader stopped"}
-
-
-@router.get("/remote/leader/status/{session_id}", response_model=RemoteLeaderSession)
-async def get_remote_leader_status(session_id: str):
-    """Get status of a remote leader server."""
-    if session_id not in _remote_leader_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    s = _remote_leader_sessions[session_id]
-    return RemoteLeaderSession(
-        session_id=s["session_id"],
-        host=s.get("host", ""),
-        port=s.get("port", 0),
-        url=s.get("url", ""),
-        leader_port=s.get("leader_port", ""),
-        camera_enabled=s.get("camera_enabled", False),
-        is_running=s.get("is_running", False),
-        started_at=s.get("started_at", ""),
-        clients_connected=s.get("clients_connected", 0),
-    )
-
-
-@router.post("/remote/follower/start", response_model=RemoteFollowerStartResponse)
-async def start_remote_follower(request: RemoteFollowerStartRequest):
-    """Start a remote follower client.
-
-    Connects to a leader server and syncs the follower arm.
-    """
-    session_id = str(uuid.uuid4())[:8]
-    now = datetime.now().isoformat()
-
-    session_data = {
-        "session_id": session_id,
-        "leader_url": request.leader_url,
-        "follower_port": request.follower_port,
-        "is_connected": False,
-        "is_running": False,
-        "started_at": now,
-        "latency_ms": 0.0,
-        "sync_errors": 0,
-        "client": None,
-    }
-    _remote_follower_sessions[session_id] = session_data
-
-    return RemoteFollowerStartResponse(
-        session=RemoteFollowerSession(
-            session_id=session_id,
-            leader_url=request.leader_url,
-            follower_port=request.follower_port,
-            is_connected=False,
-            is_running=False,
-            started_at=now,
-            latency_ms=0.0,
-            sync_errors=0,
-        ),
-        message="Follower session created. Use CLI to start client.",
-    )
-
-
-@router.post("/remote/follower/{session_id}/stop")
-async def stop_remote_follower(session_id: str):
-    """Stop a remote follower client."""
-    if session_id not in _remote_follower_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    session = _remote_follower_sessions[session_id]
-    client = session.get("client")
-    if client:
-        try:
-            pass  # Would need proper shutdown
-        except Exception:
-            pass
-
-    del _remote_follower_sessions[session_id]
-    return {"session_id": session_id, "message": "Follower stopped"}
-
-
-@router.get("/remote/follower/status/{session_id}", response_model=RemoteFollowerSession)
-async def get_remote_follower_status(session_id: str):
-    """Get status of a remote follower client."""
-    if session_id not in _remote_follower_sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-
-    s = _remote_follower_sessions[session_id]
-    return RemoteFollowerSession(
-        session_id=s["session_id"],
-        leader_url=s.get("leader_url", ""),
-        follower_port=s.get("follower_port", ""),
-        is_connected=s.get("is_connected", False),
-        is_running=s.get("is_running", False),
-        started_at=s.get("started_at", ""),
-        latency_ms=s.get("latency_ms", 0.0),
-        sync_errors=s.get("sync_errors", 0),
-    )
-
-
-@router.get("/remote/sessions", response_model=RemoteSessionsResponse)
-async def list_remote_sessions():
-    """List all remote teleoperation sessions."""
-    leaders = [
-        RemoteLeaderSession(
-            session_id=s["session_id"],
-            host=s.get("host", ""),
-            port=s.get("port", 0),
-            url=s.get("url", ""),
-            leader_port=s.get("leader_port", ""),
-            camera_enabled=s.get("camera_enabled", False),
-            is_running=s.get("is_running", False),
-            started_at=s.get("started_at", ""),
-            clients_connected=s.get("clients_connected", 0),
-        )
-        for s in _remote_leader_sessions.values()
-    ]
-
-    followers = [
-        RemoteFollowerSession(
-            session_id=s["session_id"],
-            leader_url=s.get("leader_url", ""),
-            follower_port=s.get("follower_port", ""),
-            is_connected=s.get("is_connected", False),
-            is_running=s.get("is_running", False),
-            started_at=s.get("started_at", ""),
-            latency_ms=s.get("latency_ms", 0.0),
-            sync_errors=s.get("sync_errors", 0),
-        )
-        for s in _remote_follower_sessions.values()
-    ]
-
-    return RemoteSessionsResponse(leaders=leaders, followers=followers)
-
-
-# --- WebSocket Visual Teleoperation ---
-
-
-@router.websocket("/ws/visual")
-async def websocket_visual_teleop(websocket: WebSocket):
-    """WebSocket endpoint for visual teleoperation with real-time motor state streaming.
-
-    Client sends JSON messages:
-    - {"action": "start", "leader_port": "/dev/ttyACM0", "follower_port": "/dev/ttyACM1",
-       "robot_preset": "so101", "fps": 60}
-    - {"action": "stop"}
-
-    Server sends JSON messages:
-    - {"type": "state", "leader_states": {...}, "follower_states": {...},
-       "iteration": N, "elapsed": X.X, "actual_fps": Y.Y, "errors": N}
-    - {"type": "connected", "message": "..."}
-    - {"type": "stopped", "message": "..."}
-    - {"type": "error", "error": "..."}
-    """
-    await websocket.accept()
-    logger.info("Visual teleop WebSocket connected")
-
-    leader_bus = None
-    follower_bus = None
-    running = False
-    stop_requested = False
-
-    def read_motor_state(bus, motor_name: str) -> dict:
-        """Read motor state from bus and return as dict."""
-        state = {"error": None}
-        try:
-            state["position"] = bus.read("Present_Position", motor_name, normalize=False)
-            try:
-                state["load"] = bus.read("Present_Load", motor_name, normalize=False)
-            except Exception:
-                state["load"] = None
-            try:
-                state["temperature"] = bus.read("Present_Temperature", motor_name, normalize=False)
-            except Exception:
-                state["temperature"] = None
-            try:
-                voltage = bus.read("Present_Voltage", motor_name, normalize=False)
-                state["voltage"] = voltage / 10.0 if voltage is not None else None
-            except Exception:
-                state["voltage"] = None
-            try:
-                state["speed"] = bus.read("Present_Velocity", motor_name, normalize=False)
-            except Exception:
-                state["speed"] = None
-            try:
-                state["current"] = bus.read("Present_Current", motor_name, normalize=False)
-            except Exception:
-                state["current"] = None
-        except Exception as e:
-            state["error"] = str(e)
-        return state
+    session = _active_session_copy()
+    if not session:
+        raise HTTPException(status_code=404, detail="Teleop session not found. Create session first.")
 
     try:
-        while True:
-            # Wait for message with timeout to allow checking stop flag
-            try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=0.05)
-            except asyncio.TimeoutError:
-                # No message, continue loop if running
-                if running and not stop_requested:
-                    # Read and send motor states
-                    loop_start = time.time()
+        run_vlabor_start(
+            profile=session.get("profile"),
+            domain_id=session.get("domain_id"),
+            dev_mode=bool(session.get("dev_mode")),
+        )
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start teleop session: {exc}") from exc
 
-                    leader_states = {}
-                    follower_states = {}
-                    errors_count = 0
+    with _SESSION_LOCK:
+        if _ACTIVE_SESSION is None:
+            raise HTTPException(status_code=404, detail="Teleop session not found")
+        _ACTIVE_SESSION["state"] = "running"
+        _ACTIVE_SESSION["started_at"] = _ACTIVE_SESSION.get("started_at") or _now_iso()
 
-                    for motor_name in leader_bus.motors.keys():
-                        leader_states[motor_name] = read_motor_state(leader_bus, motor_name)
-                        if leader_states[motor_name].get("error"):
-                            errors_count += 1
+    return TeleopSessionActionResponse(
+        success=True,
+        session_id=_SESSION_ID,
+        message="Teleop session started",
+        status=_status_payload(),
+    )
 
-                    for motor_name in leader_bus.motors.keys():
-                        leader_state = leader_states[motor_name]
-                        if leader_state.get("position") is not None and not leader_state.get("error"):
-                            try:
-                                follower_bus.write(
-                                    "Goal_Position",
-                                    motor_name,
-                                    leader_state["position"],
-                                    normalize=False,
-                                )
-                            except Exception:
-                                errors_count += 1
 
-                        follower_states[motor_name] = read_motor_state(follower_bus, motor_name)
-                        if follower_states[motor_name].get("error"):
-                            errors_count += 1
+@router.post("/session/stop", response_model=TeleopSessionActionResponse)
+async def stop_session(request: Optional[TeleopSessionStopRequest] = None):
+    _require_user_id()
+    session_id = (request.session_id if request else None) or _SESSION_ID
+    if session_id != _SESSION_ID:
+        raise HTTPException(status_code=404, detail=f"Teleop session not found: {session_id}")
 
-                    iteration += 1
-                    elapsed = time.time() - start_time
-                    actual_fps = iteration / elapsed if elapsed > 0 else 0
+    try:
+        run_vlabor_stop()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to stop teleop session: {exc}") from exc
 
-                    await websocket.send_json({
-                        "type": "state",
-                        "leader_states": leader_states,
-                        "follower_states": follower_states,
-                        "iteration": iteration,
-                        "elapsed": elapsed,
-                        "actual_fps": actual_fps,
-                        "target_fps": target_fps,
-                        "errors": errors_count,
-                    })
+    with _SESSION_LOCK:
+        global _ACTIVE_SESSION
+        _ACTIVE_SESSION = None
 
-                    # Maintain control frequency
-                    loop_time = time.time() - loop_start
-                    sleep_time = dt - loop_time
-                    if sleep_time > 0:
-                        await asyncio.sleep(sleep_time)
+    return TeleopSessionActionResponse(
+        success=True,
+        session_id=_SESSION_ID,
+        message="Teleop session stopped",
+        status=_status_payload(),
+    )
 
-                continue
 
-            action = data.get("action")
+@router.get("/session/status", response_model=TeleopSessionStatusResponse)
+async def get_session_status():
+    _require_user_id()
+    session = _active_session_copy()
+    status = _status_payload()
+    vlabor_running = (status.get("status") or "") == "running"
 
-            if action == "start":
-                if running:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "Already running. Stop first.",
-                    })
-                    continue
+    if session:
+        state = session.get("state") or "created"
+        if vlabor_running and state != "running":
+            state = "running"
+        if not vlabor_running and state == "running":
+            state = "stopped"
+        return TeleopSessionStatusResponse(
+            active=bool(vlabor_running and state == "running"),
+            session_id=session.get("session_id"),
+            state=state,
+            created_at=session.get("created_at"),
+            started_at=session.get("started_at"),
+            profile=session.get("profile"),
+            domain_id=session.get("domain_id"),
+            dev_mode=bool(session.get("dev_mode")),
+            status=status,
+        )
 
-                leader_port = data.get("leader_port")
-                follower_port = data.get("follower_port")
-                robot_preset_str = data.get("robot_preset", "so101")
-                target_fps = data.get("fps", 60)
-                dt = 1.0 / target_fps
-
-                preset = RobotPreset.SO101
-                if robot_preset_str.lower() == "so100":
-                    preset = RobotPreset.SO100
-
-                try:
-                    leader_bus = create_motor_bus(leader_port, preset)
-                    follower_bus = create_motor_bus(follower_port, preset)
-
-                    leader_bus.connect()
-                    follower_bus.connect()
-
-                    motor_names = list(leader_bus.motors.keys())
-
-                    await websocket.send_json({
-                        "type": "connected",
-                        "message": f"Connected to both arms. Motors: {motor_names}",
-                        "motor_names": motor_names,
-                    })
-
-                    running = True
-                    stop_requested = False
-                    iteration = 0
-                    start_time = time.time()
-
-                except Exception as e:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": f"Failed to connect: {e}",
-                    })
-                    # Cleanup
-                    if leader_bus:
-                        try:
-                            leader_bus.disconnect()
-                        except Exception:
-                            pass
-                        leader_bus = None
-                    if follower_bus:
-                        try:
-                            follower_bus.disconnect()
-                        except Exception:
-                            pass
-                        follower_bus = None
-
-            elif action == "stop":
-                if running:
-                    stop_requested = True
-                    running = False
-
-                    # Disconnect
-                    if leader_bus:
-                        try:
-                            leader_bus.disconnect()
-                        except Exception:
-                            pass
-                        leader_bus = None
-                    if follower_bus:
-                        try:
-                            follower_bus.disconnect()
-                        except Exception:
-                            pass
-                        follower_bus = None
-
-                    elapsed = time.time() - start_time if start_time else 0
-                    await websocket.send_json({
-                        "type": "stopped",
-                        "message": "Teleoperation stopped",
-                        "total_iterations": iteration,
-                        "duration": elapsed,
-                        "average_fps": iteration / elapsed if elapsed > 0 else 0,
-                    })
-                else:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "Not running",
-                    })
-
-            else:
-                await websocket.send_json({
-                    "type": "error",
-                    "error": f"Unknown action: {action}",
-                })
-
-    except WebSocketDisconnect:
-        logger.info("Visual teleop WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"Visual teleop WebSocket error: {e}")
-        try:
-            await websocket.send_json({
-                "type": "error",
-                "error": str(e),
-            })
-        except Exception:
-            pass
-    finally:
-        # Cleanup
-        if leader_bus:
-            try:
-                leader_bus.disconnect()
-            except Exception:
-                pass
-        if follower_bus:
-            try:
-                follower_bus.disconnect()
-            except Exception:
-                pass
-        logger.info("Visual teleop WebSocket cleanup complete")
+    return TeleopSessionStatusResponse(
+        active=vlabor_running,
+        session_id=_SESSION_ID if vlabor_running else None,
+        state="running" if vlabor_running else "stopped",
+        status=status,
+    )

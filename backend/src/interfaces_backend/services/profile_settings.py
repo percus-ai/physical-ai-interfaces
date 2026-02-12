@@ -1,4 +1,4 @@
-"""Profile settings helpers for operate/teleop."""
+"""Profile settings helpers for operate/vlabor."""
 
 from __future__ import annotations
 

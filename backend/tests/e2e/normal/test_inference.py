@@ -39,17 +39,38 @@ def test_inference_runner_diagnostics_endpoint_with_mock_manager(client, monkeyp
 
 
 def test_inference_runner_start_and_stop_with_mock_manager(client, monkeypatch):
+    async def _mock_profile_settings():
+        return object(), object(), {}
+
     class MockManager:
-        def start(self, model_id: str, device: str | None, task: str | None) -> str:
+        def start(
+            self,
+            model_id: str,
+            device: str | None,
+            task: str | None,
+            joint_names: list[str],
+            camera_key_aliases: dict[str, str],
+        ) -> str:
             assert model_id == "model_a"
             assert device == "cpu"
             assert task == "pick"
+            assert joint_names == ["joint_a", "joint_b"]
+            assert camera_key_aliases == {"front": "cam_front"}
             return "sess-001"
 
         def stop(self, session_id: str | None) -> bool:
             assert session_id == "sess-001"
             return True
 
+    monkeypatch.setattr(inference_api, "get_active_profile_settings", _mock_profile_settings)
+    monkeypatch.setattr(inference_api, "build_inference_joint_names", lambda *_args, **_kwargs: ["joint_a", "joint_b"])
+    monkeypatch.setattr(
+        inference_api,
+        "build_inference_camera_aliases",
+        lambda *_args, **_kwargs: {"front": "cam_front"},
+    )
+    monkeypatch.setattr(inference_api, "_start_vlabor_for_session", lambda: None)
+    monkeypatch.setattr(inference_api, "_stop_vlabor_for_session", lambda: None)
     monkeypatch.setattr(inference_api, "_manager", lambda: MockManager())
 
     start = client.post(

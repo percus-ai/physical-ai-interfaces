@@ -55,22 +55,18 @@
     runner_status?: RunnerStatus;
   };
 
-  type TeleopSession = {
-    session_id?: string;
-    mode?: string;
-    leader_port?: string;
-    follower_port?: string;
-    is_running?: boolean;
-    errors?: number;
-  };
-
-  type TeleopSessionsResponse = {
-    sessions?: TeleopSession[];
+  type VlaborStatus = {
+    status?: string;
+    service?: string;
+    state?: string;
+    status_detail?: string;
+    running_for?: string;
+    created_at?: string;
+    container_id?: string;
   };
 
   type OperateStatusStreamPayload = {
-    teleop_sessions?: TeleopSessionsResponse;
-    teleop_profile_config?: unknown;
+    vlabor_status?: VlaborStatus;
     inference_runner_status?: InferenceRunnerStatusResponse;
     operate_status?: unknown;
   };
@@ -88,9 +84,9 @@
     queryFn: api.inference.runnerStatus
   });
 
-  const teleopSessionsQuery = createQuery<TeleopSessionsResponse>({
-    queryKey: ['teleop', 'sessions'],
-    queryFn: api.teleop.sessions
+  const vlaborStatusQuery = createQuery<VlaborStatus>({
+    queryKey: ['profiles', 'vlabor', 'status'],
+    queryFn: api.profiles.vlaborStatus
   });
 
   const topicsQuery = createQuery<ProfileStatusResponse>({
@@ -209,8 +205,7 @@
     stopOperateStream = connectStream<OperateStatusStreamPayload>({
       path: '/api/stream/operate/status',
       onMessage: (payload) => {
-        queryClient.setQueryData(['teleop', 'sessions'], payload.teleop_sessions);
-        queryClient.setQueryData(['teleop', 'profile-config'], payload.teleop_profile_config);
+        queryClient.setQueryData(['profiles', 'vlabor', 'status'], payload.vlabor_status);
         queryClient.setQueryData(['inference', 'runner', 'status'], payload.inference_runner_status);
         queryClient.setQueryData(['operate', 'status'], payload.operate_status);
       }
@@ -222,14 +217,12 @@
   });
 
   const runnerStatus = $derived($inferenceRunnerStatusQuery.data?.runner_status ?? {});
-  const teleopSessions = $derived($teleopSessionsQuery.data?.sessions ?? []);
-  const teleopSession = $derived(
-    teleopSessions.find((session) => session.session_id === sessionId) ?? null
-  );
+  const vlaborStatus = $derived($vlaborStatusQuery.data ?? {});
   const inferenceMatches = $derived(runnerStatus.session_id === sessionId);
+  const teleopMatches = $derived(sessionId === 'teleop');
 
   const resolvedKind = $derived(
-    sessionKindParam || (inferenceMatches ? 'inference' : teleopSession ? 'teleop' : '')
+    sessionKindParam || (inferenceMatches ? 'inference' : teleopMatches ? 'teleop' : '')
   );
   const blueprintKind = $derived(
     resolvedKind === 'inference' ? 'inference' : resolvedKind === 'teleop' ? 'teleop' : ''
@@ -341,7 +334,7 @@
   const refreshStatus = async () => {
     await Promise.all([
       $inferenceRunnerStatusQuery.refetch?.(),
-      $teleopSessionsQuery.refetch?.(),
+      $vlaborStatusQuery.refetch?.(),
       $topicsQuery.refetch?.()
     ]);
   };
@@ -353,7 +346,7 @@
       return inferenceMatches && runnerStatus.active ? '実行中' : '停止';
     }
     if (resolvedKind === 'teleop') {
-      return teleopSession ? (teleopSession.is_running ? '実行中' : '待機') : '停止';
+      return vlaborStatus.status === 'running' ? '実行中' : '停止';
     }
     return '不明';
   });
@@ -362,8 +355,8 @@
     if (resolvedKind === 'inference') {
       return runnerStatus.last_error ?? '';
     }
-    if (resolvedKind === 'teleop' && teleopSession?.errors) {
-      return `Errors: ${teleopSession.errors}`;
+    if (resolvedKind === 'teleop') {
+      return vlaborStatus.status_detail ?? '';
     }
     return '';
   });
@@ -372,11 +365,10 @@
     if (resolvedKind === 'inference') {
       return runnerStatus.task ?? '';
     }
-    if (resolvedKind === 'teleop' && teleopSession) {
-      const mode = teleopSession.mode ?? 'teleop';
-      const leader = teleopSession.leader_port ?? '-';
-      const follower = teleopSession.follower_port ?? '-';
-      return `${mode} / ${leader} → ${follower}`;
+    if (resolvedKind === 'teleop') {
+      const state = vlaborStatus.state ?? vlaborStatus.status ?? '-';
+      const runningFor = vlaborStatus.running_for ?? '-';
+      return `${state} / running_for: ${runningFor}`;
     }
     return '';
   });
@@ -394,7 +386,7 @@
           <span class="chip">Session: {sessionId}</span>
         {/if}
       </div>
-      {#if $inferenceRunnerStatusQuery.isLoading || $teleopSessionsQuery.isLoading}
+      {#if $inferenceRunnerStatusQuery.isLoading || $vlaborStatusQuery.isLoading}
         <p class="mt-2 text-xs text-slate-500">ステータス取得中...</p>
       {/if}
     </div>

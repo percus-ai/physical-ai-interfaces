@@ -8,7 +8,6 @@ from interfaces_backend.api.inference import get_inference_runner_status
 from interfaces_backend.api.operate import get_operate_status
 from interfaces_backend.api.profiles import get_active_instance_status, get_vlabor_status
 from interfaces_backend.api.recording import get_session_status
-from interfaces_backend.api.teleop import get_local_profile_config, list_local_teleop_sessions
 from interfaces_backend.api.training import get_job, get_job_metrics
 from interfaces_backend.utils.sse import sse_response
 from percus_ai.db import get_current_user_id
@@ -57,14 +56,12 @@ async def stream_recording_session(request: Request, session_id: str):
 async def stream_operate_status(request: Request):
     _require_user_id()
     async def build_payload() -> dict:
-        teleop_sessions = await list_local_teleop_sessions()
-        teleop_profile = await get_local_profile_config()
+        vlabor_status = await get_vlabor_status()
         inference_runner_status = await get_inference_runner_status()
         operate_status = await get_operate_status()
 
         return {
-            "teleop_sessions": teleop_sessions.model_dump(mode="json"),
-            "teleop_profile_config": teleop_profile.model_dump(mode="json"),
+            "vlabor_status": vlabor_status.model_dump(mode="json"),
             "inference_runner_status": inference_runner_status.model_dump(mode="json"),
             "operate_status": operate_status.model_dump(mode="json"),
         }

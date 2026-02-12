@@ -253,6 +253,28 @@ export const api = {
     updateInstance: (instanceId: string, payload: Record<string, unknown>) =>
       fetchApi(`/api/profiles/instances/${instanceId}`, { method: 'PUT', body: JSON.stringify(payload) })
   },
+  teleop: {
+    createSession: (payload: {
+      profile?: string;
+      domain_id?: number;
+      dev_mode?: boolean;
+    } = {}) =>
+      fetchApi('/api/teleop/session/create', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    startSession: (payload: { session_id: string }) =>
+      fetchApi('/api/teleop/session/start', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    stopSession: (payload: { session_id?: string } = {}) =>
+      fetchApi('/api/teleop/session/stop', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    sessionStatus: () => fetchApi('/api/teleop/session/status')
+  },
   recording: {
     list: () => fetchApi('/api/recording/recordings'),
     createSession: (payload: {
@@ -415,16 +437,6 @@ export const api = {
       fetchApi(`/api/training/jobs/${jobId}/metrics?limit=${limit}`),
     progress: (jobId: string) => fetchApi(`/api/training/jobs/${jobId}/progress`),
     gpuAvailability: () => fetchApi('/api/training/gpu-availability')
-  },
-  teleop: {
-    sessions: () => fetchApi('/api/teleop/local/sessions'),
-    profileConfig: () => fetchApi('/api/teleop/local/profile-config'),
-    startProfile: () => fetchApi('/api/teleop/local/start-profile', { method: 'POST' }),
-    stopLocal: (payload: { session_id: string }) =>
-      fetchApi('/api/teleop/local/stop', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      })
   },
   operate: {
     status: () => fetchApi('/api/operate/status')

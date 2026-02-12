@@ -181,4 +181,3 @@ class WebuiBlueprintResolveResponse(BaseModel):
 
 class WebuiBlueprintBindResponse(BaseModel):
     blueprint: WebuiBlueprintDetail
-

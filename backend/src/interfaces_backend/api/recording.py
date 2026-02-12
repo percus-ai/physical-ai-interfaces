@@ -17,12 +17,18 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from interfaces_backend.services.vlabor_runtime import (
+    VlaborCommandError,
+    start_vlabor as run_vlabor_start,
+    stop_vlabor as run_vlabor_stop,
+)
+from interfaces_backend.utils.docker_compose import build_compose_command, get_lerobot_compose_file
 from percus_ai.observability import ArmId, CommOverheadReporter, PointId, resolve_ids
 from percus_ai.db import get_current_user_id, get_supabase_async_client, upsert_with_owner
 from percus_ai.profiles import ProfileRegistry
 from percus_ai.profiles.models import ProfileInstance
 from percus_ai.storage.naming import generate_dataset_id, validate_dataset_name
-from percus_ai.storage.paths import get_datasets_dir, get_project_root, get_user_config_path
+from percus_ai.storage.paths import get_datasets_dir, get_user_config_path
 from percus_ai.storage.r2_db_sync import R2DBSyncService
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
@@ -143,13 +149,27 @@ def _load_user_config() -> dict:
     }
 
 
+def _start_vlabor_for_session() -> None:
+    try:
+        run_vlabor_start()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start VLAbor container: {exc}") from exc
+
+
+def _stop_vlabor_for_session() -> None:
+    try:
+        run_vlabor_stop()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to stop VLAbor container: {exc}") from exc
+
+
 def _start_recorder() -> None:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
+    compose_file = get_lerobot_compose_file()
     if not compose_file.exists():
-        raise HTTPException(status_code=500, detail="docker-compose.ros2.yml not found")
+        raise HTTPException(status_code=500, detail=f"{compose_file} not found")
+    compose_cmd = build_compose_command(compose_file)
     result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+        [*compose_cmd, "up", "-d", "lerobot-ros2", "rosbridge", "zenoh-router", "otel-collector"],
         capture_output=True,
         text=True,
     )
@@ -158,12 +178,12 @@ def _start_recorder() -> None:
 
 
 def _get_compose_service_state(service: str) -> dict:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
+    compose_file = get_lerobot_compose_file()
     if not compose_file.exists():
         return {}
+    compose_cmd = build_compose_command(compose_file)
     result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json", service],
+        [*compose_cmd, "ps", "--format", "json", service],
         capture_output=True,
         text=True,
     )
@@ -428,6 +448,7 @@ async def create_session(request: RecordingSessionCreateRequest):
     cameras, settings = _build_recorder_cameras(profile_class, profile_instance)
     if not cameras:
         raise HTTPException(status_code=400, detail="No enabled cameras in active profile")
+    _start_vlabor_for_session()
 
     payload = {
         "dataset_id": dataset_id,
@@ -509,6 +530,8 @@ async def stop_session(request: RecordingSessionStopRequest):
                 await sync_service.upload_dataset_with_progress(dataset_id, None)
             except Exception as exc:
                 logger.error("Auto-upload failed for %s: %s", dataset_id, exc)
+
+    _stop_vlabor_for_session()
 
     return RecordingSessionActionResponse(
         success=True,
@@ -620,6 +643,8 @@ async def cancel_session(dataset_id: Optional[str] = None):
         result = _call_recorder("/api/session/stop", {"save_current": False})
         if not result.get("success", False):
             raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
+
+    _stop_vlabor_for_session()
 
     return RecordingSessionActionResponse(success=True, message="Recording cancelled", dataset_id=dataset_id, status=result)
 

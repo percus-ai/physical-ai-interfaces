@@ -15,19 +15,37 @@ from interfaces_backend.models.inference import (
     InferenceSetTaskRequest,
     InferenceSetTaskResponse,
 )
-from interfaces_backend.api.teleop import has_running_local_teleop
 from interfaces_backend.services.profile_settings import (
     build_inference_camera_aliases,
     build_inference_joint_names,
     get_active_profile_settings,
 )
 from interfaces_backend.services.inference_runtime import get_inference_runtime_manager
+from interfaces_backend.services.vlabor_runtime import (
+    VlaborCommandError,
+    start_vlabor as run_vlabor_start,
+    stop_vlabor as run_vlabor_stop,
+)
 
 router = APIRouter(prefix="/api/inference", tags=["inference"])
 
 
 def _manager():
     return get_inference_runtime_manager()
+
+
+def _start_vlabor_for_session() -> None:
+    try:
+        run_vlabor_start()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start VLAbor container: {exc}") from exc
+
+
+def _stop_vlabor_for_session() -> None:
+    try:
+        run_vlabor_stop()
+    except VlaborCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to stop VLAbor container: {exc}") from exc
 
 
 @router.get("/models", response_model=InferenceModelsResponse)
@@ -52,14 +70,12 @@ async def get_inference_runner_diagnostics():
 
 @router.post("/runner/start", response_model=InferenceRunnerStartResponse)
 async def start_inference_runner(request: InferenceRunnerStartRequest):
-    if has_running_local_teleop():
-        raise HTTPException(status_code=409, detail="Teleop session is running. Stop teleop first.")
-
     _, profile_class, settings = await get_active_profile_settings()
     joint_names = build_inference_joint_names(profile_class, settings)
     if not joint_names:
         raise HTTPException(status_code=400, detail="No inference joints configured in active profile")
     camera_key_aliases = build_inference_camera_aliases(profile_class, settings)
+    _start_vlabor_for_session()
 
     try:
         session_id = _manager().start(
@@ -86,6 +102,7 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
 async def stop_inference_runner(request: InferenceRunnerStopRequest):
     try:
         stopped = _manager().stop(session_id=request.session_id)
+        _stop_vlabor_for_session()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

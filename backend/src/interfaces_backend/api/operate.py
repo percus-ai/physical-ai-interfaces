@@ -6,13 +6,19 @@ import json
 import os
 import socket
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter
 
 from interfaces_backend.models.operate import OperateServiceStatus, OperateStatusResponse
+from interfaces_backend.utils.docker_compose import (
+    build_compose_command,
+    get_lerobot_compose_file,
+    get_vlabor_compose_file,
+    get_vlabor_env_file,
+)
 from interfaces_backend.utils.torch_info import get_torch_info
-from percus_ai.storage.paths import get_project_root
 
 router = APIRouter(prefix="/api/operate", tags=["operate"])
 
@@ -50,14 +56,21 @@ def _parse_tcp_endpoint(endpoint: str) -> Optional[tuple[str, int]]:
     return host, port
 
 
+def _resolve_compose_for_service(service: str) -> tuple[list[str], Path]:
+    if service == "vlabor":
+        compose_file = get_vlabor_compose_file()
+        return build_compose_command(compose_file, get_vlabor_env_file()), compose_file
+    compose_file = get_lerobot_compose_file()
+    return build_compose_command(compose_file), compose_file
+
+
 def _get_compose_status(service: str) -> OperateServiceStatus:
-    repo_root = get_project_root()
-    compose_file = repo_root / "docker-compose.ros2.yml"
+    compose_cmd, compose_file = _resolve_compose_for_service(service)
     if not compose_file.exists():
-        return OperateServiceStatus(name=service, status="unknown", message="docker-compose.ros2.yml not found")
+        return OperateServiceStatus(name=service, status="unknown", message=f"{compose_file} not found")
 
     result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json", service],
+        [*compose_cmd, "ps", "--format", "json", service],
         capture_output=True,
         text=True,
     )

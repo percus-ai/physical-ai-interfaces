@@ -78,6 +78,7 @@ from interfaces_backend.api import (
     webui_blueprints_router,
 )
 from interfaces_backend.core.request_auth import build_session_from_request, is_session_expired
+from interfaces_backend.services.vlabor_runtime import stop_vlabor_on_backend_startup
 from percus_ai.observability import (
     ArmId,
     CommOverheadReporter,
@@ -96,6 +97,11 @@ app = FastAPI(
 )
 SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("PHI_SLOW_REQUEST_THRESHOLD_MS", "1000"))
 _COMM_REPORTER = CommOverheadReporter("backend")
+
+
+@app.on_event("startup")
+async def stop_stale_vlabor_container() -> None:
+    stop_vlabor_on_backend_startup(logging.getLogger("interfaces_backend.startup"))
 
 
 def _extract_request_session_id(request: Request) -> Optional[str]:

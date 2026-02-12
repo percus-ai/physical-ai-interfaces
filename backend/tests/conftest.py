@@ -94,7 +94,6 @@ def _isolate_env(tmp_path_factory):
 def _reset_backend_state() -> None:
     import interfaces_backend.api.calibration as calibration
     import interfaces_backend.api.recording as recording
-    import interfaces_backend.api.teleop as teleop
     import interfaces_backend.services.inference_runtime as inference_runtime
 
     calibration._sessions.clear()
@@ -102,10 +101,6 @@ def _reset_backend_state() -> None:
 
     if hasattr(recording, "_sync_service"):
         recording._sync_service = None
-
-    teleop._local_sessions.clear()
-    teleop._remote_leader_sessions.clear()
-    teleop._remote_follower_sessions.clear()
 
     if inference_runtime._runtime_manager is not None:
         inference_runtime._runtime_manager.shutdown()

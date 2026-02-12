@@ -67,4 +67,3 @@ export const clearBlueprintDraft = (
     localStorage.removeItem(key);
   }
 };
-
