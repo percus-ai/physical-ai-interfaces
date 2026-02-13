@@ -305,7 +305,8 @@ export const api = {
     setActive: (payload: { profile_name: string }) =>
       fetchApi('/api/profiles/active', { method: 'PUT', body: JSON.stringify(payload) }),
     activeStatus: () => fetchApi('/api/profiles/active/status'),
-    vlaborStatus: () => fetchApi('/api/profiles/vlabor/status')
+    vlaborStatus: () => fetchApi('/api/profiles/vlabor/status'),
+    restartVlabor: () => fetchApi('/api/profiles/vlabor/restart', { method: 'POST' })
   },
   teleop: {
     createSession: (payload: {

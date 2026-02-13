@@ -81,6 +81,8 @@
 
   let switchingProfile = $state(false);
   let selectionError = $state('');
+  let restartingVlabor = $state(false);
+  let restartError = $state('');
 
   async function refetchQuery(snapshot?: { refetch?: () => Promise<unknown> }) {
     if (snapshot && typeof snapshot.refetch === 'function') {
@@ -104,6 +106,19 @@
       selectionError = error instanceof Error ? error.message : 'プロファイル切り替えに失敗しました。';
     } finally {
       switchingProfile = false;
+    }
+  }
+
+  async function handleRestartVlabor() {
+    restartingVlabor = true;
+    restartError = '';
+    try {
+      await api.profiles.restartVlabor();
+    } catch (error) {
+      console.error(error);
+      restartError = error instanceof Error ? error.message : 'VLAbor再起動に失敗しました。';
+    } finally {
+      restartingVlabor = false;
     }
   }
 
@@ -166,6 +181,13 @@
       {#if vlaborDetail}
         <span class="text-xs text-slate-400">{vlaborDetail}</span>
       {/if}
+      <button
+        class="inline-flex h-9 items-center justify-center rounded-full border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+        disabled={restartingVlabor}
+        onclick={handleRestartVlabor}
+      >
+        {restartingVlabor ? '再起動中…' : 'VLAbor 再起動'}
+      </button>
       <a
         class="inline-flex h-9 items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 px-4 text-xs font-semibold text-emerald-700"
         href="http://vlabor.local:8888"
@@ -178,6 +200,9 @@
   </div>
   {#if selectionError}
     <p class="mt-3 text-xs text-rose-500">{selectionError}</p>
+  {/if}
+  {#if restartError}
+    <p class="mt-3 text-xs text-rose-500">{restartError}</p>
   {/if}
 </section>
 
