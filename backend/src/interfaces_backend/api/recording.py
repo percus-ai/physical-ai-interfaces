@@ -29,7 +29,12 @@ from interfaces_backend.services.vlabor_profiles import (
     resolve_profile_spec,
     save_session_profile_binding,
 )
-from interfaces_backend.utils.docker_compose import build_compose_command, get_lerobot_compose_file
+from interfaces_backend.services.lerobot_runtime import (
+    LerobotCommandError,
+    get_lerobot_service_state,
+    start_lerobot,
+    stop_lerobot,
+)
 from percus_ai.observability import ArmId, CommOverheadReporter, PointId, resolve_ids
 from percus_ai.db import get_current_user_id, get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.naming import generate_dataset_id, validate_dataset_name
@@ -170,40 +175,17 @@ def _stop_vlabor_for_session() -> None:
 
 
 def _start_recorder() -> None:
-    compose_file = get_lerobot_compose_file()
-    if not compose_file.exists():
-        raise HTTPException(status_code=500, detail=f"{compose_file} not found")
-    compose_cmd = build_compose_command(compose_file)
-    result = subprocess.run(
-        [*compose_cmd, "up", "-d", "lerobot-ros2", "rosbridge", "zenoh-router", "otel-collector"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"lerobot-ros2 start failed: {result.stderr.strip()}")
-
-
-def _get_compose_service_state(service: str) -> dict:
-    compose_file = get_lerobot_compose_file()
-    if not compose_file.exists():
-        return {}
-    compose_cmd = build_compose_command(compose_file)
-    result = subprocess.run(
-        [*compose_cmd, "ps", "--format", "json", service],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0 or not result.stdout:
-        return {}
     try:
-        data = json.loads(result.stdout)
-    except Exception:
-        return {}
-    if isinstance(data, list):
-        return data[0] if data else {}
-    if isinstance(data, dict):
-        return data
-    return {}
+        start_lerobot(strict=True)
+    except LerobotCommandError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _stop_recorder() -> None:
+    """Stop lerobot-ros2 containers (best-effort)."""
+    result = stop_lerobot(strict=False)
+    if result.returncode != 0:
+        logger.warning("lerobot-ros2 stop failed: %s", result.stderr.strip())
 
 
 def _ensure_recorder_running() -> None:
@@ -215,7 +197,7 @@ def _ensure_recorder_running() -> None:
             raise
 
     _start_recorder()
-    service_state = _get_compose_service_state("lerobot-ros2")
+    service_state = get_lerobot_service_state("lerobot-ros2")
     if service_state:
         state_raw = (service_state.get("State") or "").lower()
         if "running" not in state_raw:
@@ -462,6 +444,7 @@ async def stop_session(request: RecordingSessionStopRequest):
                 logger.error("Auto-upload failed for %s: %s", dataset_id, exc)
 
     _stop_vlabor_for_session()
+    _stop_recorder()
 
     return RecordingSessionActionResponse(
         success=True,
@@ -575,6 +558,7 @@ async def cancel_session(dataset_id: Optional[str] = None):
             raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
 
     _stop_vlabor_for_session()
+    _stop_recorder()
 
     return RecordingSessionActionResponse(success=True, message="Recording cancelled", dataset_id=dataset_id, status=result)
 

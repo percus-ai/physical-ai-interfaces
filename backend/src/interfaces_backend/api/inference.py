@@ -31,6 +31,11 @@ from interfaces_backend.services.vlabor_profiles import (
     save_session_profile_binding,
 )
 from interfaces_backend.services.inference_runtime import get_inference_runtime_manager
+from interfaces_backend.services.lerobot_runtime import (
+    LerobotCommandError,
+    start_lerobot,
+    stop_lerobot,
+)
 from interfaces_backend.services.vlabor_runtime import (
     VlaborCommandError,
     start_vlabor as run_vlabor_start,
@@ -73,6 +78,19 @@ def _stop_vlabor_for_session() -> None:
         run_vlabor_stop()
     except VlaborCommandError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to stop VLAbor container: {exc}") from exc
+
+
+def _start_lerobot_for_session() -> None:
+    try:
+        start_lerobot(strict=True)
+    except LerobotCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start lerobot stack: {exc}") from exc
+
+
+def _stop_lerobot_for_session() -> None:
+    result = stop_lerobot(strict=False)
+    if result.returncode != 0:
+        logger.warning("lerobot stack stop failed: %s", result.stderr.strip())
 
 
 def _call_recorder(path: str, payload: dict | None = None) -> dict:
@@ -165,6 +183,7 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
         raise HTTPException(status_code=400, detail="No inference joints configured in active profile")
     camera_key_aliases = build_inference_camera_aliases(active_profile.snapshot)
     _start_vlabor_for_session(active_profile.name)
+    _start_lerobot_for_session()
 
     # Ensure model is downloaded from R2 and cached locally
     sync_result = await _get_sync_service().ensure_model_local(request.model_id, auto_download=True)
@@ -247,6 +266,8 @@ async def stop_inference_runner(request: InferenceRunnerStopRequest):
         except Exception:
             logger.warning("Failed to stop inference recording", exc_info=True)
         await _auto_upload_inference_dataset(dataset_id)
+
+    _stop_lerobot_for_session()
 
     return InferenceRunnerStopResponse(
         success=True,

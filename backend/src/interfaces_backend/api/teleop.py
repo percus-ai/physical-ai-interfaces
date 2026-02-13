@@ -16,6 +16,11 @@ from interfaces_backend.models.teleop import (
     TeleopSessionStatusResponse,
     TeleopSessionStopRequest,
 )
+from interfaces_backend.services.lerobot_runtime import (
+    LerobotCommandError,
+    start_lerobot,
+    stop_lerobot,
+)
 from interfaces_backend.services.vlabor_runtime import (
     VlaborCommandError,
     start_vlabor as run_vlabor_start,
@@ -64,6 +69,10 @@ async def create_session(request: Optional[TeleopSessionCreateRequest] = None):
         run_vlabor_start(profile=profile.name, domain_id=payload.domain_id, dev_mode=payload.dev_mode)
     except VlaborCommandError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to create teleop session: {exc}") from exc
+    try:
+        start_lerobot(strict=True)
+    except LerobotCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start lerobot stack: {exc}") from exc
     await save_session_profile_binding(session_kind="teleop", session_id=_SESSION_ID, profile=profile)
 
     now = _now_iso()
@@ -113,6 +122,10 @@ async def start_session(request: TeleopSessionStartRequest):
         )
     except VlaborCommandError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start teleop session: {exc}") from exc
+    try:
+        start_lerobot(strict=True)
+    except LerobotCommandError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start lerobot stack: {exc}") from exc
 
     with _SESSION_LOCK:
         if _ACTIVE_SESSION is None:
@@ -139,6 +152,7 @@ async def stop_session(request: Optional[TeleopSessionStopRequest] = None):
         run_vlabor_stop()
     except VlaborCommandError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to stop teleop session: {exc}") from exc
+    stop_lerobot(strict=False)
 
     with _SESSION_LOCK:
         global _ACTIVE_SESSION
