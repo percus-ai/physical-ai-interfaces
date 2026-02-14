@@ -3,6 +3,7 @@
   import { toStore } from 'svelte/store';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
+  import { getBackendUrl } from '$lib/config';
   import { connectStream } from '$lib/realtime/stream';
   import { queryClient } from '$lib/queryClient';
 
@@ -81,8 +82,12 @@
 
   let switchingProfile = $state(false);
   let selectionError = $state('');
+  const MAX_LOG_LINES = 50;
   let restartingVlabor = $state(false);
   let restartError = $state('');
+  let restartLogs = $state<string[]>([]);
+  let restartWs = $state<WebSocket | null>(null);
+  let logEl: HTMLPreElement | undefined = $state();
 
   async function refetchQuery(snapshot?: { refetch?: () => Promise<unknown> }) {
     if (snapshot && typeof snapshot.refetch === 'function') {
@@ -109,17 +114,46 @@
     }
   }
 
-  async function handleRestartVlabor() {
+  function handleRestartVlabor() {
+    if (restartWs) return;
     restartingVlabor = true;
     restartError = '';
-    try {
-      await api.profiles.restartVlabor();
-    } catch (error) {
-      console.error(error);
-      restartError = error instanceof Error ? error.message : 'VLAbor再起動に失敗しました。';
-    } finally {
+    restartLogs = [];
+
+    const wsUrl = getBackendUrl().replace(/^http/, 'ws') + '/api/profiles/ws/vlabor/restart';
+    const ws = new WebSocket(wsUrl);
+    restartWs = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'log') {
+          restartLogs = [...restartLogs, data.line].slice(-MAX_LOG_LINES);
+          requestAnimationFrame(() => {
+            if (logEl) logEl.scrollTop = logEl.scrollHeight;
+          });
+        } else if (data.type === 'complete') {
+          if (data.exit_code !== '0') {
+            restartError = `終了コード: ${data.exit_code}`;
+          }
+        } else if (data.type === 'error') {
+          restartError = data.message;
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    ws.onerror = () => {
+      restartError = 'WebSocket接続に失敗しました。';
       restartingVlabor = false;
-    }
+      restartWs = null;
+    };
+
+    ws.onclose = () => {
+      restartingVlabor = false;
+      restartWs = null;
+    };
   }
 
   let stopVlaborStream = () => {};
@@ -135,6 +169,7 @@
 
   onDestroy(() => {
     stopVlaborStream();
+    restartWs?.close();
   });
 </script>
 
@@ -203,6 +238,9 @@
   {/if}
   {#if restartError}
     <p class="mt-3 text-xs text-rose-500">{restartError}</p>
+  {/if}
+  {#if restartLogs.length > 0}
+    <pre bind:this={logEl} class="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-slate-200/60 bg-slate-900 p-3 text-xs leading-relaxed text-slate-200">{restartLogs.join('\n')}</pre>
   {/if}
 </section>
 

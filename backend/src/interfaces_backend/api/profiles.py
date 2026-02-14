@@ -7,7 +7,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from interfaces_backend.models.profile import (
     ProfileDeviceStatusArm,
@@ -26,7 +26,11 @@ from interfaces_backend.services.vlabor_profiles import (
     list_vlabor_profiles,
     set_active_profile_spec,
 )
-from interfaces_backend.services.vlabor_runtime import VlaborCommandError, restart_vlabor
+from interfaces_backend.services.vlabor_runtime import (
+    VlaborCommandError,
+    restart_vlabor,
+    stream_vlabor_script,
+)
 from interfaces_backend.utils.docker_compose import (
     build_compose_command,
     get_vlabor_compose_file,
@@ -207,12 +211,48 @@ async def get_vlabor_status():
     return VlaborStatusResponse(**_get_vlabor_status())
 
 
-@router.post("/vlabor/restart")
-async def restart_vlabor_container():
-    _require_user_id()
-    active = await get_active_profile_spec()
+@router.websocket("/ws/vlabor/restart")
+async def websocket_restart_vlabor(websocket: WebSocket):
+    """Stream VLAbor restart progress in real-time.
+
+    Messages:
+      {"type": "log", "line": "..."}
+      {"type": "complete", "exit_code": "0"}
+      {"type": "error", "message": "..."}
+    """
+    await websocket.accept()
     try:
-        await asyncio.to_thread(restart_vlabor, profile=active.name, strict=True)
-    except VlaborCommandError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {"success": True, "message": f"VLAbor restarted with profile {active.name}"}
+        active = await get_active_profile_spec()
+        profile_name = active.name
+        await websocket.send_json(
+            {"type": "log", "line": f"Restarting VLAbor with profile: {profile_name}"}
+        )
+        args: list[str] = [profile_name] if profile_name else []
+
+        queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _run() -> None:
+            for event in stream_vlabor_script("restart", args, timeout=300):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        loop.run_in_executor(None, _run)
+
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            await websocket.send_json(event)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass

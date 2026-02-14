@@ -135,7 +135,7 @@ def token(http_request: Request, response: Response) -> AuthTokenResponse:
         raise HTTPException(status_code=401, detail="unauthenticated")
     session_expires_at = None
     if session.get("refresh_token"):
-        if refreshed or needs_session_cookie_update(http_request):
+        if needs_session_cookie_update(http_request):
             session_expires_at = compute_session_expires_at(int(time.time()))
             set_session_cookies(response, session)
         else:
