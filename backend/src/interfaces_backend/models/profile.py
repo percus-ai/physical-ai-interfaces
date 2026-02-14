@@ -29,15 +29,21 @@ class VlaborProfileSelectRequest(BaseModel):
 
 class ProfileDeviceStatusCamera(BaseModel):
     name: str
+    label: Optional[str] = None
     enabled: bool = True
     connected: bool = False
+    connected_topic: Optional[str] = None
     topics: List[str] = Field(default_factory=list)
 
 
 class ProfileDeviceStatusArm(BaseModel):
     name: str
+    label: Optional[str] = None
+    role: Optional[str] = None
     enabled: bool = True
     connected: bool = False
+    connected_topic: Optional[str] = None
+    topics: List[str] = Field(default_factory=list)
 
 
 class VlaborActiveProfileStatusResponse(BaseModel):
@@ -56,3 +62,4 @@ class VlaborStatusResponse(BaseModel):
     running_for: Optional[str] = None
     created_at: Optional[str] = None
     container_id: Optional[str] = None
+    dashboard_url: Optional[str] = None

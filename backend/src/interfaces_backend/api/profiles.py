@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import subprocess
 from pathlib import Path
 
@@ -20,8 +21,8 @@ from interfaces_backend.models.profile import (
     VlaborStatusResponse,
 )
 from interfaces_backend.services.vlabor_profiles import (
-    extract_arm_namespaces,
-    extract_camera_specs,
+    extract_status_arm_specs,
+    extract_status_camera_specs,
     get_active_profile_spec,
     list_vlabor_profiles,
     set_active_profile_spec,
@@ -89,6 +90,9 @@ def _get_vlabor_status() -> dict:
         status_value = "running"
     elif "exited" in state_raw or "stopped" in state_raw:
         status_value = "stopped"
+    hostname = socket.gethostname()
+    dashboard_url = f"http://{hostname}.local:8888"
+
     return {
         "status": status_value,
         "service": "vlabor",
@@ -97,6 +101,7 @@ def _get_vlabor_status() -> dict:
         "running_for": entry.get("RunningFor"),
         "created_at": entry.get("CreatedAt"),
         "container_id": entry.get("ID"),
+        "dashboard_url": dashboard_url,
     }
 
 
@@ -169,31 +174,43 @@ async def get_active_profile_status():
     topic_set = set(topics)
 
     cameras = []
-    for spec in extract_camera_specs(active.snapshot):
+    for spec in extract_status_camera_specs(active.snapshot):
         name = str(spec.get("name") or "").strip()
         if not name:
             continue
-        topic = str(spec.get("topic") or "").strip()
-        expected_topics = [topic] if topic else [f"/{name}/image_raw", f"/{name}/image_raw/compressed"]
-        connected = any(item in topic_set for item in expected_topics)
+        expected_topics = [str(item).strip() for item in (spec.get("topics") or []) if str(item).strip()]
+        if not expected_topics:
+            expected_topics = [f"/{name}/image_raw", f"/{name}/image_raw/compressed"]
+        connected_topic = next((item for item in expected_topics if item in topic_set), None)
         cameras.append(
             ProfileDeviceStatusCamera(
                 name=name,
+                label=str(spec.get("label") or "").strip() or name,
                 enabled=bool(spec.get("enabled", True)),
-                connected=connected,
+                connected=bool(connected_topic),
+                connected_topic=connected_topic,
                 topics=expected_topics,
             )
         )
 
     arms = []
-    for namespace in extract_arm_namespaces(active.snapshot):
-        expected = f"/{namespace}/joint_states"
-        connected = expected in topic_set or f"/{namespace}/joint_states_single" in topic_set
+    for spec in extract_status_arm_specs(active.snapshot):
+        namespace = str(spec.get("name") or "").strip()
+        if not namespace:
+            continue
+        expected_topics = [str(item).strip() for item in (spec.get("topics") or []) if str(item).strip()]
+        if not expected_topics:
+            expected_topics = [f"/{namespace}/joint_states", f"/{namespace}/joint_states_single"]
+        connected_topic = next((item for item in expected_topics if item in topic_set), None)
         arms.append(
             ProfileDeviceStatusArm(
                 name=namespace,
-                enabled=True,
-                connected=connected,
+                label=str(spec.get("label") or "").strip() or namespace,
+                role=str(spec.get("role") or "").strip() or None,
+                enabled=bool(spec.get("enabled", True)),
+                connected=bool(connected_topic),
+                connected_topic=connected_topic,
+                topics=expected_topics,
             )
         )
 
@@ -222,8 +239,21 @@ async def websocket_restart_vlabor(websocket: WebSocket):
     """
     await websocket.accept()
     try:
-        active = await get_active_profile_spec()
-        profile_name = active.name
+        requested_profile = str(websocket.query_params.get("profile") or "").strip()
+        profile_name = requested_profile
+        if requested_profile:
+            available = {profile.name for profile in list_vlabor_profiles()}
+            if requested_profile not in available:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"VLAbor profile not found: {requested_profile}",
+                    }
+                )
+                return
+        else:
+            active = await get_active_profile_spec()
+            profile_name = active.name
         await websocket.send_json(
             {"type": "log", "line": f"Restarting VLAbor with profile: {profile_name}"}
         )

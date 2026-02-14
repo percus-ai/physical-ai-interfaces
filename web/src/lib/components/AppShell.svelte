@@ -18,6 +18,16 @@
   let switchingProfile = $state(false);
   let profileError = $state('');
   let profilesReady = $state(false);
+
+  type VlaborStatus = { dashboard_url?: string; status?: string };
+  const vlaborStatusQuery = createQuery<VlaborStatus>(
+    toStore(() => ({
+      queryKey: ['profiles', 'vlabor', 'status'],
+      queryFn: api.profiles.vlaborStatus,
+      enabled: authenticated
+    }))
+  );
+  const vlaborDashboardUrl = $derived($vlaborStatusQuery.data?.dashboard_url ?? '');
   const immersiveView = $derived(
     page.url.pathname.startsWith('/record/sessions/') || page.url.pathname.startsWith('/operate/sessions/')
   );
@@ -246,6 +256,21 @@
               </span>
             </a>
           {/each}
+          {#if vlaborDashboardUrl}
+            <a
+              href={vlaborDashboardUrl}
+              target="_blank"
+              rel="noreferrer"
+              class="group flex items-start gap-3 rounded-2xl border border-transparent px-3 py-2 transition hover:border-slate-200 hover:bg-white text-slate-600"
+              onclick={closeMobile}
+            >
+              <span class="text-lg">🖥️</span>
+              <span>
+                <span class="block text-sm font-semibold text-slate-900">VLAbor Dashboard</span>
+                <span class="block text-xs text-slate-500">VLAbor UIを別タブで開く</span>
+              </span>
+            </a>
+          {/if}
         </nav>
 
         <div class="flex-1"></div>

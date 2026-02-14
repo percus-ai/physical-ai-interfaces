@@ -26,8 +26,23 @@
   type ProfileStatusResponse = {
     profile_name?: string;
     profile_snapshot?: Record<string, unknown>;
-    cameras?: Array<{ name: string; enabled: boolean; connected: boolean; topics?: string[] }>;
-    arms?: Array<{ name: string; enabled: boolean; connected: boolean }>;
+    cameras?: Array<{
+      name: string;
+      label?: string;
+      enabled: boolean;
+      connected: boolean;
+      connected_topic?: string;
+      topics?: string[];
+    }>;
+    arms?: Array<{
+      name: string;
+      label?: string;
+      role?: string;
+      enabled: boolean;
+      connected: boolean;
+      connected_topic?: string;
+      topics?: string[];
+    }>;
     topics?: string[];
   };
 
@@ -39,6 +54,7 @@
     running_for?: string;
     created_at?: string;
     container_id?: string;
+    dashboard_url?: string;
   };
 
   const profilesQuery = createQuery<ProfilesResponse>({
@@ -72,6 +88,7 @@
   const vlaborDetail = $derived(
     $vlaborStatusQuery.data?.status_detail ?? $vlaborStatusQuery.data?.running_for ?? ''
   );
+  const vlaborDashboardUrl = $derived($vlaborStatusQuery.data?.dashboard_url ?? '');
 
   const activeProfileDescription = $derived.by(() => {
     const name = activeProfileName;
@@ -120,7 +137,11 @@
     restartError = '';
     restartLogs = [];
 
-    const wsUrl = getBackendUrl().replace(/^http/, 'ws') + '/api/profiles/ws/vlabor/restart';
+    const selectedProfile = (activeProfileName ?? '').trim();
+    const restartPath = selectedProfile
+      ? `/api/profiles/ws/vlabor/restart?profile=${encodeURIComponent(selectedProfile)}`
+      : '/api/profiles/ws/vlabor/restart';
+    const wsUrl = getBackendUrl().replace(/^http/, 'ws') + restartPath;
     const ws = new WebSocket(wsUrl);
     restartWs = ws;
 
@@ -223,14 +244,16 @@
       >
         {restartingVlabor ? '再起動中…' : 'VLAbor 再起動'}
       </button>
-      <a
-        class="inline-flex h-9 items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 px-4 text-xs font-semibold text-emerald-700"
-        href="http://vlabor.local:8888"
-        target="_blank"
-        rel="noreferrer"
-      >
-        VLabor UI を開く
-      </a>
+      {#if vlaborDashboardUrl}
+        <a
+          class="inline-flex h-9 items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 px-4 text-xs font-semibold text-emerald-700"
+          href={vlaborDashboardUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          VLabor UI を開く
+        </a>
+      {/if}
     </div>
   </div>
   {#if selectionError}
@@ -263,9 +286,17 @@
           <p class="label">カメラ</p>
           <div class="mt-2 space-y-2">
             {#each $activeStatusQuery.data?.cameras ?? [] as cam}
-              <div class="flex items-center justify-between">
-                <span>{cam.name}</span>
-                <span class="text-xs text-slate-500">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-medium text-slate-700">{cam.label ?? cam.name}</p>
+                  <p class="truncate text-[11px] text-slate-400">{cam.name}</p>
+                  {#if cam.connected_topic}
+                    <p class="truncate text-[11px] text-emerald-600">{cam.connected_topic}</p>
+                  {:else if cam.topics?.length}
+                    <p class="truncate text-[11px] text-slate-400">期待: {cam.topics[0]}</p>
+                  {/if}
+                </div>
+                <span class="shrink-0 text-xs text-slate-500">
                   {cam.enabled ? (cam.connected ? '✅ 接続' : '⚠️ 未接続') : '⏸️ 無効'}
                 </span>
               </div>
@@ -276,10 +307,20 @@
           <p class="label">ロボット/アーム</p>
           <div class="mt-2 space-y-2">
             {#each $activeStatusQuery.data?.arms ?? [] as arm}
-              <div class="flex items-center justify-between">
-                <span>{arm.name}</span>
-                <span class="text-xs text-slate-500">
-                  {arm.connected ? '✅ 接続' : '⚠️ 未接続'}
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-medium text-slate-700">{arm.label ?? arm.name}</p>
+                  <p class="truncate text-[11px] text-slate-400">
+                    {arm.name}{arm.role ? ` (${arm.role})` : ''}
+                  </p>
+                  {#if arm.connected_topic}
+                    <p class="truncate text-[11px] text-emerald-600">{arm.connected_topic}</p>
+                  {:else if arm.topics?.length}
+                    <p class="truncate text-[11px] text-slate-400">期待: {arm.topics[0]}</p>
+                  {/if}
+                </div>
+                <span class="shrink-0 text-xs text-slate-500">
+                  {arm.enabled ? (arm.connected ? '✅ 接続' : '⚠️ 未接続') : '⏸️ 無効'}
                 </span>
               </div>
             {/each}

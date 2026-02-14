@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_PROFILE_TABLE = "vlabor_profile_selections"
 _SESSION_PROFILE_TABLE = "session_profile_bindings"
+_ACTIVE_PROFILE_SCOPE_ENV = "VLABOR_PROFILE_SCOPE_ID"
 
 _SO101_DEFAULT_JOINT_SUFFIXES = [
     "shoulder_pan",
@@ -47,11 +49,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _optional_user_id() -> Optional[str]:
-    try:
-        return get_current_user_id()
-    except ValueError:
-        return None
+def _active_profile_scope_id() -> str:
+    configured = str(os.environ.get(_ACTIVE_PROFILE_SCOPE_ENV) or "").strip()
+    if configured:
+        return configured
+    hostname = socket.gethostname().strip().lower()
+    if hostname:
+        return f"host:{hostname}"
+    return "host:unknown"
 
 
 def _resolve_profiles_dir() -> Optional[Path]:
@@ -203,6 +208,236 @@ def _as_bool(value: object) -> bool:
         if normalized in {"0", "false", "no", "off", ""}:
             return False
     return bool(value)
+
+
+def _append_unique(items: list[str], value: object) -> None:
+    text = str(value or "").strip()
+    if text and text not in items:
+        items.append(text)
+
+
+def _topic_candidates(topic: object) -> list[str]:
+    text = str(topic or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    if text.endswith("/compressed"):
+        raw = text[: -len("/compressed")]
+        if raw:
+            candidates.append(raw)
+    else:
+        candidates.append(f"{text}/compressed")
+    return candidates
+
+
+def extract_status_camera_specs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract camera specs for device status UI.
+
+    This intentionally includes both operator-facing camera nodes and recorder
+    camera topics so setup UI can show per-camera connectivity.
+    """
+    settings = build_profile_settings(snapshot)
+    profile = snapshot.get("profile")
+    if not isinstance(profile, dict):
+        return []
+
+    order: list[str] = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    def add_camera(
+        name: object,
+        *,
+        enabled: object = True,
+        topics: Optional[list[str]] = None,
+        label: object = None,
+    ) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        entry = merged.get(key)
+        if entry is None:
+            resolved_label = str(label or "").strip() or key
+            entry = {
+                "name": key,
+                "label": resolved_label,
+                "enabled": _as_bool(enabled),
+                "topics": [],
+            }
+            merged[key] = entry
+            order.append(key)
+        else:
+            entry["enabled"] = bool(entry.get("enabled", True) or _as_bool(enabled))
+            label_text = str(label or "").strip()
+            if label_text and entry.get("label") == key:
+                entry["label"] = label_text
+
+        for topic in topics or []:
+            _append_unique(entry["topics"], topic)
+
+    lerobot = profile.get("lerobot")
+    if isinstance(lerobot, dict):
+        cameras = lerobot.get("cameras")
+        if isinstance(cameras, list):
+            for camera in cameras:
+                if not isinstance(camera, dict):
+                    continue
+                source_name = _render_setting(
+                    camera.get("source") or camera.get("name") or "", settings
+                )
+                topic = _render_setting(camera.get("topic") or "", settings)
+                add_camera(
+                    source_name,
+                    enabled=True,
+                    topics=_topic_candidates(topic),
+                    label=_render_setting(camera.get("name") or "", settings),
+                )
+
+    actions = profile.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") != "include":
+                continue
+
+            package = str(action.get("package") or "").strip()
+            launch_name = str(action.get("launch") or "").strip().lower()
+            if package not in {"fv_camera", "fv_realsense", "vlabor_launch"}:
+                continue
+            if package == "vlabor_launch" and "camera" not in launch_name:
+                continue
+
+            args = action.get("args")
+            if not isinstance(args, dict):
+                continue
+
+            node_name = _render_setting(args.get("node_name"), settings)
+            enabled = _render_setting(action.get("enabled", True), settings)
+            if package == "fv_realsense":
+                base_topic = f"/{node_name}/color/image_raw"
+            else:
+                base_topic = f"/{node_name}/image_raw"
+            add_camera(node_name, enabled=enabled, topics=_topic_candidates(base_topic))
+
+    results: list[dict[str, Any]] = []
+    for key in order:
+        entry = dict(merged[key])
+        topics = list(entry.get("topics") or [])
+        if not topics:
+            topics = _topic_candidates(f"/{key}/image_raw")
+        entry["topics"] = topics
+        results.append(entry)
+    return results
+
+
+def extract_status_arm_specs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract arm specs for device status UI."""
+    settings = build_profile_settings(snapshot)
+    profile = snapshot.get("profile")
+    if not isinstance(profile, dict):
+        return []
+
+    order: list[str] = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    def infer_role(namespace: str) -> Optional[str]:
+        lowered = namespace.lower()
+        if "leader" in lowered:
+            return "leader"
+        if "follower" in lowered:
+            return "follower"
+        return None
+
+    def add_arm(
+        namespace: object,
+        *,
+        enabled: object = True,
+        label: object = None,
+        role: object = None,
+        topics: Optional[list[str]] = None,
+    ) -> None:
+        key = str(namespace or "").strip()
+        if not key:
+            return
+
+        entry = merged.get(key)
+        role_text = str(role or "").strip() or infer_role(key)
+        label_text = str(label or "").strip() or key
+        if entry is None:
+            entry = {
+                "name": key,
+                "label": label_text,
+                "role": role_text,
+                "enabled": _as_bool(enabled),
+                "topics": [],
+            }
+            merged[key] = entry
+            order.append(key)
+        else:
+            entry["enabled"] = bool(entry.get("enabled", True) or _as_bool(enabled))
+            if label_text and entry.get("label") == key:
+                entry["label"] = label_text
+            if role_text and not entry.get("role"):
+                entry["role"] = role_text
+
+        for topic in topics or []:
+            _append_unique(entry["topics"], topic)
+
+    dashboard = profile.get("dashboard")
+    if isinstance(dashboard, dict):
+        arms = dashboard.get("arms")
+        if isinstance(arms, list):
+            for arm in arms:
+                if not isinstance(arm, dict):
+                    continue
+                add_arm(
+                    _render_setting(arm.get("namespace"), settings),
+                    label=_render_setting(arm.get("label"), settings),
+                    role=_render_setting(arm.get("role"), settings),
+                )
+
+    teleop = profile.get("teleop")
+    if isinstance(teleop, dict):
+        follower_arms = teleop.get("follower_arms")
+        if isinstance(follower_arms, list):
+            for arm in follower_arms:
+                if not isinstance(arm, dict):
+                    continue
+                add_arm(
+                    _render_setting(arm.get("namespace"), settings),
+                    label=_render_setting(arm.get("label"), settings),
+                    role="follower",
+                )
+
+    lerobot = profile.get("lerobot")
+    if isinstance(lerobot, dict):
+        for key, value in lerobot.items():
+            if key == "cameras" or not isinstance(value, dict):
+                continue
+            add_arm(_render_setting(value.get("namespace"), settings), role="follower")
+
+    actions = profile.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") != "node":
+                continue
+            package = str(action.get("package") or "").strip()
+            if package not in {"unity_robot_control", "piper"}:
+                continue
+            add_arm(_render_setting(action.get("namespace"), settings))
+
+    results: list[dict[str, Any]] = []
+    for key in order:
+        entry = dict(merged[key])
+        topics = list(entry.get("topics") or [])
+        if not topics:
+            _append_unique(topics, f"/{key}/joint_states")
+            _append_unique(topics, f"/{key}/joint_states_single")
+        entry["topics"] = topics
+        results.append(entry)
+    return results
 
 
 def extract_camera_specs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -372,23 +607,22 @@ async def get_active_profile_spec() -> VlaborProfileSpec:
         raise HTTPException(status_code=404, detail="VLAbor profiles not found")
 
     by_name = {profile.name: profile for profile in profiles}
-    user_id = _optional_user_id()
+    scope_id = _active_profile_scope_id()
     selected_name: Optional[str] = None
-    if user_id:
-        client = await get_supabase_async_client()
-        try:
-            rows = (
-                await client.table(_ACTIVE_PROFILE_TABLE)
-                .select("profile_name")
-                .eq("owner_user_id", user_id)
-                .limit(1)
-                .execute()
-            ).data or []
-        except Exception as exc:  # noqa: BLE001 - fallback to default profile if table is unavailable
-            logger.warning("Failed to load active VLAbor profile from DB: %s", exc)
-            rows = []
-        if rows:
-            selected_name = str(rows[0].get("profile_name") or "").strip() or None
+    client = await get_supabase_async_client()
+    try:
+        rows = (
+            await client.table(_ACTIVE_PROFILE_TABLE)
+            .select("profile_name")
+            .eq("scope_id", scope_id)
+            .limit(1)
+            .execute()
+        ).data or []
+    except Exception as exc:  # noqa: BLE001 - fallback to default profile if table is unavailable
+        logger.warning("Failed to load active VLAbor profile from DB: %s", exc)
+        rows = []
+    if rows:
+        selected_name = str(rows[0].get("profile_name") or "").strip() or None
 
     if selected_name and selected_name in by_name:
         return by_name[selected_name]
@@ -400,17 +634,17 @@ async def get_active_profile_spec() -> VlaborProfileSpec:
 
 
 async def set_active_profile_spec(profile_name: str) -> VlaborProfileSpec:
-    user_id = get_current_user_id()
     profile = _profile_by_name(profile_name)
     if not profile:
         raise HTTPException(status_code=404, detail=f"VLAbor profile not found: {profile_name}")
 
+    scope_id = _active_profile_scope_id()
     client = await get_supabase_async_client()
     now = _now_iso()
     existing = (
         await client.table(_ACTIVE_PROFILE_TABLE)
-        .select("owner_user_id")
-        .eq("owner_user_id", user_id)
+        .select("scope_id")
+        .eq("scope_id", scope_id)
         .limit(1)
         .execute()
     ).data or []
@@ -420,11 +654,11 @@ async def set_active_profile_spec(profile_name: str) -> VlaborProfileSpec:
         "updated_at": now,
     }
     if existing:
-        await client.table(_ACTIVE_PROFILE_TABLE).update(payload).eq("owner_user_id", user_id).execute()
+        await client.table(_ACTIVE_PROFILE_TABLE).update(payload).eq("scope_id", scope_id).execute()
     else:
         await client.table(_ACTIVE_PROFILE_TABLE).insert(
             {
-                "owner_user_id": user_id,
+                "scope_id": scope_id,
                 "profile_name": profile.name,
                 "profile_snapshot": profile.snapshot,
                 "created_at": now,
