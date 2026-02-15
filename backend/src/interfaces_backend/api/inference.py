@@ -7,6 +7,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -36,6 +37,7 @@ from interfaces_backend.services.lerobot_runtime import (
     start_lerobot,
     stop_lerobot,
 )
+from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.r2_db_sync import R2DBSyncService
 from percus_ai.storage.naming import generate_dataset_id
 from percus_ai.storage.paths import get_user_config_path
@@ -123,6 +125,41 @@ def _build_inference_recorder_cameras(profile_snapshot: dict) -> list[dict]:
     return cameras
 
 
+async def _upsert_inference_dataset_record(
+    dataset_id: str,
+    dataset_name: str,
+    task: str,
+    profile_snapshot: dict,
+    status: str,
+) -> None:
+    payload = {
+        "id": dataset_id,
+        "name": dataset_name,
+        "dataset_type": "eval",
+        "source": "local",
+        "status": status,
+        "task_detail": task,
+        "profile_instance_id": None,
+        "profile_snapshot": profile_snapshot,
+    }
+    await upsert_with_owner("datasets", "id", payload)
+
+
+async def _mark_inference_dataset_active(dataset_id: str) -> None:
+    client = await get_supabase_async_client()
+    await (
+        client.table("datasets")
+        .update(
+            {
+                "status": "active",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        .eq("id", dataset_id)
+        .execute()
+    )
+
+
 async def _auto_upload_inference_dataset(dataset_id: str) -> None:
     """Upload the inference evaluation dataset to R2."""
     user_config = _load_user_config()
@@ -196,17 +233,24 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
     # Start simultaneous recording during inference (best-effort)
     global _inference_dataset_id
     dataset_id = generate_dataset_id()
+    dataset_name = f"eval-{session_id[:8]}"
     cameras = _build_inference_recorder_cameras(active_profile.snapshot)
     arm_namespaces = extract_arm_namespaces(active_profile.snapshot)
 
     recorder_payload: dict = {
         "dataset_id": dataset_id,
-        "dataset_name": f"eval-{session_id[:8]}",
+        "dataset_name": dataset_name,
         "task": request.task or "",
         "num_episodes": 1,
         "episode_time_s": 86400,
         "reset_time_s": 0,
         "cameras": cameras,
+        "metadata": {
+            "profile_name": active_profile.name,
+            "profile_snapshot": active_profile.snapshot,
+            "session_kind": "inference",
+            "inference_session_id": session_id,
+        },
     }
     if arm_namespaces:
         recorder_payload["arm_namespaces"] = arm_namespaces
@@ -216,6 +260,25 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
         if result.get("success"):
             _inference_dataset_id = dataset_id
             logger.info("Started inference recording: dataset_id=%s", dataset_id)
+            try:
+                await _upsert_inference_dataset_record(
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    task=request.task or "",
+                    profile_snapshot=active_profile.snapshot,
+                    status="recording",
+                )
+                await save_session_profile_binding(
+                    session_kind="recording",
+                    session_id=dataset_id,
+                    profile=active_profile,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist inference dataset profile snapshot: dataset_id=%s",
+                    dataset_id,
+                    exc_info=True,
+                )
         else:
             logger.warning("Recorder start returned failure (non-critical): %s", result)
     except Exception:
@@ -239,11 +302,22 @@ async def stop_inference_runner(request: InferenceRunnerStopRequest):
 
     # Stop inference recording and auto-upload
     if dataset_id:
+        recording_stopped = False
         try:
             _call_recorder("/api/session/stop", {"save_current": True})
             logger.info("Stopped inference recording: dataset_id=%s", dataset_id)
+            recording_stopped = True
         except Exception:
             logger.warning("Failed to stop inference recording", exc_info=True)
+        if recording_stopped:
+            try:
+                await _mark_inference_dataset_active(dataset_id)
+            except Exception:
+                logger.warning(
+                    "Failed to update inference dataset status to active: dataset_id=%s",
+                    dataset_id,
+                    exc_info=True,
+                )
         await _auto_upload_inference_dataset(dataset_id)
 
     _stop_lerobot_for_session()

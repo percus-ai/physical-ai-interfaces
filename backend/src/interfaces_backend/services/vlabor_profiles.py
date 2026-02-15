@@ -447,53 +447,33 @@ def extract_camera_specs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     lerobot = profile.get("lerobot")
-    if isinstance(lerobot, dict):
-        cameras = lerobot.get("cameras")
-        if isinstance(cameras, list):
-            results: list[dict[str, Any]] = []
-            for camera in cameras:
-                if not isinstance(camera, dict):
-                    continue
-                name = str(camera.get("name") or camera.get("source") or "").strip()
-                topic = str(camera.get("topic") or "").strip()
-                if not name or not topic:
-                    continue
-                results.append({"name": name, "topic": topic, "enabled": True, "package": "lerobot"})
-            if results:
-                return results
-
-    actions = profile.get("actions")
-    if not isinstance(actions, list):
+    if not isinstance(lerobot, dict):
+        return []
+    cameras = lerobot.get("cameras")
+    if not isinstance(cameras, list):
         return []
 
     results: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, dict):
+    for camera in cameras:
+        if not isinstance(camera, dict):
             continue
-        if action.get("type") != "include":
+        name = str(
+            _render_setting(camera.get("name") or camera.get("source") or "", settings)
+        ).strip()
+        topic = str(_render_setting(camera.get("topic") or "", settings)).strip()
+        source = str(_render_setting(camera.get("source") or name or "", settings)).strip() or name
+        enabled = _as_bool(_render_setting(camera.get("enabled", True), settings))
+        if not name or not topic:
             continue
-
-        package = str(action.get("package") or "").strip()
-        if package not in {"fv_camera", "fv_realsense", "vlabor_launch"}:
-            continue
-
-        args = action.get("args")
-        if not isinstance(args, dict):
-            continue
-        name_raw = _render_setting(args.get("node_name"), settings)
-        node_name = str(name_raw or "").strip()
-        if not node_name:
-            continue
-
-        enabled_raw = _render_setting(action.get("enabled", True), settings)
-        enabled = _as_bool(enabled_raw)
-
-        if package == "fv_realsense":
-            topic = f"/{node_name}/color/image_raw/compressed"
-        else:
-            topic = f"/{node_name}/image_raw/compressed"
-
-        results.append({"name": node_name, "topic": topic, "enabled": enabled, "package": package})
+        results.append(
+            {
+                "name": name,
+                "topic": topic,
+                "source": source,
+                "enabled": enabled,
+                "package": "lerobot",
+            }
+        )
     return results
 
 

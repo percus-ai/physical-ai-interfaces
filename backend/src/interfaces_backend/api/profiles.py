@@ -158,8 +158,39 @@ async def get_active_profile():
 @router.put("/active", response_model=VlaborActiveProfileResponse)
 async def set_active_profile(request: VlaborProfileSelectRequest):
     _require_user_id()
+    previous = await get_active_profile_spec()
     active = await set_active_profile_spec(request.profile_name)
-    await asyncio.to_thread(restart_vlabor, profile=active.name, strict=False)
+    try:
+        await asyncio.to_thread(restart_vlabor, profile=active.name, strict=True)
+    except VlaborCommandError as exc:
+        rollback_messages: list[str] = []
+        try:
+            await set_active_profile_spec(previous.name)
+            rollback_messages.append(f"active profile reverted to {previous.name}")
+        except Exception as rollback_exc:  # noqa: BLE001 - API detail
+            rollback_messages.append(f"failed to revert active profile: {rollback_exc}")
+
+        try:
+            rollback_result = await asyncio.to_thread(
+                restart_vlabor,
+                profile=previous.name,
+                strict=False,
+            )
+            if rollback_result.returncode == 0:
+                rollback_messages.append("VLAbor runtime rollback succeeded")
+            else:
+                detail = (rollback_result.stderr or rollback_result.stdout).strip()
+                if not detail:
+                    detail = f"exit code={rollback_result.returncode}"
+                rollback_messages.append(f"VLAbor runtime rollback failed: {detail}")
+        except Exception as rollback_exc:  # noqa: BLE001 - API detail
+            rollback_messages.append(f"failed to run runtime rollback: {rollback_exc}")
+
+        detail = f"Failed to restart VLAbor with profile {active.name}: {exc}"
+        if rollback_messages:
+            detail = f"{detail} ({'; '.join(rollback_messages)})"
+        raise HTTPException(status_code=500, detail=detail) from exc
+
     return VlaborActiveProfileResponse(
         profile_name=active.name,
         profile_snapshot=active.snapshot,
