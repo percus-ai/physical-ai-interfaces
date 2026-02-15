@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import threading
-from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from interfaces_backend.api.profiles import _get_vlabor_status
 from interfaces_backend.models.teleop import (
@@ -16,109 +14,47 @@ from interfaces_backend.models.teleop import (
     TeleopSessionStatusResponse,
     TeleopSessionStopRequest,
 )
-from interfaces_backend.services.lerobot_runtime import (
-    LerobotCommandError,
-    start_lerobot,
-    stop_lerobot,
-)
-from interfaces_backend.services.vlabor_profiles import (
-    get_active_profile_spec,
-    resolve_profile_spec,
-    save_session_profile_binding,
-)
-from percus_ai.db import get_current_user_id
+from interfaces_backend.services.session_manager import require_user_id
+from interfaces_backend.services.teleop_session import get_teleop_session_manager
 
 router = APIRouter(prefix="/api/teleop", tags=["teleop"])
 
 _SESSION_ID = "teleop"
-_SESSION_LOCK = threading.RLock()
-_ACTIVE_SESSION: dict[str, Any] | None = None
-
-
-def _require_user_id() -> str:
-    try:
-        return get_current_user_id()
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Login required") from exc
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _status_payload() -> dict[str, Any]:
     return dict(_get_vlabor_status())
 
 
-def _active_session_copy() -> dict[str, Any] | None:
-    with _SESSION_LOCK:
-        return dict(_ACTIVE_SESSION) if _ACTIVE_SESSION else None
-
-
 @router.post("/session/create", response_model=TeleopSessionActionResponse)
 async def create_session(request: Optional[TeleopSessionCreateRequest] = None):
-    _require_user_id()
+    require_user_id()
     payload = request or TeleopSessionCreateRequest()
-    profile = resolve_profile_spec(payload.profile) if payload.profile else await get_active_profile_spec()
-    try:
-        start_lerobot(strict=True)
-    except LerobotCommandError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to start lerobot stack: {exc}") from exc
-    await save_session_profile_binding(session_kind="teleop", session_id=_SESSION_ID, profile=profile)
-
-    now = _now_iso()
-    with _SESSION_LOCK:
-        global _ACTIVE_SESSION
-        if _ACTIVE_SESSION and _ACTIVE_SESSION.get("state") == "running":
-            return TeleopSessionActionResponse(
-                success=True,
-                session_id=_SESSION_ID,
-                message="Teleop session already running",
-                status=_status_payload(),
-            )
-        _ACTIVE_SESSION = {
-            "session_id": _SESSION_ID,
-            "state": "created",
-            "created_at": now,
-            "started_at": _ACTIVE_SESSION.get("started_at") if _ACTIVE_SESSION else None,
-            "profile": profile.name,
-            "profile_snapshot": profile.snapshot,
-            "domain_id": payload.domain_id,
-            "dev_mode": bool(payload.dev_mode),
-        }
-
+    mgr = get_teleop_session_manager()
+    state = await mgr.create(
+        profile=payload.profile,
+        domain_id=payload.domain_id,
+        dev_mode=payload.dev_mode,
+    )
+    message = (
+        "Teleop session already running" if state.status == "running" else "Teleop session created"
+    )
     return TeleopSessionActionResponse(
         success=True,
-        session_id=_SESSION_ID,
-        message="Teleop session created",
+        session_id=state.id,
+        message=message,
         status=_status_payload(),
     )
 
 
 @router.post("/session/start", response_model=TeleopSessionActionResponse)
 async def start_session(request: TeleopSessionStartRequest):
-    _require_user_id()
-    if request.session_id != _SESSION_ID:
-        raise HTTPException(status_code=404, detail=f"Teleop session not found: {request.session_id}")
-
-    session = _active_session_copy()
-    if not session:
-        raise HTTPException(status_code=404, detail="Teleop session not found. Create session first.")
-
-    try:
-        start_lerobot(strict=True)
-    except LerobotCommandError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to start lerobot stack: {exc}") from exc
-
-    with _SESSION_LOCK:
-        if _ACTIVE_SESSION is None:
-            raise HTTPException(status_code=404, detail="Teleop session not found")
-        _ACTIVE_SESSION["state"] = "running"
-        _ACTIVE_SESSION["started_at"] = _ACTIVE_SESSION.get("started_at") or _now_iso()
-
+    require_user_id()
+    mgr = get_teleop_session_manager()
+    state = await mgr.start(request.session_id)
     return TeleopSessionActionResponse(
         success=True,
-        session_id=_SESSION_ID,
+        session_id=state.id,
         message="Teleop session started",
         status=_status_payload(),
     )
@@ -126,20 +62,13 @@ async def start_session(request: TeleopSessionStartRequest):
 
 @router.post("/session/stop", response_model=TeleopSessionActionResponse)
 async def stop_session(request: Optional[TeleopSessionStopRequest] = None):
-    _require_user_id()
+    require_user_id()
     session_id = (request.session_id if request else None) or _SESSION_ID
-    if session_id != _SESSION_ID:
-        raise HTTPException(status_code=404, detail=f"Teleop session not found: {session_id}")
-
-    stop_lerobot(strict=False)
-
-    with _SESSION_LOCK:
-        global _ACTIVE_SESSION
-        _ACTIVE_SESSION = None
-
+    mgr = get_teleop_session_manager()
+    state = await mgr.stop(session_id)
     return TeleopSessionActionResponse(
         success=True,
-        session_id=_SESSION_ID,
+        session_id=state.id,
         message="Teleop session stopped",
         status=_status_payload(),
     )
@@ -147,26 +76,27 @@ async def stop_session(request: Optional[TeleopSessionStopRequest] = None):
 
 @router.get("/session/status", response_model=TeleopSessionStatusResponse)
 async def get_session_status():
-    _require_user_id()
-    session = _active_session_copy()
+    require_user_id()
+    mgr = get_teleop_session_manager()
+    session = mgr.status(_SESSION_ID)
     status = _status_payload()
     vlabor_running = (status.get("status") or "") == "running"
 
     if session:
-        state = session.get("state") or "created"
+        state = session.status or "created"
         if vlabor_running and state != "running":
             state = "running"
         if not vlabor_running and state == "running":
             state = "stopped"
         return TeleopSessionStatusResponse(
             active=bool(vlabor_running and state == "running"),
-            session_id=session.get("session_id"),
+            session_id=session.id,
             state=state,
-            created_at=session.get("created_at"),
-            started_at=session.get("started_at"),
-            profile=session.get("profile"),
-            domain_id=session.get("domain_id"),
-            dev_mode=bool(session.get("dev_mode")),
+            created_at=session.created_at,
+            started_at=session.started_at,
+            profile=session.profile.name if session.profile else None,
+            domain_id=session.extras.get("domain_id"),
+            dev_mode=bool(session.extras.get("dev_mode")),
             status=status,
         )
 
