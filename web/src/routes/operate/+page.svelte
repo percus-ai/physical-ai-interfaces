@@ -9,16 +9,6 @@
   import ActiveSessionSection from '$lib/components/ActiveSessionSection.svelte';
   import ActiveSessionCard from '$lib/components/ActiveSessionCard.svelte';
 
-  type VlaborStatus = {
-    status?: string;
-    service?: string;
-    state?: string;
-    status_detail?: string;
-    running_for?: string;
-    created_at?: string;
-    container_id?: string;
-  };
-
   type InferenceModel = {
     model_id?: string;
     name?: string;
@@ -63,13 +53,6 @@
     gpu_host_status?: GpuHostStatus;
   };
 
-  type TeleopSessionActionResponse = {
-    success?: boolean;
-    session_id?: string;
-    message?: string;
-    status?: VlaborStatus;
-  };
-
   type OperateStatusResponse = {
     backend?: { status?: string; message?: string };
     vlabor?: { status?: string; message?: string };
@@ -79,17 +62,10 @@
   };
 
   type OperateStatusStreamPayload = {
-    vlabor_status?: VlaborStatus;
+    vlabor_status?: Record<string, any>;
     inference_runner_status?: InferenceRunnerStatusResponse;
     operate_status?: OperateStatusResponse;
   };
-
-  const TELEOP_SESSION_ID = 'teleop';
-
-  const vlaborStatusQuery = createQuery<VlaborStatus>({
-    queryKey: ['profiles', 'vlabor', 'status'],
-    queryFn: api.profiles.vlaborStatus
-  });
 
   const inferenceModelsQuery = createQuery<InferenceModelsResponse>({
     queryKey: ['inference', 'models'],
@@ -141,11 +117,6 @@
   let inferenceStopError = $state('');
   let inferenceStartPending = $state(false);
   let inferenceStopPending = $state(false);
-
-  let teleopStartError = $state('');
-  let teleopStopError = $state('');
-  let teleopStartPending = $state(false);
-  let teleopStopPending = $state(false);
 
   const emptyRunnerStatus: RunnerStatus = {};
   const emptyGpuStatus: GpuHostStatus = {};
@@ -204,56 +175,14 @@
     }
   };
 
-  const handleTeleopStart = async () => {
-    teleopStartPending = true;
-    teleopStartError = '';
-    teleopStopError = '';
-    try {
-      const created = (await api.teleop.createSession()) as TeleopSessionActionResponse;
-      const sessionId = created?.session_id ?? TELEOP_SESSION_ID;
-      const started = (await api.teleop.startSession({ session_id: sessionId })) as TeleopSessionActionResponse;
-      queryClient.setQueryData(['profiles', 'vlabor', 'status'], started.status);
-      await refetchQuery($vlaborStatusQuery);
-      const nextStatus = started?.status?.status ?? $vlaborStatusQuery.data?.status;
-      if (nextStatus === 'running') {
-        await goto(`/operate/sessions/${encodeURIComponent(sessionId)}?kind=teleop`);
-      }
-    } catch (err) {
-      teleopStartError = err instanceof Error ? err.message : 'テレオペ開始に失敗しました。';
-    } finally {
-      teleopStartPending = false;
-    }
-  };
-
-  const handleTeleopStop = async () => {
-    teleopStopPending = true;
-    teleopStopError = '';
-    try {
-      const result = (await api.teleop.stopSession({ session_id: TELEOP_SESSION_ID })) as TeleopSessionActionResponse;
-      queryClient.setQueryData(['profiles', 'vlabor', 'status'], result.status);
-      await refetchQuery($vlaborStatusQuery);
-    } catch (err) {
-      teleopStopError = err instanceof Error ? err.message : 'テレオペ停止に失敗しました。';
-    } finally {
-      teleopStopPending = false;
-    }
-  };
-
   const runnerStatus = $derived($inferenceRunnerStatusQuery.data?.runner_status ?? emptyRunnerStatus);
   const gpuStatus = $derived($inferenceRunnerStatusQuery.data?.gpu_host_status ?? emptyGpuStatus);
   const runnerActive = $derived(Boolean(runnerStatus.active));
-
-  const vlaborStatus = $derived($vlaborStatusQuery.data ?? {});
-  const teleopRunning = $derived(vlaborStatus.status === 'running');
-
-  const teleopLocked = $derived(runnerActive);
-  const inferenceLocked = $derived(teleopRunning);
 
   $effect(() => {
     const stopOperateStream = connectStream<OperateStatusStreamPayload>({
       path: '/api/stream/operate/status',
       onMessage: (payload) => {
-        queryClient.setQueryData(['profiles', 'vlabor', 'status'], payload.vlabor_status);
         queryClient.setQueryData(['inference', 'runner', 'status'], payload.inference_runner_status);
         queryClient.setQueryData(['operate', 'status'], payload.operate_status);
       }
@@ -269,154 +198,72 @@
   <p class="section-title">Operate</p>
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1 class="text-3xl font-semibold text-slate-900">テレオペ / 推論</h1>
-      <p class="mt-2 text-sm text-slate-600">運用中セッションの確認と開始をまとめて行います。</p>
+      <h1 class="text-3xl font-semibold text-slate-900">推論</h1>
+      <p class="mt-2 text-sm text-slate-600">推論セッションの確認と開始を行います。</p>
     </div>
   </div>
 </section>
 
 <ActiveSessionSection
   title="稼働中セッション"
-  description="テレオペ/推論をセッション単位でまとめて表示します。"
-  badges={[`テレオペ: ${teleopRunning ? '稼働中' : '停止'}`, `推論: ${runnerActive ? '稼働中' : '停止'}`]}
+  description="推論セッションの状況を表示します。"
+  badges={[`推論: ${runnerActive ? '稼働中' : '停止'}`]}
 >
-  <div class="grid gap-4 lg:grid-cols-2">
-    {#if $vlaborStatusQuery.isLoading}
-      <ActiveSessionCard tone="muted">
-        <p class="text-sm text-slate-600">テレオペステータスを読み込み中...</p>
-      </ActiveSessionCard>
-    {:else if teleopRunning}
-      <ActiveSessionCard>
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="label">セッション種別</p>
-            <p class="text-base font-semibold text-slate-900">テレオペ</p>
-            <p class="mt-1 text-xs text-slate-500">VLAbor上でのテレオペセッション。</p>
-          </div>
-          <span class="chip">稼働中</span>
+  {#if $inferenceRunnerStatusQuery.isLoading}
+    <ActiveSessionCard tone="muted">
+      <p class="text-sm text-slate-600">推論セッションを読み込み中...</p>
+    </ActiveSessionCard>
+  {:else if runnerActive}
+    <ActiveSessionCard>
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="label">セッション種別</p>
+          <p class="text-base font-semibold text-slate-900">推論</p>
+          <p class="mt-1 text-xs text-slate-500">モデル推論での実行セッション。</p>
         </div>
-        <div class="mt-3 space-y-1 text-xs text-slate-500">
-          <p>session_id: {TELEOP_SESSION_ID}</p>
-          <p>state: {vlaborStatus.state ?? vlaborStatus.status ?? '-'}</p>
-          <p>running_for: {vlaborStatus.running_for ?? '-'}</p>
-          <p>container_id: {vlaborStatus.container_id ?? '-'}</p>
-        </div>
-        <div class="mt-4 flex flex-wrap gap-2">
-          <Button.Root
-            class="btn-primary"
-            href={`/operate/sessions/${encodeURIComponent(TELEOP_SESSION_ID)}?kind=teleop`}
-          >
-            セッションを開く
-          </Button.Root>
-          <Button.Root class="btn-ghost" type="button" onclick={handleTeleopStop} disabled={teleopStopPending}>
-            停止
-          </Button.Root>
-        </div>
-        {#if vlaborStatus.status_detail}
-          <p class="mt-2 text-xs text-rose-600">{vlaborStatus.status_detail}</p>
-        {/if}
-      </ActiveSessionCard>
-    {/if}
-
-    {#if $inferenceRunnerStatusQuery.isLoading}
-      <ActiveSessionCard tone="muted">
-        <p class="text-sm text-slate-600">推論セッションを読み込み中...</p>
-      </ActiveSessionCard>
-    {:else if runnerActive}
-      <ActiveSessionCard>
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="label">セッション種別</p>
-            <p class="text-base font-semibold text-slate-900">推論</p>
-            <p class="mt-1 text-xs text-slate-500">モデル推論での実行セッション。</p>
-          </div>
-          <span class="chip">稼働中</span>
-        </div>
-        <div class="mt-3 space-y-1 text-xs text-slate-500">
-          <p>session_id: {runnerStatus.session_id ?? '-'}</p>
-          <p>task: {runnerStatus.task ?? '-'}</p>
-          <p>queue: {runnerStatus.queue_length ?? 0}</p>
-        </div>
-        <div class="mt-4 flex flex-wrap gap-2">
-          <Button.Root
-            class="btn-primary"
-            href={`/operate/sessions/${encodeURIComponent(runnerStatus.session_id ?? '')}?kind=inference`}
-          >
-            セッションを開く
-          </Button.Root>
-          <Button.Root class="btn-ghost" type="button" onclick={handleInferenceStop} disabled={inferenceStopPending}>
-            停止
-          </Button.Root>
-        </div>
-        {#if runnerStatus.last_error}
-          <p class="mt-2 text-xs text-rose-600">{runnerStatus.last_error}</p>
-        {/if}
-        {#if inferenceStopError}
-          <p class="mt-2 text-xs text-rose-600">{inferenceStopError}</p>
-        {/if}
-      </ActiveSessionCard>
-    {/if}
-  </div>
-
-  {#if !teleopRunning && !runnerActive && !$vlaborStatusQuery.isLoading && !$inferenceRunnerStatusQuery.isLoading}
+        <span class="chip">稼働中</span>
+      </div>
+      <div class="mt-3 space-y-1 text-xs text-slate-500">
+        <p>session_id: {runnerStatus.session_id ?? '-'}</p>
+        <p>task: {runnerStatus.task ?? '-'}</p>
+        <p>queue: {runnerStatus.queue_length ?? 0}</p>
+      </div>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <Button.Root
+          class="btn-primary"
+          href={`/operate/sessions/${encodeURIComponent(runnerStatus.session_id ?? '')}?kind=inference`}
+        >
+          セッションを開く
+        </Button.Root>
+        <Button.Root class="btn-ghost" type="button" onclick={handleInferenceStop} disabled={inferenceStopPending}>
+          停止
+        </Button.Root>
+      </div>
+      {#if runnerStatus.last_error}
+        <p class="mt-2 text-xs text-rose-600">{runnerStatus.last_error}</p>
+      {/if}
+      {#if inferenceStopError}
+        <p class="mt-2 text-xs text-rose-600">{inferenceStopError}</p>
+      {/if}
+    </ActiveSessionCard>
+  {:else}
     <ActiveSessionCard tone="muted">
       <p class="text-sm text-slate-600">稼働中のセッションはありません。</p>
     </ActiveSessionCard>
-  {/if}
-  {#if teleopStopError}
-    <p class="mt-2 text-xs text-rose-600">{teleopStopError}</p>
   {/if}
 </ActiveSessionSection>
 
 <section class="card p-6">
   <div class="flex flex-wrap items-center justify-between gap-4">
     <div>
-      <h2 class="text-xl font-semibold text-slate-900">セッション開始</h2>
+      <h2 class="text-xl font-semibold text-slate-900">推論開始</h2>
       <p class="mt-1 text-sm text-slate-600">
-        テレオペ/推論のいずれかを選択して開始します（同時稼働はできません）。
+        モデルとデバイスを選択して推論を開始します。
       </p>
     </div>
-    <span class="chip">同時稼働不可</span>
   </div>
 
-  <div class="mt-4 grid gap-4 lg:grid-cols-2">
-    <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
-      <div class="flex items-start justify-between gap-3">
-        <div>
-          <p class="label">テレオペ</p>
-          <h3 class="text-lg font-semibold text-slate-900">テレオペ開始</h3>
-        </div>
-        <span class="chip">{teleopRunning ? '稼働中' : '待機'}</span>
-      </div>
-      <div class="mt-4 grid gap-4 text-sm text-slate-600">
-        <div class="rounded-xl border border-slate-200/60 bg-white/70 p-3">
-          <p class="text-xs text-slate-500">Service</p>
-          <p class="text-base font-semibold text-slate-800">{vlaborStatus.service ?? 'vlabor'}</p>
-          <p class="mt-2 text-xs text-slate-500">state: {vlaborStatus.state ?? vlaborStatus.status ?? '-'}</p>
-          <p class="text-xs text-slate-500">running_for: {vlaborStatus.running_for ?? '-'}</p>
-        </div>
-        {#if teleopLocked}
-          <p class="text-xs text-amber-600">推論が稼働中のため、テレオペ開始はできません。</p>
-        {:else if teleopRunning}
-          <p class="text-xs text-amber-600">既にテレオペが稼働中です。</p>
-        {/if}
-        <div class="flex flex-wrap gap-2">
-          <Button.Root
-            class="btn-primary"
-            type="button"
-            onclick={handleTeleopStart}
-            disabled={teleopStartPending || teleopLocked || teleopRunning}
-            aria-busy={teleopStartPending}
-          >
-            テレオペ開始
-          </Button.Root>
-        </div>
-        {#if teleopStartError}
-          <p class="text-xs text-rose-600">{teleopStartError}</p>
-        {/if}
-      </div>
-    </div>
-
+  <div class="mt-4">
     <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
       <div class="flex items-start justify-between gap-3">
         <div>
@@ -471,15 +318,12 @@
           </label>
         </div>
 
-        {#if inferenceLocked}
-          <p class="text-xs text-amber-600">テレオペが稼働中のため、推論開始はできません。</p>
-        {/if}
         <div class="flex flex-wrap gap-3">
           <Button.Root
             class="btn-primary"
             type="button"
             onclick={handleInferenceStart}
-            disabled={inferenceStartPending || !selectedModelId || runnerActive || inferenceLocked}
+            disabled={inferenceStartPending || !selectedModelId || runnerActive}
             aria-busy={inferenceStartPending}
           >
             推論を開始

@@ -127,10 +127,10 @@
 
 <ActiveSessionSection title="稼働中セッション" description="現在稼働中の録画セッションを表示します。">
   <ActiveSessionCard>
-    {#if rosbridgeStatus !== 'connected'}
-      <p class="text-xs text-rose-600">rosbridge が切断されています。状態は更新されません。</p>
-    {/if}
     {#if activeSessionId}
+      {#if rosbridgeStatus !== 'connected'}
+        <p class="text-xs text-rose-600">rosbridge が切断されています。状態は更新されません。</p>
+      {/if}
       <div class="flex flex-wrap items-center gap-3 text-sm text-slate-700">
         <span class="chip">状態: {activeSessionLabel}</span>
         <span class="chip">Session: {activeSessionId}</span>

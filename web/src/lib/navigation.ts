@@ -7,13 +7,6 @@ export const navItems = [
     description: '状況の俯瞰とショートカット'
   },
   {
-    id: 'operate',
-    label: 'テレオペ / 推論',
-    href: '/operate',
-    icon: '🎮',
-    description: 'テレオペレーションと推論実行'
-  },
-  {
     id: 'record',
     label: 'データ録画',
     href: '/record',
@@ -26,6 +19,13 @@ export const navItems = [
     href: '/train',
     icon: '☁️',
     description: '学習ジョブの作成と管理'
+  },
+  {
+    id: 'operate',
+    label: 'モデル推論',
+    href: '/operate',
+    icon: '🎮',
+    description: '推論セッションの実行と管理'
   },
   {
     id: 'experiments',
@@ -42,11 +42,11 @@ export const navItems = [
     description: 'データセット・モデル・アーカイブ'
   },
   {
-    id: 'setup',
-    label: 'デバイス設定',
-    href: '/setup',
+    id: 'profile',
+    label: 'プロファイル',
+    href: '/profile',
     icon: '🔧',
-    description: 'プロファイル・デバイス・キャリブレーション'
+    description: 'VLAborプロファイルの選択と状態確認'
   }
 ];
 

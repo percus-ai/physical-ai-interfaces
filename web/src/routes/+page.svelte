@@ -75,30 +75,8 @@
 
 <section class="grid gap-6 lg:grid-cols-3">
   <div class="card p-6">
-    <p class="section-title">Operate</p>
-    <h2 class="mt-2 text-xl font-semibold text-slate-900">テレオペ / 推論</h2>
-    <p class="mt-3 text-sm text-slate-600">テレオペ・推論実行・セッション監視を統合表示。</p>
-    <div class="mt-6 flex gap-3">
-      <Tooltip.Root>
-        <Tooltip.Trigger class="btn-ghost" type={null}>
-          {#snippet child({ props })}
-            <Button.Root {...props} href="/operate">開く</Button.Root>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            class="rounded-lg bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
-            sideOffset={6}
-          >
-            テレオペ / 推論
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </div>
-  </div>
-  <div class="card p-6">
     <p class="section-title">Record</p>
-    <h2 class="mt-2 text-xl font-semibold text-slate-900">録画セッション</h2>
+    <h2 class="mt-2 text-xl font-semibold text-slate-900">データ録画</h2>
     <p class="mt-3 text-sm text-slate-600">プロフィール選択、録画セッションの状態を可視化。</p>
     <div class="mt-6 flex gap-3">
       <Tooltip.Root>
@@ -112,7 +90,7 @@
             class="rounded-lg bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
             sideOffset={6}
           >
-            録画セッション
+            データ録画
           </Tooltip.Content>
         </Tooltip.Portal>
       </Tooltip.Root>
@@ -120,7 +98,7 @@
   </div>
   <div class="card p-6">
     <p class="section-title">Train</p>
-    <h2 class="mt-2 text-xl font-semibold text-slate-900">学習ジョブ</h2>
+    <h2 class="mt-2 text-xl font-semibold text-slate-900">モデル学習</h2>
     <p class="mt-3 text-sm text-slate-600">新規学習/継続学習、GPU・ストレージ指定を整理。</p>
     <div class="mt-6 flex gap-3">
       <Tooltip.Root>
@@ -134,7 +112,29 @@
             class="rounded-lg bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
             sideOffset={6}
           >
-            学習ジョブ
+            モデル学習
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    </div>
+  </div>
+  <div class="card p-6">
+    <p class="section-title">Operate</p>
+    <h2 class="mt-2 text-xl font-semibold text-slate-900">モデル推論</h2>
+    <p class="mt-3 text-sm text-slate-600">推論セッションの実行と管理。</p>
+    <div class="mt-6 flex gap-3">
+      <Tooltip.Root>
+        <Tooltip.Trigger class="btn-ghost" type={null}>
+          {#snippet child({ props })}
+            <Button.Root {...props} href="/operate">開く</Button.Root>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content
+            class="rounded-lg bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
+            sideOffset={6}
+          >
+            モデル推論
           </Tooltip.Content>
         </Tooltip.Portal>
       </Tooltip.Root>

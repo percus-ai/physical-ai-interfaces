@@ -195,10 +195,10 @@
 </script>
 
 <section class="card-strong p-8">
-  <p class="section-title">Setup</p>
+  <p class="section-title">Profile</p>
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1 class="text-3xl font-semibold text-slate-900">デバイス・プロファイル設定</h1>
+      <h1 class="text-3xl font-semibold text-slate-900">プロファイル</h1>
       <p class="mt-2 text-sm text-slate-600">VLAborプロファイルの選択と状態確認。</p>
     </div>
   </div>
