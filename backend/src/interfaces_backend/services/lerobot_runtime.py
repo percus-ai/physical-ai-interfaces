@@ -1,7 +1,7 @@
 """Runtime helpers for controlling the lerobot-ros2 Docker stack.
 
 Manages the lifecycle of containers defined in docker-compose.ros2.yml:
-lerobot-ros2, rosbridge, otel-collector.
+lerobot-ros2, rosbridge.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from interfaces_backend.utils.docker_compose import build_compose_command, get_l
 
 logger = logging.getLogger(__name__)
 
-_LEROBOT_SERVICES = ["lerobot-ros2", "rosbridge", "otel-collector"]
+_LEROBOT_SERVICES = ["lerobot-ros2", "rosbridge"]
 
 
 class LerobotCommandError(RuntimeError):
