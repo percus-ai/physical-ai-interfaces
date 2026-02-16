@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Any
@@ -28,6 +29,7 @@ class RecordingSessionManager(BaseSessionManager):
         super().__init__()
         self._recorder = recorder or get_recorder_bridge()
         self._dataset = dataset or get_dataset_lifecycle()
+        self._completion_watchers: dict[str, asyncio.Task[None]] = {}
 
     def _generate_id(self) -> str:
         # Use dataset_id as session_id so the client API can address
@@ -96,21 +98,55 @@ class RecordingSessionManager(BaseSessionManager):
         )
         state.extras["recording_started"] = True
         state.extras["recorder_result"] = result
+        self._start_completion_watcher(state.id)
         return state
 
     async def stop(self, session_id: str, **kwargs: Any) -> SessionState:
         state = self._get_or_raise(session_id)
+        self._cancel_completion_watcher(session_id)
         save_current = kwargs.get("save_current", True)
         cancel = kwargs.get("cancel", False)
 
         recorder_result: dict = {}
         if state.extras.get("recording_started"):
-            recorder_result = self._recorder.stop(save_current=save_current)
-            if not cancel and not recorder_result.get("success", False):
-                raise HTTPException(
-                    status_code=500,
-                    detail=recorder_result.get("error") or "Recorder stop failed",
-                )
+            recorder_status = kwargs.get("recorder_status")
+            if recorder_status is None:
+                try:
+                    recorder_status = self._recorder.status()
+                except HTTPException as exc:
+                    if exc.status_code != 503:
+                        raise
+                    recorder_status = None
+
+            if recorder_status is None:
+                recorder_result = self._recorder.stop(save_current=save_current)
+                if not cancel and not recorder_result.get("success", False):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=recorder_result.get("error") or "Recorder stop failed",
+                    )
+            else:
+                recorder_state = str(recorder_status.get("state") or "").strip().lower()
+                recorder_dataset_id = str(recorder_status.get("dataset_id") or "").strip()
+                recorder_active = recorder_dataset_id == state.id and recorder_state in {
+                    "warming",
+                    "recording",
+                    "paused",
+                    "resetting",
+                }
+                if recorder_active:
+                    recorder_result = self._recorder.stop(save_current=save_current)
+                    if not cancel and not recorder_result.get("success", False):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=recorder_result.get("error") or "Recorder stop failed",
+                        )
+                else:
+                    recorder_result = {
+                        "success": True,
+                        "message": "Recorder already finalized",
+                        "status": recorder_status,
+                    }
 
         if not cancel:
             await self._dataset.update_stats(state.id)
@@ -140,6 +176,70 @@ class RecordingSessionManager(BaseSessionManager):
             )
         state.status = "running"
         return state
+
+    def _start_completion_watcher(self, session_id: str) -> None:
+        task = self._completion_watchers.get(session_id)
+        if task is not None and not task.done():
+            return
+        self._completion_watchers[session_id] = asyncio.create_task(
+            self._watch_completion(session_id)
+        )
+
+    def _cancel_completion_watcher(self, session_id: str) -> None:
+        task = self._completion_watchers.get(session_id)
+        if task is None:
+            return
+        current = asyncio.current_task()
+        if task is current:
+            return
+        if not task.done():
+            task.cancel()
+        self._completion_watchers.pop(session_id, None)
+
+    async def _watch_completion(self, session_id: str) -> None:
+        try:
+            while True:
+                await asyncio.sleep(2.0)
+                if self.status(session_id) is None:
+                    return
+                try:
+                    recorder_status = await asyncio.to_thread(self._recorder.status)
+                except HTTPException as exc:
+                    if exc.status_code == 503:
+                        continue
+                    logger.warning(
+                        "recording session %s completion watcher error: %s",
+                        session_id,
+                        exc.detail,
+                    )
+                    continue
+
+                recorder_state = str(recorder_status.get("state") or "").strip().lower()
+                recorder_dataset_id = str(recorder_status.get("dataset_id") or "").strip()
+                if recorder_state != "completed" or recorder_dataset_id != session_id:
+                    continue
+
+                logger.info("recording session %s completed; finalizing upload", session_id)
+                try:
+                    await self.stop(
+                        session_id,
+                        save_current=False,
+                        recorder_status=recorder_status,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 404:
+                        logger.error(
+                            "recording session %s auto-finalize failed: %s",
+                            session_id,
+                            exc.detail,
+                        )
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            task = self._completion_watchers.get(session_id)
+            if task is asyncio.current_task():
+                self._completion_watchers.pop(session_id, None)
 
 
 # -- singleton ----------------------------------------------------------------
