@@ -22,7 +22,7 @@ class LerobotCommandError(RuntimeError):
 
 
 def start_lerobot(*, strict: bool = True) -> subprocess.CompletedProcess[str]:
-    """Start the lerobot-ros2 Docker stack (``docker compose up -d``)."""
+    """Start the lerobot-ros2 Docker stack (``docker compose up -d --build``)."""
     compose_file = get_lerobot_compose_file()
     if not compose_file.exists():
         message = f"Compose file not found: {compose_file}"
@@ -31,7 +31,7 @@ def start_lerobot(*, strict: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=message)
     compose_cmd = build_compose_command(compose_file)
     result = subprocess.run(
-        [*compose_cmd, "up", "-d", *_LEROBOT_SERVICES],
+        [*compose_cmd, "up", "-d", "--build", *_LEROBOT_SERVICES],
         capture_output=True,
         text=True,
     )
