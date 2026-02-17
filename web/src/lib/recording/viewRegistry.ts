@@ -80,7 +80,7 @@ export const viewRegistry: ViewTypeDefinition[] = [
     ],
     defaultConfig: (topics) => ({
       topic: firstMatch(topics, jointFilter),
-      showVelocity: true,
+      showVelocity: false,
       maxPoints: 160
     })
   },

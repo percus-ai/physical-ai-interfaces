@@ -6,16 +6,30 @@
     topic = '',
     title = 'Joint State',
     maxPoints = 160,
-    showVelocity = true
+    showVelocity = false,
+    renderFps = 60
   }: {
     topic?: string;
     title?: string;
     maxPoints?: number;
     showVelocity?: boolean;
+    renderFps?: number;
   } = $props();
 
   type SeriesPoint = { i: number; value: number };
+  type RingSeries = {
+    name: string;
+    color: string;
+    buffer: SeriesPoint[];
+    nextWrite: number;
+    size: number;
+  };
   type JointSeries = { name: string; color: string; data: SeriesPoint[] };
+  type PendingSample = {
+    names: string[];
+    positions: number[];
+    velocities: number[];
+  };
 
   const palette = [
     '#5b7cfa',
@@ -31,26 +45,92 @@
   let jointNames = $state<string[]>([]);
   let posSeries = $state<JointSeries[]>([]);
   let velSeries = $state<JointSeries[]>([]);
-  let lastPositions = $state<number[]>([]);
+  let posRing = $state<RingSeries[]>([]);
+  let velRing = $state<RingSeries[]>([]);
+  let lastRawPositions = $state<number[]>([]);
   let index = $state(0);
   let status = $state('idle');
   let plotWidth = $state(0);
   let posHeight = $state(0);
   let velHeight = $state(0);
   let unsubscribe: (() => void) | null = null;
+  let pendingSample: PendingSample | null = null;
+  let animationFrameId: number | null = null;
+  let lastRenderAt = 0;
+  const normalizedRenderFps = $derived(
+    Math.min(Math.max(Number(renderFps) || 24, 1), 60)
+  );
+  const renderIntervalMs = $derived(1000 / normalizedRenderFps);
 
-  const buildSeries = (names: string[]): JointSeries[] =>
+  const buildRing = (names: string[]): RingSeries[] =>
     names.map((name, idx) => ({
       name,
       color: palette[idx % palette.length],
-      data: []
+      buffer: [],
+      nextWrite: 0,
+      size: 0
     }));
 
-  const updateSeries = (series: JointSeries[], values: number[], nextIndex: number) =>
-    series.map((entry, idx) => ({
-      ...entry,
-      data: [...entry.data, { i: nextIndex, value: values[idx] ?? 0 }].slice(-maxPoints)
-    }));
+  const appendToRing = (rings: RingSeries[], values: number[], nextIndex: number) => {
+    for (let idx = 0; idx < rings.length; idx += 1) {
+      const ring = rings[idx];
+      const point = { i: nextIndex, value: values[idx] ?? 0 };
+      if (ring.size < maxPoints) {
+        ring.buffer.push(point);
+        ring.size += 1;
+        ring.nextWrite = ring.size % maxPoints;
+        continue;
+      }
+      ring.buffer[ring.nextWrite] = point;
+      ring.nextWrite = (ring.nextWrite + 1) % maxPoints;
+    }
+  };
+
+  const materializeSeries = (rings: RingSeries[]): JointSeries[] =>
+    rings.map((ring) => {
+      if (ring.size < maxPoints) {
+        return { name: ring.name, color: ring.color, data: ring.buffer.slice(0, ring.size) };
+      }
+      return {
+        name: ring.name,
+        color: ring.color,
+        data: [...ring.buffer.slice(ring.nextWrite), ...ring.buffer.slice(0, ring.nextWrite)]
+      };
+    });
+
+  const scheduleRender = () => {
+    if (typeof window === 'undefined') return;
+    if (animationFrameId != null) return;
+    animationFrameId = window.requestAnimationFrame((timestamp) => {
+      animationFrameId = null;
+      if (timestamp - lastRenderAt < renderIntervalMs) {
+        scheduleRender();
+        return;
+      }
+      lastRenderAt = timestamp;
+
+      if (!pendingSample) return;
+      const sample = pendingSample;
+      pendingSample = null;
+
+      const needsReset =
+        sample.names.length !== jointNames.length ||
+        sample.names.some((name, idx) => jointNames[idx] !== name);
+
+      if (needsReset) {
+        jointNames = [...sample.names];
+        posRing = buildRing(sample.names);
+        velRing = buildRing(sample.names);
+        index = 0;
+      }
+
+      index += 1;
+      appendToRing(posRing, sample.positions, index);
+      appendToRing(velRing, sample.velocities, index);
+      posSeries = materializeSeries(posRing);
+      velSeries = materializeSeries(velRing);
+    });
+  };
 
   const handleMessage = (msg: Record<string, unknown>) => {
     const positions = (msg.position as number[] | undefined) ?? [];
@@ -61,28 +141,20 @@
       (msg.name as string[] | undefined) ??
       positions.map((_, idx) => `joint_${idx + 1}`);
 
-    const needsReset =
-      names.length !== jointNames.length ||
-      names.some((name, idx) => jointNames[idx] !== name);
-
-    if (needsReset) {
-      jointNames = [...names];
-      posSeries = buildSeries(names);
-      velSeries = buildSeries(names);
-      index = 0;
-    }
-
     const resolvedVelocities =
       velocities.length === positions.length
         ? velocities
-        : lastPositions.length === positions.length
-          ? positions.map((value, idx) => value - (lastPositions[idx] ?? 0))
+        : lastRawPositions.length === positions.length
+          ? positions.map((value, idx) => value - (lastRawPositions[idx] ?? 0))
           : positions.map(() => 0);
 
-    index += 1;
-    posSeries = updateSeries(posSeries, positions, index);
-    velSeries = updateSeries(velSeries, resolvedVelocities, index);
-    lastPositions = positions;
+    lastRawPositions = positions;
+    pendingSample = {
+      names: [...names],
+      positions: [...positions],
+      velocities: [...resolvedVelocities]
+    };
+    scheduleRender();
   };
 
   const subscribe = () => {
@@ -102,14 +174,27 @@
       unsubscribe = null;
       posSeries = [];
       velSeries = [];
+      posRing = [];
+      velRing = [];
       jointNames = [];
       index = 0;
+      lastRawPositions = [];
+      pendingSample = null;
+      if (animationFrameId != null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+      }
       return;
     }
     subscribe();
     return () => {
       unsubscribe?.();
       unsubscribe = null;
+      pendingSample = null;
+      if (animationFrameId != null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+      }
     };
   });
 </script>
