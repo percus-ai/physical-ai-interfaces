@@ -9,6 +9,7 @@ from interfaces_backend.api.operate import get_operate_status
 from interfaces_backend.api.profiles import get_active_profile_status, get_vlabor_status
 from interfaces_backend.api.recording import get_session_status
 from interfaces_backend.api.training import get_job, get_job_metrics
+from interfaces_backend.services.startup_operations import get_startup_operations_service
 from interfaces_backend.utils.sse import sse_response
 from percus_ai.db import get_current_user_id
 
@@ -67,6 +68,19 @@ async def stream_operate_status(request: Request):
         }
 
     return sse_response(request, build_payload, interval=2.0)
+
+
+@router.get("/startup/operations/{operation_id}")
+async def stream_startup_operation(request: Request, operation_id: str):
+    user_id = _require_user_id()
+    operations = get_startup_operations_service()
+    operations.get(user_id=user_id, operation_id=operation_id)
+
+    async def build_payload() -> dict:
+        status = operations.get(user_id=user_id, operation_id=operation_id)
+        return status.model_dump(mode="json")
+
+    return sse_response(request, build_payload, interval=0.25)
 
 
 @router.get("/training/jobs/{job_id}")

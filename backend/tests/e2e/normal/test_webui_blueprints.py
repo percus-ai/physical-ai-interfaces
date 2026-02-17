@@ -169,6 +169,32 @@ def _setup_fake_backend(monkeypatch):
     return fake_client
 
 
+def _collect_view_types(node: dict) -> list[str]:
+    node_type = node.get("type")
+    if node_type == "view":
+        return [str(node.get("viewType"))]
+    if node_type == "split":
+        children = node.get("children") or []
+        return _collect_view_types(children[0]) + _collect_view_types(children[1])
+    if node_type == "tabs":
+        types: list[str] = []
+        for tab in node.get("tabs") or []:
+            child = tab.get("child")
+            if isinstance(child, dict):
+                types.extend(_collect_view_types(child))
+        return types
+    return []
+
+
+def test_default_blueprint_contains_timeline_as_bottom_pane():
+    blueprint = webui_api._default_blueprint()
+    assert blueprint["type"] == "split"
+    assert blueprint["direction"] == "column"
+    assert blueprint["children"][1]["type"] == "view"
+    assert blueprint["children"][1]["viewType"] == "timeline"
+    assert "timeline" in _collect_view_types(blueprint)
+
+
 def test_webui_blueprints_resolve_updates_last_used_at(client, monkeypatch):
     fake = _setup_fake_backend(monkeypatch)
 

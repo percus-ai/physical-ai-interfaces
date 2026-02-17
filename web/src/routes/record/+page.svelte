@@ -11,9 +11,16 @@
   type RecordingSummary = {
     recording_id: string;
     dataset_name?: string;
+    task?: string;
     profile_name?: string;
     created_at?: string;
     episode_count?: number;
+    target_total_episodes?: number;
+    remaining_episodes?: number;
+    episode_time_s?: number;
+    reset_time_s?: number;
+    continuable?: boolean;
+    continue_block_reason?: string;
     size_bytes?: number;
   };
 
@@ -187,9 +194,16 @@
           {#each recordings as recording}
             <tr class="border-t border-slate-200/60">
               <td class="py-3">
-                <a class="text-brand underline" href={`/record/sessions/${recording.recording_id}`}>
-                  {recording.dataset_name ?? recording.recording_id}
-                </a>
+                {#if recording.continuable}
+                  <a class="text-brand underline" href={`/record/continue/${encodeURIComponent(recording.recording_id)}`}>
+                    {recording.dataset_name ?? recording.recording_id}
+                  </a>
+                {:else}
+                  <span class="text-slate-500">{recording.dataset_name ?? recording.recording_id}</span>
+                  {#if recording.continue_block_reason}
+                    <p class="mt-1 text-[11px] text-slate-400">{recording.continue_block_reason}</p>
+                  {/if}
+                {/if}
               </td>
               <td class="py-3">{recording.profile_name ?? '-'}</td>
               <td class="py-3">{recording.episode_count ?? '-'}</td>

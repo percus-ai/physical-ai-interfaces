@@ -60,6 +60,9 @@ class RecorderBridge:
     def cancel_episode(self) -> dict:
         return self._call("/api/episode/cancel", {})
 
+    def next_episode(self) -> dict:
+        return self._call("/api/episode/next", {})
+
     # -- infrastructure -------------------------------------------------------
 
     def ensure_running(self) -> None:

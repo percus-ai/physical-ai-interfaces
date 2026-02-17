@@ -95,6 +95,7 @@ def _reset_backend_state() -> None:
     import interfaces_backend.api.calibration as calibration
     import interfaces_backend.api.recording as recording
     import interfaces_backend.services.inference_runtime as inference_runtime
+    import interfaces_backend.services.startup_operations as startup_operations
 
     calibration._sessions.clear()
     calibration._motor_buses.clear()
@@ -105,6 +106,8 @@ def _reset_backend_state() -> None:
     if inference_runtime._runtime_manager is not None:
         inference_runtime._runtime_manager.shutdown()
         inference_runtime._runtime_manager = None
+
+    startup_operations.reset_startup_operations_service()
 
 
 

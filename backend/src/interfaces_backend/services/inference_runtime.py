@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import zmq
 
@@ -284,6 +284,7 @@ class InferenceRuntimeManager:
         task: Optional[str],
         joint_names: Optional[list[str]] = None,
         camera_key_aliases: Optional[dict[str, str]] = None,
+        progress_callback: Optional[Callable[[str, float, str, Optional[dict[str, Any]]], None]] = None,
     ) -> str:
         with self._lock:
             if self._worker_proc and self._worker_proc.poll() is None:
@@ -345,6 +346,8 @@ class InferenceRuntimeManager:
         log_path = ipc_dir / "worker.log"
         worker_trace_path = ipc_dir / "worker_trace.jsonl"
         event_log_path = ipc_dir / "events.jsonl"
+        if progress_callback is not None:
+            progress_callback("launch_worker", 88.0, "推論ワーカーを起動しています...", None)
         worker_cmd += [
             "--trace-log-path",
             str(worker_trace_path),
@@ -423,6 +426,8 @@ class InferenceRuntimeManager:
             "execution_hz": _ACTION_HZ,
             "protocol": {"name": _PROTOCOL_NAME, "version": _PROTOCOL_VERSION},
         }
+        if progress_callback is not None:
+            progress_callback("launch_worker", 94.0, "ワーカーとハンドシェイクしています...", None)
         try:
             self._send_ctrl_command("start_session", start_payload, timeout_ms=_START_SESSION_TIMEOUT_MS)
         except Exception as exc:
@@ -432,6 +437,8 @@ class InferenceRuntimeManager:
             self._cleanup_worker_resources()
             raise
         self._refresh_state_from_worker()
+        if progress_callback is not None:
+            progress_callback("launch_worker", 98.0, "推論ワーカーの準備が完了しました。", None)
         return session_id
 
     def stop(self, session_id: Optional[str] = None) -> bool:

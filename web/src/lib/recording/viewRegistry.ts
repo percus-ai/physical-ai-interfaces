@@ -5,6 +5,7 @@ import StatusView from '$lib/components/recording/views/StatusView.svelte';
 import TopicsView from '$lib/components/recording/views/TopicsView.svelte';
 import ControlsView from '$lib/components/recording/views/ControlsView.svelte';
 import ProgressView from '$lib/components/recording/views/ProgressView.svelte';
+import TimelineView from '$lib/components/recording/views/TimelineView.svelte';
 import DevicesView from '$lib/components/recording/views/DevicesView.svelte';
 import PlaceholderView from '$lib/components/recording/views/PlaceholderView.svelte';
 
@@ -117,6 +118,12 @@ export const viewRegistry: ViewTypeDefinition[] = [
     label: 'Progress',
     description: 'Episode progress',
     component: ProgressView
+  },
+  {
+    type: 'timeline',
+    label: 'Timeline',
+    description: 'Recording timeline',
+    component: TimelineView
   },
   {
     type: 'devices',

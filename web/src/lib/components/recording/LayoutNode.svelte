@@ -14,6 +14,7 @@
     rosbridgeStatus = 'idle',
     mode = 'recording',
     editMode = true,
+    viewScale = 1,
     onSelect,
     onResize,
     onTabChange
@@ -25,6 +26,7 @@
     rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
     mode?: 'recording' | 'operate';
     editMode?: boolean;
+    viewScale?: number;
     onSelect: (id: string) => void;
     onResize: (id: string, sizes: [number, number]) => void;
     onTabChange: (id: string, activeId: string) => void;
@@ -52,7 +54,7 @@
       title: definition?.label ?? viewType,
       mode
     } as Record<string, unknown>;
-    if (viewType === 'controls' || viewType === 'progress') {
+    if (viewType === 'controls' || viewType === 'progress' || viewType === 'timeline') {
       baseProps.sessionId = sessionId;
       baseProps.recorderStatus = recorderStatus;
       baseProps.rosbridgeStatus = rosbridgeStatus;
@@ -62,6 +64,8 @@
 
   const viewType = $derived(node.type === 'view' ? node.viewType : 'placeholder');
   const ViewComponent = $derived(renderComponent(viewType));
+  const normalizedViewScale = $derived(Math.min(Math.max(viewScale, 0.25), 1));
+  const useVirtualRenderScale = $derived(normalizedViewScale < 0.999);
 </script>
 
 <div
@@ -88,6 +92,7 @@
             {rosbridgeStatus}
             {mode}
             {editMode}
+            {viewScale}
             {onSelect}
             {onResize}
             {onTabChange}
@@ -104,6 +109,7 @@
             {rosbridgeStatus}
             {mode}
             {editMode}
+            {viewScale}
             {onSelect}
             {onResize}
             {onTabChange}
@@ -123,6 +129,7 @@
             {rosbridgeStatus}
             {mode}
             {editMode}
+            {viewScale}
             {onSelect}
             {onResize}
             {onTabChange}
@@ -132,7 +139,15 @@
     </TabsView>
   {:else}
     <div class="h-full rounded-2xl border border-slate-200/60 bg-white/80 p-3 shadow-sm">
-      <ViewComponent {...buildProps(viewType)} />
+      {#if useVirtualRenderScale}
+        <div class="virtual-view">
+          <div class="virtual-view-inner" style={`--view-scale:${normalizedViewScale};`}>
+            <ViewComponent {...buildProps(viewType)} />
+          </div>
+        </div>
+      {:else}
+        <ViewComponent {...buildProps(viewType)} />
+      {/if}
     </div>
   {/if}
 </div>
@@ -147,5 +162,16 @@
   .layout-node.selected > div {
     outline: 2px solid rgba(91, 124, 250, 0.5);
     outline-offset: 2px;
+  }
+  .virtual-view {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+  .virtual-view-inner {
+    width: calc(100% / var(--view-scale));
+    height: calc(100% / var(--view-scale));
+    transform: scale(var(--view-scale));
+    transform-origin: top left;
   }
 </style>

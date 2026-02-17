@@ -69,6 +69,7 @@ from interfaces_backend.api import (
     platform_router,
     profiles_router,
     recording_router,
+    startup_router,
     storage_router,
     stream_router,
     system_router,
@@ -237,6 +238,7 @@ app.include_router(operate_router)
 app.include_router(platform_router)
 app.include_router(profiles_router)
 app.include_router(recording_router)
+app.include_router(startup_router)
 app.include_router(storage_router)
 app.include_router(stream_router)
 app.include_router(system_router)

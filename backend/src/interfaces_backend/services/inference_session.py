@@ -8,13 +8,18 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from interfaces_backend.models.inference import InferenceModelSyncStatus
 from interfaces_backend.services.dataset_lifecycle import DatasetLifecycle, get_dataset_lifecycle
 from interfaces_backend.services.inference_runtime import (
     InferenceRuntimeManager,
     get_inference_runtime_manager,
 )
 from interfaces_backend.services.recorder_bridge import RecorderBridge, get_recorder_bridge
-from interfaces_backend.services.session_manager import BaseSessionManager, SessionState
+from interfaces_backend.services.session_manager import (
+    BaseSessionManager,
+    SessionProgressCallback,
+    SessionState,
+)
 from interfaces_backend.services.vlabor_profiles import (
     build_inference_camera_aliases,
     build_inference_joint_names,
@@ -40,8 +45,18 @@ class InferenceSessionManager(BaseSessionManager):
         self._recorder = recorder or get_recorder_bridge()
         self._dataset = dataset or get_dataset_lifecycle()
 
-    async def create(self, *, profile: str | None = None, **kwargs: Any) -> SessionState:
-        state = await super().create(profile=profile, **kwargs)
+    async def create(
+        self,
+        *,
+        profile: str | None = None,
+        progress_callback: SessionProgressCallback | None = None,
+        **kwargs: Any,
+    ) -> SessionState:
+        state = await super().create(
+            profile=profile,
+            progress_callback=progress_callback,
+            **kwargs,
+        )
 
         joint_names = build_inference_joint_names(state.profile.snapshot)
         if not joint_names:
@@ -52,9 +67,66 @@ class InferenceSessionManager(BaseSessionManager):
         camera_key_aliases = build_inference_camera_aliases(state.profile.snapshot)
 
         # Download model from R2
-        await self._dataset.ensure_model_local(kwargs["model_id"])
+        self._emit_progress(
+            progress_callback,
+            phase="sync_model",
+            progress_percent=56.0,
+            message="モデル同期を開始します...",
+        )
+
+        def _on_model_sync(status: InferenceModelSyncStatus) -> None:
+            if progress_callback is None:
+                return
+            status_name = str(status.status or "").strip().lower()
+            phase = "sync_model"
+            detail = {
+                "files_done": status.files_done,
+                "total_files": status.total_files,
+                "transferred_bytes": status.transferred_bytes,
+                "total_bytes": status.total_bytes,
+                "current_file": status.current_file,
+            }
+            if status_name in {"checking", "syncing"}:
+                mapped_progress = 56.0 + (float(status.progress_percent or 0.0) * 0.26 / 100.0)
+                self._emit_progress(
+                    progress_callback,
+                    phase=phase,
+                    progress_percent=mapped_progress,
+                    message=status.message or "モデルを同期中です...",
+                    detail=detail,
+                )
+                return
+            if status_name == "completed":
+                self._emit_progress(
+                    progress_callback,
+                    phase=phase,
+                    progress_percent=82.0,
+                    message=status.message or "モデル同期が完了しました。",
+                    detail=detail,
+                )
+                return
+            if status_name == "error":
+                detail["error"] = status.error
+                self._emit_progress(
+                    progress_callback,
+                    phase=phase,
+                    progress_percent=82.0,
+                    message=status.message or "モデル同期に失敗しました。",
+                    detail=detail,
+                )
+
+        await self._dataset.ensure_model_local(
+            kwargs["model_id"],
+            sync_status_callback=_on_model_sync,
+        )
 
         # Start GPU worker
+        self._emit_progress(
+            progress_callback,
+            phase="launch_worker",
+            progress_percent=86.0,
+            message="推論ワーカーを起動しています...",
+        )
         try:
             worker_session_id = self._runtime.start(
                 model_id=kwargs["model_id"],
@@ -62,6 +134,7 @@ class InferenceSessionManager(BaseSessionManager):
                 task=kwargs.get("task"),
                 joint_names=joint_names,
                 camera_key_aliases=camera_key_aliases,
+                progress_callback=progress_callback,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -79,6 +152,12 @@ class InferenceSessionManager(BaseSessionManager):
         state.extras["model_id"] = kwargs["model_id"]
 
         # Simultaneous recording (best-effort)
+        self._emit_progress(
+            progress_callback,
+            phase="persist",
+            progress_percent=96.0,
+            message="推論セッション情報を保存しています...",
+        )
         self._start_simultaneous_recording(state, kwargs.get("task"))
 
         state.status = "running"

@@ -11,7 +11,7 @@ import threading
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -28,6 +28,8 @@ from interfaces_backend.services.vlabor_profiles import (
     save_session_profile_binding,
 )
 from percus_ai.db import get_current_user_id
+
+SessionProgressCallback = Callable[[str, float, str, dict[str, Any] | None], None]
 
 
 def require_user_id() -> str:
@@ -71,11 +73,43 @@ class BaseSessionManager(ABC):
 
     # -- lifecycle ------------------------------------------------------------
 
-    async def create(self, *, profile: str | None = None, **kwargs: Any) -> SessionState:
+    @staticmethod
+    def _emit_progress(
+        progress_callback: SessionProgressCallback | None,
+        *,
+        phase: str,
+        progress_percent: float,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(phase, progress_percent, message, detail)
+
+    async def create(
+        self,
+        *,
+        session_id: str | None = None,
+        profile: str | None = None,
+        progress_callback: SessionProgressCallback | None = None,
+        **kwargs: Any,
+    ) -> SessionState:
         """Resolve profile → start Docker → save binding → track state."""
         require_user_id()
+        self._emit_progress(
+            progress_callback,
+            phase="resolve_profile",
+            progress_percent=10.0,
+            message="プロファイルを解決しています...",
+        )
         resolved = await self._resolve_profile(profile)
 
+        self._emit_progress(
+            progress_callback,
+            phase="start_lerobot",
+            progress_percent=25.0,
+            message="Lerobotスタックを起動しています...",
+        )
         try:
             start_lerobot(strict=True)
         except LerobotCommandError as exc:
@@ -83,18 +117,35 @@ class BaseSessionManager(ABC):
                 status_code=500, detail=f"Failed to start lerobot stack: {exc}"
             ) from exc
 
-        session_id = self._generate_id()
+        self._emit_progress(
+            progress_callback,
+            phase="persist",
+            progress_percent=40.0,
+            message="セッション情報を初期化しています...",
+        )
+        resolved_session_id = session_id or self._generate_id()
         state = SessionState(
-            id=session_id,
+            id=resolved_session_id,
             kind=self.kind,
             profile=resolved,
             created_at=_utcnow_iso(),
         )
         with self._lock:
-            self._sessions[session_id] = state
+            if resolved_session_id in self._sessions:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Session already exists: {resolved_session_id}",
+                )
+            self._sessions[resolved_session_id] = state
 
         await save_session_profile_binding(
-            session_kind=self.kind, session_id=session_id, profile=resolved
+            session_kind=self.kind, session_id=resolved_session_id, profile=resolved
+        )
+        self._emit_progress(
+            progress_callback,
+            phase="persist",
+            progress_percent=55.0,
+            message="セッションバインドを保存しました。",
         )
         return state
 

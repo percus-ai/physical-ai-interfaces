@@ -2,7 +2,11 @@
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
+  import {
+    api,
+    type StartupOperationAcceptedResponse,
+    type StartupOperationStatusResponse
+  } from '$lib/api/client';
   import { connectStream } from '$lib/realtime/stream';
   import { queryClient } from '$lib/queryClient';
   import OperateStatusCards from '$lib/components/OperateStatusCards.svelte';
@@ -104,6 +108,15 @@
     }
   };
 
+  const formatBytes = (bytes?: number) => {
+    const value = Number(bytes ?? 0);
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${Math.round(value)} B`;
+  };
+
   const refetchQuery = async (snapshot?: { refetch?: () => Promise<unknown> }) => {
     if (snapshot && typeof snapshot.refetch === 'function') {
       await snapshot.refetch();
@@ -117,6 +130,21 @@
   let inferenceStopError = $state('');
   let inferenceStartPending = $state(false);
   let inferenceStopPending = $state(false);
+  let startupStatus = $state<StartupOperationStatusResponse | null>(null);
+  let startupStreamError = $state('');
+  let stopStartupStream = () => {};
+
+  const START_PHASE_LABELS: Record<string, string> = {
+    queued: 'キュー待機',
+    resolve_profile: 'プロファイル解決',
+    start_lerobot: 'Lerobot起動',
+    sync_model: 'モデル同期',
+    launch_worker: 'ワーカー起動',
+    prepare_recorder: '録画準備',
+    persist: '状態保存',
+    done: '完了',
+    error: '失敗'
+  };
 
   const emptyRunnerStatus: RunnerStatus = {};
   const emptyGpuStatus: GpuHostStatus = {};
@@ -133,11 +161,47 @@
     }
   });
 
+  const stopStartupStreamSubscription = () => {
+    stopStartupStream();
+    stopStartupStream = () => {};
+  };
+
+  const handleStartupStatusUpdate = async (status: StartupOperationStatusResponse) => {
+    startupStatus = status;
+    if (status.state === 'completed' && status.target_session_id) {
+      stopStartupStreamSubscription();
+      inferenceStartPending = false;
+      await refetchQuery($inferenceRunnerStatusQuery);
+      await goto(`/operate/sessions/${encodeURIComponent(status.target_session_id)}?kind=inference`);
+      return;
+    }
+    if (status.state === 'failed') {
+      inferenceStartPending = false;
+      inferenceStartError = status.error ?? status.message ?? '推論の開始に失敗しました。';
+    }
+  };
+
+  const subscribeStartupStream = (operationId: string) => {
+    stopStartupStreamSubscription();
+    startupStreamError = '';
+    stopStartupStream = connectStream<StartupOperationStatusResponse>({
+      path: `/api/stream/startup/operations/${encodeURIComponent(operationId)}`,
+      onMessage: (payload) => {
+        void handleStartupStatusUpdate(payload);
+      },
+      onError: () => {
+        startupStreamError = '進捗ストリームが一時的に不安定です。再接続します...';
+      }
+    });
+  };
+
   const handleInferenceStart = async () => {
     if (!selectedModelId) {
       inferenceStartError = '推論モデルを選択してください。';
       return;
     }
+    startupStatus = null;
+    startupStreamError = '';
     inferenceStartPending = true;
     inferenceStartError = '';
     inferenceStopError = '';
@@ -146,16 +210,15 @@
         model_id: selectedModelId,
         device: selectedDevice || $inferenceDeviceQuery.data?.recommended,
         task: task.trim() || undefined
-      })) as { session_id?: string };
-      await refetchQuery($inferenceRunnerStatusQuery);
-      const nextSessionId =
-        result?.session_id ?? ($inferenceRunnerStatusQuery.data?.runner_status?.session_id ?? '');
-      if (nextSessionId) {
-        await goto(`/operate/sessions/${encodeURIComponent(nextSessionId)}?kind=inference`);
+      })) as StartupOperationAcceptedResponse;
+      if (!result?.operation_id) {
+        throw new Error('開始オペレーションIDを取得できませんでした。');
       }
+      subscribeStartupStream(result.operation_id);
+      const snapshot = await api.startup.operation(result.operation_id);
+      await handleStartupStatusUpdate(snapshot);
     } catch (err) {
       inferenceStartError = err instanceof Error ? err.message : '推論の開始に失敗しました。';
-    } finally {
       inferenceStartPending = false;
     }
   };
@@ -178,6 +241,14 @@
   const runnerStatus = $derived($inferenceRunnerStatusQuery.data?.runner_status ?? emptyRunnerStatus);
   const gpuStatus = $derived($inferenceRunnerStatusQuery.data?.gpu_host_status ?? emptyGpuStatus);
   const runnerActive = $derived(Boolean(runnerStatus.active));
+  const startupProgressPercent = $derived(
+    Math.min(100, Math.max(0, Number(startupStatus?.progress_percent ?? 0)))
+  );
+  const startupState = $derived(startupStatus?.state ?? '');
+  const startupActive = $derived(startupState === 'queued' || startupState === 'running');
+  const showStartupBlock = $derived(Boolean(startupStatus) && (startupActive || startupState === 'failed'));
+  const startupPhaseLabel = $derived(START_PHASE_LABELS[startupStatus?.phase ?? ''] ?? (startupStatus?.phase ?? '-'));
+  const startupDetail = $derived(startupStatus?.detail ?? {});
 
   $effect(() => {
     const stopOperateStream = connectStream<OperateStatusStreamPayload>({
@@ -190,6 +261,12 @@
 
     return () => {
       stopOperateStream();
+    };
+  });
+
+  $effect(() => {
+    return () => {
+      stopStartupStreamSubscription();
     };
   });
 </script>
@@ -282,14 +359,13 @@
               {#each $inferenceModelsQuery.data.models as model}
                 {@const modelId = resolveModelId(model)}
                 <option value={modelId}>
-                  {model.name ?? modelId} ({model.policy_type ?? 'unknown'})
+                  {model.name ?? modelId} ({model.policy_type ?? 'unknown'}){model.is_local ? '' : ' / 未同期'}
                 </option>
               {/each}
             {:else}
               <option value="">モデルがありません</option>
             {/if}
           </select>
-          <p class="mt-2 text-xs text-slate-500">モデルがローカルに存在しない場合は先に同期してください。</p>
         </label>
 
         <div class="grid gap-3 sm:grid-cols-2">
@@ -323,12 +399,39 @@
             class="btn-primary"
             type="button"
             onclick={handleInferenceStart}
-            disabled={inferenceStartPending || !selectedModelId || runnerActive}
+            disabled={inferenceStartPending || startupActive || !selectedModelId || runnerActive}
             aria-busy={inferenceStartPending}
           >
-            推論を開始
+            {startupActive ? '準備中...' : '推論を開始'}
           </Button.Root>
         </div>
+        {#if showStartupBlock}
+          <div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+            <div class="flex items-center justify-between gap-3 text-xs text-emerald-800">
+              <p>{startupStatus?.message ?? '推論セッションを準備中です...'}</p>
+              <p class="font-semibold">{Math.round(startupProgressPercent)}%</p>
+            </div>
+            <p class="mt-1 text-xs text-emerald-900/80">フェーズ: {startupPhaseLabel}</p>
+            <div class="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100">
+              <div
+                class="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                style={`width: ${startupProgressPercent}%;`}
+              ></div>
+            </div>
+            {#if (startupDetail.total_files ?? 0) > 0 || (startupDetail.total_bytes ?? 0) > 0}
+              <p class="mt-2 text-xs text-emerald-900/80">
+                {startupDetail.files_done ?? 0}/{startupDetail.total_files ?? 0} files
+                · {formatBytes(startupDetail.transferred_bytes)} / {formatBytes(startupDetail.total_bytes)}
+                {#if startupDetail.current_file}
+                  · {startupDetail.current_file}
+                {/if}
+              </p>
+            {/if}
+            {#if startupStreamError}
+              <p class="mt-2 text-xs text-amber-700">{startupStreamError}</p>
+            {/if}
+          </div>
+        {/if}
         {#if inferenceStartError}
           <p class="text-xs text-rose-600">{inferenceStartError}</p>
         {/if}

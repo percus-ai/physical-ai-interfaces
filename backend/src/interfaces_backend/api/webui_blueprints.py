@@ -89,12 +89,25 @@ def _default_blueprint() -> dict[str, Any]:
             {"id": controls_tab_id, "title": "Controls", "child": controls_view},
         ],
     }
-    return {
+    upper = {
         "id": _new_node_id(),
         "type": "split",
         "direction": "row",
         "sizes": [0.7, 0.3],
         "children": [left, tabs],
+    }
+    timeline_view = {
+        "id": _new_node_id(),
+        "type": "view",
+        "viewType": "timeline",
+        "config": {},
+    }
+    return {
+        "id": _new_node_id(),
+        "type": "split",
+        "direction": "column",
+        "sizes": [0.78, 0.22],
+        "children": [upper, timeline_view],
     }
 
 

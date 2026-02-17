@@ -43,6 +43,21 @@ class InferenceRunnerStatus(BaseModel):
     last_error: Optional[str] = None
 
 
+class InferenceModelSyncStatus(BaseModel):
+    active: bool = False
+    status: str = Field("idle", description="idle | checking | syncing | completed | error")
+    model_id: Optional[str] = None
+    message: Optional[str] = None
+    progress_percent: float = 0.0
+    total_files: int = 0
+    files_done: int = 0
+    total_bytes: int = 0
+    transferred_bytes: int = 0
+    current_file: Optional[str] = None
+    error: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class GpuHostStatus(BaseModel):
     status: str = Field("stopped", description="running | idle | stopped | error")
     session_id: Optional[str] = None
@@ -53,17 +68,13 @@ class GpuHostStatus(BaseModel):
 class InferenceRunnerStatusResponse(BaseModel):
     runner_status: InferenceRunnerStatus
     gpu_host_status: GpuHostStatus
+    model_sync: InferenceModelSyncStatus = Field(default_factory=InferenceModelSyncStatus)
 
 
 class InferenceRunnerStartRequest(BaseModel):
     model_id: str
     device: Optional[str] = None
     task: Optional[str] = None
-
-
-class InferenceRunnerStartResponse(BaseModel):
-    session_id: str
-    message: str = "inference worker started"
 
 
 class InferenceRunnerStopRequest(BaseModel):

@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import interfaces_backend.api.inference as inference_api
+from interfaces_backend.models.startup import StartupOperationAcceptedResponse
 
 
 def test_inference_models_lists_local_models(client):
@@ -29,7 +30,7 @@ def test_inference_runner_diagnostics_endpoint_with_mock_manager(client, monkeyp
         def get_diagnostics(self):
             return {"state": "running", "logs": {"worker_trace_path": "/tmp/worker_trace.jsonl"}}
 
-    monkeypatch.setattr(inference_api, "_manager", lambda: MockManager())
+    monkeypatch.setattr(inference_api, "get_inference_runtime_manager", lambda: MockManager())
 
     response = client.get("/api/inference/runner/diagnostics")
     assert response.status_code == 200
@@ -38,56 +39,26 @@ def test_inference_runner_diagnostics_endpoint_with_mock_manager(client, monkeyp
     assert payload["logs"]["worker_trace_path"].endswith("worker_trace.jsonl")
 
 
-def test_inference_runner_start_and_stop_with_mock_manager(client, monkeypatch):
-    class MockProfile:
-        name = "so101_dual_teleop"
-        snapshot = {}
+def test_inference_runner_start_returns_operation_id(client, monkeypatch):
+    accepted = StartupOperationAcceptedResponse(operation_id="op-inference", message="accepted")
 
-    async def _mock_active_profile():
-        return MockProfile()
+    class _FakeOperations:
+        def create(self, *, user_id: str, kind: str):
+            assert user_id == "user-1"
+            assert kind == "inference_start"
+            return accepted
 
-    async def _mock_save_session_profile_binding(**_kwargs):
+    def _fake_create_task(coro):
+        coro.close()
         return None
 
-    class MockManager:
-        def start(
-            self,
-            model_id: str,
-            device: str | None,
-            task: str | None,
-            joint_names: list[str],
-            camera_key_aliases: dict[str, str],
-        ) -> str:
-            assert model_id == "model_a"
-            assert device == "cpu"
-            assert task == "pick"
-            assert joint_names == ["joint_a", "joint_b"]
-            assert camera_key_aliases == {"front": "cam_front"}
-            return "sess-001"
-
-        def stop(self, session_id: str | None) -> bool:
-            assert session_id == "sess-001"
-            return True
-
-    monkeypatch.setattr(inference_api, "get_active_profile_spec", _mock_active_profile)
-    monkeypatch.setattr(inference_api, "build_inference_joint_names", lambda *_args, **_kwargs: ["joint_a", "joint_b"])
-    monkeypatch.setattr(
-        inference_api,
-        "build_inference_camera_aliases",
-        lambda *_args, **_kwargs: {"front": "cam_front"},
-    )
-    monkeypatch.setattr(inference_api, "_start_vlabor_for_session", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(inference_api, "_stop_vlabor_for_session", lambda: None)
-    monkeypatch.setattr(inference_api, "save_session_profile_binding", _mock_save_session_profile_binding)
-    monkeypatch.setattr(inference_api, "_manager", lambda: MockManager())
+    monkeypatch.setattr(inference_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(inference_api, "get_startup_operations_service", lambda: _FakeOperations())
+    monkeypatch.setattr(inference_api.asyncio, "create_task", _fake_create_task)
 
     start = client.post(
         "/api/inference/runner/start",
         json={"model_id": "model_a", "device": "cpu", "task": "pick"},
     )
-    assert start.status_code == 200
-    assert start.json()["session_id"] == "sess-001"
-
-    stop = client.post("/api/inference/runner/stop", json={"session_id": "sess-001"})
-    assert stop.status_code == 200
-    assert stop.json()["success"] is True
+    assert start.status_code == 202
+    assert start.json()["operation_id"] == "op-inference"

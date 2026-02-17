@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 from fastapi import HTTPException
 
+from interfaces_backend.models.inference import InferenceModelSyncStatus
 from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.paths import get_datasets_dir, get_user_config_path
 from percus_ai.storage.r2_db_sync import R2DBSyncService
@@ -26,6 +28,8 @@ class DatasetLifecycle:
 
     def __init__(self) -> None:
         self._sync: R2DBSyncService | None = None
+        self._model_sync_lock = threading.Lock()
+        self._model_sync_status = InferenceModelSyncStatus()
 
     # -- DB operations --------------------------------------------------------
 
@@ -36,6 +40,9 @@ class DatasetLifecycle:
         task: str,
         profile_snapshot: Optional[dict],
         status: str,
+        target_total_episodes: int | None = None,
+        episode_time_s: float | None = None,
+        reset_time_s: float | None = None,
         dataset_type: str = "recorded",
     ) -> None:
         """Insert or update a dataset record in the datasets table."""
@@ -49,6 +56,12 @@ class DatasetLifecycle:
             "profile_instance_id": None,
             "profile_snapshot": profile_snapshot,
         }
+        if target_total_episodes is not None:
+            payload["target_total_episodes"] = target_total_episodes
+        if episode_time_s is not None:
+            payload["episode_time_s"] = episode_time_s
+        if reset_time_s is not None:
+            payload["reset_time_s"] = reset_time_s
         await upsert_with_owner("datasets", "id", payload)
 
     async def update_stats(self, dataset_id: str) -> None:
@@ -113,15 +126,144 @@ class DatasetLifecycle:
         except Exception:
             logger.error("Auto-upload failed for dataset %s", dataset_id, exc_info=True)
 
-    async def ensure_model_local(self, model_id: str) -> None:
+    async def ensure_model_local(
+        self,
+        model_id: str,
+        sync_status_callback: Optional[Callable[[InferenceModelSyncStatus], None]] = None,
+    ) -> None:
         """Download a model from R2 if not cached locally."""
+        status_snapshot = self._set_model_sync_status(
+            active=True,
+            status="checking",
+            model_id=model_id,
+            message="モデルの同期状態を確認しています...",
+            progress_percent=0.0,
+            total_files=0,
+            files_done=0,
+            total_bytes=0,
+            transferred_bytes=0,
+            current_file=None,
+            error=None,
+        )
+        if sync_status_callback is not None:
+            sync_status_callback(status_snapshot)
+
+        def on_sync_progress(progress: dict) -> None:
+            event_type = str(progress.get("type") or "")
+            total_files = self._to_int(progress.get("total_files"))
+            files_done = self._to_int(progress.get("files_done"))
+            total_bytes = self._to_int(progress.get("total_size"))
+            transferred_bytes = self._to_int(
+                progress.get("bytes_done_total", progress.get("bytes_transferred"))
+            )
+            current_file = progress.get("current_file")
+            if event_type == "start":
+                snapshot = self._set_model_sync_status(
+                    active=True,
+                    status="syncing",
+                    message="モデルをクラウドから同期中です...",
+                    total_files=total_files,
+                    files_done=0,
+                    total_bytes=total_bytes,
+                    transferred_bytes=0,
+                    current_file=None,
+                    progress_percent=0.0,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+                return
+            if event_type in {"downloading", "progress", "downloaded"}:
+                progress_percent = self._compute_progress_percent(
+                    total_files=total_files,
+                    files_done=files_done,
+                    total_bytes=total_bytes,
+                    transferred_bytes=transferred_bytes,
+                )
+                snapshot = self._set_model_sync_status(
+                    active=True,
+                    status="syncing",
+                    message="モデルをクラウドから同期中です...",
+                    total_files=total_files,
+                    files_done=files_done,
+                    total_bytes=total_bytes,
+                    transferred_bytes=transferred_bytes,
+                    current_file=str(current_file) if current_file else None,
+                    progress_percent=progress_percent,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+                return
+            if event_type == "complete":
+                snapshot = self._set_model_sync_status(
+                    active=False,
+                    status="completed",
+                    message="モデル同期が完了しました。",
+                    progress_percent=100.0,
+                    files_done=total_files,
+                    total_files=total_files,
+                    transferred_bytes=total_bytes,
+                    total_bytes=total_bytes,
+                    current_file=None,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+                return
+            if event_type == "error":
+                snapshot = self._set_model_sync_status(
+                    active=False,
+                    status="error",
+                    message="モデル同期に失敗しました。",
+                    error=str(progress.get("error") or "unknown error"),
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+
         sync_result = await self._get_sync_service().ensure_model_local(
-            model_id, auto_download=True
+            model_id,
+            auto_download=True,
+            progress_callback=on_sync_progress,
         )
         if not sync_result.success:
+            snapshot = self._set_model_sync_status(
+                active=False,
+                status="error",
+                message="モデル同期に失敗しました。",
+                error=sync_result.message,
+            )
+            if sync_status_callback is not None:
+                sync_status_callback(snapshot)
             raise HTTPException(
                 status_code=404, detail=f"Model not available: {sync_result.message}"
             )
+        if sync_result.skipped:
+            snapshot = self._set_model_sync_status(
+                active=False,
+                status="completed",
+                message="ローカルキャッシュを利用しました。",
+                progress_percent=100.0,
+                current_file=None,
+                error=None,
+            )
+            if sync_status_callback is not None:
+                sync_status_callback(snapshot)
+        else:
+            snapshot = self._set_model_sync_status(
+                active=False,
+                status="completed",
+                message="モデル同期が完了しました。",
+                progress_percent=100.0,
+                current_file=None,
+                error=None,
+            )
+            if sync_status_callback is not None:
+                sync_status_callback(snapshot)
+
+    def get_model_sync_status(self) -> InferenceModelSyncStatus:
+        with self._model_sync_lock:
+            return self._model_sync_status.model_copy(deep=True)
 
     # -- internal helpers -----------------------------------------------------
 
@@ -138,6 +280,41 @@ class DatasetLifecycle:
         if self._sync is None:
             self._sync = R2DBSyncService()
         return self._sync
+
+    @staticmethod
+    def _to_int(value: object) -> int:
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _compute_progress_percent(
+        *,
+        total_files: int,
+        files_done: int,
+        total_bytes: int,
+        transferred_bytes: int,
+    ) -> float:
+        if total_bytes > 0:
+            return round(min(max(transferred_bytes / total_bytes, 0.0), 1.0) * 100, 2)
+        if total_files > 0:
+            return round(min(max(files_done / total_files, 0.0), 1.0) * 100, 2)
+        return 0.0
+
+    def _set_model_sync_status(self, **updates: object) -> InferenceModelSyncStatus:
+        with self._model_sync_lock:
+            payload = self._model_sync_status.model_dump(mode="python")
+            payload.update(updates)
+            progress_percent = payload.get("progress_percent")
+            try:
+                normalized = float(progress_percent or 0.0)
+            except (TypeError, ValueError):
+                normalized = 0.0
+            payload["progress_percent"] = min(max(normalized, 0.0), 100.0)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._model_sync_status = InferenceModelSyncStatus.model_validate(payload)
+            return self._model_sync_status.model_copy(deep=True)
 
 
 # -- singleton ----------------------------------------------------------------

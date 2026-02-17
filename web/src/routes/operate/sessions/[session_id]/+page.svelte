@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/state';
-  import { Button } from 'bits-ui';
+  import { Button, Tabs } from 'bits-ui';
+  import toast from 'svelte-french-toast';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
   import { connectStream } from '$lib/realtime/stream';
@@ -101,14 +102,28 @@
   let lastSessionKind = '';
   let filledDefaults = $state(false);
   let editMode = $state(false);
+  let editInspectorTab = $state<'blueprint' | 'selection'>('blueprint');
+  let editorShellEl = $state<HTMLDivElement | null>(null);
+  let editorToolbarEl = $state<HTMLDivElement | null>(null);
+  let editorContentEl = $state<HTMLDivElement | null>(null);
+  let editorRightPaneWidth = $state(360);
+  let editorViewScale = $state(1);
 
   let activeBlueprintId = $state('');
   let activeBlueprintName = $state('');
   let savedBlueprints = $state<WebuiBlueprintSummary[]>([]);
   let blueprintBusy = $state(false);
   let blueprintActionPending = $state(false);
-  let blueprintError = $state('');
-  let blueprintNotice = $state('');
+
+  const notifyBlueprintError = (message: string) => {
+    if (!message || typeof window === 'undefined') return;
+    toast.error(message);
+  };
+
+  const notifyBlueprintNotice = (message: string) => {
+    if (!message || typeof window === 'undefined') return;
+    toast.success(message);
+  };
 
   $effect(() => {
     if (!selectedId && blueprint?.id) {
@@ -180,10 +195,10 @@
       blueprintActionPending = value;
     },
     setError: (message) => {
-      blueprintError = message;
+      notifyBlueprintError(message);
     },
     setNotice: (message) => {
-      blueprintNotice = message;
+      notifyBlueprintNotice(message);
     },
     applyBlueprintDetail
   });
@@ -194,6 +209,18 @@
   const handleDuplicateBlueprint = blueprintManager.duplicateBlueprint;
   const handleDeleteBlueprint = blueprintManager.deleteBlueprint;
   const handleResetBlueprint = blueprintManager.resetBlueprint;
+  const handleSaveBlueprintWithToast = async () => {
+    if (typeof window === 'undefined') {
+      await handleSaveBlueprint();
+      return;
+    }
+    const loadingToastId = toast.loading('保存中...');
+    try {
+      await handleSaveBlueprint();
+    } finally {
+      toast.dismiss(loadingToastId);
+    }
+  };
 
   onMount(() => {
     mounted = true;
@@ -327,8 +354,61 @@
     selectedId = ensureValidSelection(blueprint, selectedId);
   };
 
+  const recomputeEditorPaneWidth = () => {
+    if (typeof window === 'undefined') return;
+    if (!editorShellEl || !editorToolbarEl || !editorContentEl) return;
+    if (!window.matchMedia('(min-width: 1024px)').matches) {
+      editorRightPaneWidth = 360;
+      editorViewScale = 1;
+      return;
+    }
+
+    const shellWidth = editorShellEl.clientWidth;
+    const shellHeight = editorShellEl.clientHeight;
+    const toolbarHeight = editorToolbarEl.getBoundingClientRect().height;
+    const rowGap = Number.parseFloat(window.getComputedStyle(editorShellEl).rowGap || '0') || 0;
+    const columnGap = Number.parseFloat(window.getComputedStyle(editorContentEl).columnGap || '0') || 0;
+    const contentWidth = editorContentEl.clientWidth;
+
+    if (shellWidth <= 0 || shellHeight <= 0 || contentWidth <= 0) return;
+
+    const viewAspectRatio = shellWidth / shellHeight;
+    const editableViewHeight = Math.max(shellHeight - toolbarHeight - rowGap, 1);
+    const targetViewWidth = viewAspectRatio * editableViewHeight;
+    const computedRightWidth = contentWidth - columnGap - targetViewWidth;
+    const nextRightWidth = Math.max(220, computedRightWidth);
+    const actualLeftWidth = Math.max(contentWidth - columnGap - nextRightWidth, 1);
+    editorRightPaneWidth = nextRightWidth;
+    editorViewScale = Math.min(actualLeftWidth / shellWidth, editableViewHeight / shellHeight);
+  };
+
+  $effect(() => {
+    if (typeof window === 'undefined' || !editMode) return;
+    if (!editorShellEl || !editorToolbarEl || !editorContentEl) return;
+
+    const observer = new ResizeObserver(() => {
+      recomputeEditorPaneWidth();
+    });
+    observer.observe(editorShellEl);
+    observer.observe(editorToolbarEl);
+    observer.observe(editorContentEl);
+    const onResize = () => {
+      recomputeEditorPaneWidth();
+    };
+    window.addEventListener('resize', onResize);
+    recomputeEditorPaneWidth();
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', onResize);
+    };
+  });
+
   const toggleEditMode = () => {
     editMode = !editMode;
+    if (editMode) {
+      editInspectorTab = 'blueprint';
+    }
   };
 
   const refreshStatus = async () => {
@@ -351,16 +431,6 @@
     return '不明';
   });
 
-  const statusDetail = $derived.by(() => {
-    if (resolvedKind === 'inference') {
-      return runnerStatus.last_error ?? '';
-    }
-    if (resolvedKind === 'teleop') {
-      return vlaborStatus.status_detail ?? '';
-    }
-    return '';
-  });
-
   const sessionSubtitle = $derived.by(() => {
     if (resolvedKind === 'inference') {
       return runnerStatus.task ?? '';
@@ -379,7 +449,7 @@
     <div>
       <p class="section-title">Operate Session</p>
       <h1 class="text-3xl font-semibold text-slate-900">{sessionLabel} セッション</h1>
-      <p class="mt-2 text-sm text-slate-600">{sessionSubtitle || 'セッション情報を同期中...'}</p>
+      <!-- <p class="mt-2 text-sm text-slate-600">{sessionSubtitle || 'セッション情報を同期中...'}</p>x
       <div class="mt-3 flex flex-wrap gap-2">
         <span class="chip">状態: {statusLabel}</span>
         {#if sessionId}
@@ -388,9 +458,9 @@
       </div>
       {#if $inferenceRunnerStatusQuery.isLoading || $vlaborStatusQuery.isLoading}
         <p class="mt-2 text-xs text-slate-500">ステータス取得中...</p>
-      {/if}
+      {/if} -->
     </div>
-    <div class="flex flex-wrap gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-3">
       <Button.Root class="btn-ghost" type="button" onclick={toggleEditMode}>
         {editMode ? '閲覧モード' : '編集モード'}
       </Button.Root>
@@ -400,40 +470,38 @@
   </div>
 </section>
 
-<section class={`grid gap-6 ${editMode ? 'lg:grid-cols-[260px_minmax(0,1fr)_320px]' : 'lg:grid-cols-[minmax(0,1fr)]'}`}>
+<section class="grid gap-6">
   {#if editMode}
-    <aside class="card p-4">
-      <div class="flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-slate-700">Blueprint</h2>
-        <span class="text-[10px] text-slate-400">{selectedNode?.type ?? 'none'}</span>
-      </div>
-      <div class="mt-3 space-y-3">
-        <div class="rounded-xl border border-slate-200/60 bg-white/70 p-3">
-          <p class="label">保存済みブループリント</p>
-          <div class="mt-2">
-            <BlueprintCombobox
-              items={savedBlueprints}
-              value={activeBlueprintId}
-              disabled={blueprintBusy || blueprintActionPending || !blueprintKind}
-              onSelect={(blueprintId) => {
-                handleOpenBlueprint(blueprintId);
-              }}
-            />
+    <div class="card p-4 min-h-[640px] lg:h-[var(--app-shell-height)]">
+      <div class="grid h-full grid-rows-[auto_minmax(0,1fr)] gap-4" bind:this={editorShellEl}>
+        <div class="rounded-xl border border-slate-200/60 bg-white/70 p-3" bind:this={editorToolbarEl}>
+          <div class="flex flex-wrap items-end gap-3">
+          <div class="min-w-[240px] flex-1">
+            <p class="label">保存済みブループリント</p>
+            <div class="mt-2">
+              <BlueprintCombobox
+                items={savedBlueprints}
+                value={activeBlueprintId}
+                disabled={blueprintBusy || blueprintActionPending || !blueprintKind}
+                onSelect={(blueprintId) => {
+                  handleOpenBlueprint(blueprintId);
+                }}
+              />
+            </div>
           </div>
-          <p class="mt-2 text-[11px] text-slate-500">編集中の内容はローカルに自動保存されます。</p>
 
-          <label class="mt-3 block text-xs font-semibold text-slate-600">
+          <label class="min-w-[220px] flex-1 text-xs font-semibold text-slate-600">
             <span>名前</span>
             <input class="input mt-1" type="text" bind:value={activeBlueprintName} />
           </label>
 
-          <div class="mt-3 grid grid-cols-2 gap-2">
+          <div class="flex flex-wrap gap-2">
             <Button.Root
               class="btn-primary"
               type="button"
               disabled={blueprintBusy || blueprintActionPending || !activeBlueprintId || !blueprintKind}
               onclick={() => {
-                handleSaveBlueprint();
+                void handleSaveBlueprintWithToast();
               }}
             >
               保存
@@ -469,186 +537,201 @@
               削除
             </Button.Root>
           </div>
+          </div>
+          <p class="mt-2 text-[11px] text-slate-500">編集中の内容はローカルに自動保存されます。</p>
 
-          {#if blueprintBusy || blueprintActionPending}
-            <p class="mt-2 text-xs text-slate-500">ブループリント処理中...</p>
-          {/if}
-          {#if blueprintError}
-            <p class="mt-2 text-xs text-rose-600">{blueprintError}</p>
-          {/if}
-          {#if blueprintNotice}
-            <p class="mt-2 text-xs text-emerald-600">{blueprintNotice}</p>
-          {/if}
         </div>
 
-        <BlueprintTree node={blueprint} selectedId={selectedId} onSelect={updateSelection} />
-      </div>
-    </aside>
-  {/if}
+        <div
+          class="min-h-0 grid gap-4 lg:grid-cols-[minmax(0,1fr)_var(--editor-right-pane-width)]"
+          style={`--editor-right-pane-width:${Math.round(editorRightPaneWidth)}px;`}
+          bind:this={editorContentEl}
+        >
+        <div class="min-h-0 rounded-xl border border-slate-200/60 bg-white/70 p-2">
+          <LayoutNode
+            node={blueprint}
+            selectedId={selectedId}
+            sessionId={sessionId}
+            mode="operate"
+            editMode={editMode}
+            viewScale={editorViewScale}
+            onSelect={updateSelection}
+            onResize={handleResize}
+            onTabChange={handleTabChange}
+          />
+        </div>
 
-  <div class="card p-4 min-h-[640px]">
-    <LayoutNode
-      node={blueprint}
-      selectedId={selectedId}
-      sessionId={sessionId}
-      mode="operate"
-      editMode={editMode}
-      onSelect={updateSelection}
-      onResize={handleResize}
-      onTabChange={handleTabChange}
-    />
-  </div>
+        <aside class="min-h-0 rounded-xl border border-slate-200/60 bg-white/70 p-3 lg:overflow-y-auto">
+          <Tabs.Root bind:value={editInspectorTab}>
+            <Tabs.List class="inline-grid grid-cols-2 gap-1 rounded-full border border-slate-200/70 bg-slate-100/80 p-1">
+              <Tabs.Trigger
+                value="blueprint"
+                class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
+              >
+                Blueprint
+              </Tabs.Trigger>
+              <Tabs.Trigger
+                value="selection"
+                class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
+              >
+                Selection
+              </Tabs.Trigger>
+            </Tabs.List>
 
-  {#if editMode}
-    <aside class="card p-4">
-      <h2 class="text-sm font-semibold text-slate-700">Selection</h2>
-      {#if !selectedNode}
-        <p class="mt-3 text-xs text-slate-500">選択されていません。</p>
-      {:else if selectedNode.type === 'view'}
-        <div class="mt-3 space-y-4 text-sm text-slate-700">
-          <div>
-            <p class="label">View Type</p>
-            <select
-              class="input mt-2"
-              value={selectedViewNode?.viewType}
-              onchange={(event) => handleViewTypeChange((event.target as HTMLSelectElement).value)}
-            >
-              <option value="placeholder">Empty</option>
-              {#each getViewOptions() as option}
-                <option value={option.type}>{option.label}</option>
-              {/each}
-            </select>
-          </div>
+            <Tabs.Content value="blueprint" class="mt-3">
+              <BlueprintTree node={blueprint} selectedId={selectedId} onSelect={updateSelection} />
+            </Tabs.Content>
 
-          {#if selectedViewNode}
-            {#each getViewDefinition(selectedViewNode.viewType)?.fields ?? [] as field}
-              {#if field.type === 'topic'}
-                <div>
-                  <p class="label">{field.label}</p>
-                  <select
-                    class="input mt-2"
-                    value={(selectedViewNode.config?.[field.key] as string) ?? ''}
-                    onchange={(event) => handleConfigChange(field.key, (event.target as HTMLSelectElement).value)}
-                  >
-                    <option value="">未選択</option>
-                    {#each ($topicsQuery.data?.topics ?? []).filter((topic) => field.filter?.(topic) ?? true) as topic}
-                      <option value={topic}>{topic}</option>
-                    {/each}
-                  </select>
-                </div>
-              {:else if field.type === 'boolean'}
-                <label class="flex items-center gap-2 text-xs text-slate-600">
-                  <input
-                    type="checkbox"
-                    class="h-4 w-4 rounded border-slate-300"
-                    checked={Boolean(selectedViewNode.config?.[field.key])}
-                    onchange={(event) => handleConfigChange(field.key, (event.target as HTMLInputElement).checked)}
-                  />
-                  {field.label}
-                </label>
-              {:else if field.type === 'number'}
-                <div>
-                  <p class="label">{field.label}</p>
-                  <input
-                    class="input mt-2"
-                    type="number"
-                    min="10"
-                    value={Number(selectedViewNode.config?.[field.key] ?? 160)}
-                    onchange={(event) => handleConfigChange(field.key, Number((event.target as HTMLInputElement).value))}
-                  />
-                </div>
+            <Tabs.Content value="selection" class="mt-3">
+              {#if !selectedNode}
+                <p class="text-xs text-slate-500">選択されていません。</p>
+              {:else if selectedNode.type === 'view'}
+                <div class="space-y-4 text-sm text-slate-700">
+              <div>
+                <p class="label">View Type</p>
+                <select
+                  class="input mt-2"
+                  value={selectedViewNode?.viewType}
+                  onchange={(event) => handleViewTypeChange((event.target as HTMLSelectElement).value)}
+                >
+                  <option value="placeholder">Empty</option>
+                  {#each getViewOptions() as option}
+                    <option value={option.type}>{option.label}</option>
+                  {/each}
+                </select>
+              </div>
+
+              {#if selectedViewNode}
+                {#each getViewDefinition(selectedViewNode.viewType)?.fields ?? [] as field}
+                  {#if field.type === 'topic'}
+                    <div>
+                      <p class="label">{field.label}</p>
+                      <select
+                        class="input mt-2"
+                        value={(selectedViewNode.config?.[field.key] as string) ?? ''}
+                        onchange={(event) => handleConfigChange(field.key, (event.target as HTMLSelectElement).value)}
+                      >
+                        <option value="">未選択</option>
+                        {#each ($topicsQuery.data?.topics ?? []).filter((topic) => field.filter?.(topic) ?? true) as topic}
+                          <option value={topic}>{topic}</option>
+                        {/each}
+                      </select>
+                    </div>
+                  {:else if field.type === 'boolean'}
+                    <label class="flex items-center gap-2 text-xs text-slate-600">
+                      <input
+                        type="checkbox"
+                        class="h-4 w-4 rounded border-slate-300"
+                        checked={Boolean(selectedViewNode.config?.[field.key])}
+                        onchange={(event) => handleConfigChange(field.key, (event.target as HTMLInputElement).checked)}
+                      />
+                      {field.label}
+                    </label>
+                  {:else if field.type === 'number'}
+                    <div>
+                      <p class="label">{field.label}</p>
+                      <input
+                        class="input mt-2"
+                        type="number"
+                        min="10"
+                        value={Number(selectedViewNode.config?.[field.key] ?? 160)}
+                        onchange={(event) => handleConfigChange(field.key, Number((event.target as HTMLInputElement).value))}
+                      />
+                    </div>
+                  {/if}
+                {/each}
               {/if}
-            {/each}
-          {/if}
 
-          <div class="divider"></div>
-          <div class="space-y-2">
-            <Button.Root class="btn-ghost w-full" type="button" onclick={() => handleSplit('row')}>横分割</Button.Root>
-            <Button.Root class="btn-ghost w-full" type="button" onclick={() => handleSplit('column')}>縦分割</Button.Root>
-            <Button.Root class="btn-ghost w-full" type="button" onclick={handleTabs}>タブ化</Button.Root>
-            <Button.Root
-              class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
-              type="button"
-              onclick={() => handleDeleteSelected('view')}
-            >
-              このビューを削除
-            </Button.Root>
-          </div>
-        </div>
-      {:else if selectedNode.type === 'split'}
-        <div class="mt-3 space-y-4 text-sm text-slate-700">
-          <div>
-            <p class="label">Direction</p>
-            <select
-              class="input mt-2"
-              value={selectedSplitNode?.direction}
-              onchange={(event) => {
-                const nextDirection = (event.target as HTMLSelectElement).value as 'row' | 'column';
-                if (selectedSplitNode) {
-                  blueprint = updateSplitDirection(blueprint, selectedSplitNode.id, nextDirection);
-                }
-              }}
-            >
-              <option value="row">横</option>
-              <option value="column">縦</option>
-            </select>
-          </div>
-          <p class="text-xs text-slate-500">ドラッグで比率を変更できます。</p>
-          <Button.Root
-            class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
-            type="button"
-            onclick={() => handleDeleteSelected('split')}
-          >
-            分割を解除
-          </Button.Root>
-        </div>
-      {:else if selectedNode.type === 'tabs'}
-        <div class="mt-3 space-y-4 text-sm text-slate-700">
-          <div class="flex items-center justify-between">
-            <p class="label">Tabs</p>
-            <Button.Root class="btn-ghost" type="button" onclick={handleAddTab}>タブ追加</Button.Root>
-          </div>
-          <div class="space-y-2">
-            {#each selectedTabsNode?.tabs ?? [] as tab}
-              <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
-                <input
-                  class="input"
-                  type="text"
-                  value={tab.title}
-                  onchange={(event) => handleRenameTab(tab.id, (event.target as HTMLInputElement).value)}
-                />
-                <Button.Root class="btn-ghost mt-2 w-full" type="button" onclick={() => handleRemoveTab(tab.id)}>
-                  このタブを削除
+              <div class="divider"></div>
+              <div class="space-y-2">
+                <Button.Root class="btn-ghost w-full" type="button" onclick={() => handleSplit('row')}>横分割</Button.Root>
+                <Button.Root class="btn-ghost w-full" type="button" onclick={() => handleSplit('column')}>縦分割</Button.Root>
+                <Button.Root class="btn-ghost w-full" type="button" onclick={handleTabs}>タブ化</Button.Root>
+                <Button.Root
+                  class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
+                  type="button"
+                  onclick={() => handleDeleteSelected('view')}
+                >
+                  このビューを削除
                 </Button.Root>
               </div>
-            {/each}
-          </div>
-          <Button.Root
-            class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
-            type="button"
-            onclick={() => handleDeleteSelected('tabs')}
-          >
-            タブセットを解除
-          </Button.Root>
-        </div>
-      {/if}
-    </aside>
-  {/if}
-</section>
-
-<section class="card p-4">
-  <div class="flex flex-wrap items-center justify-between gap-3">
-    <div>
-      <p class="label">Session Timeline</p>
-      <p class="text-sm font-semibold text-slate-700">セッションタイムライン（実装準備）</p>
+                </div>
+              {:else if selectedNode.type === 'split'}
+                <div class="space-y-4 text-sm text-slate-700">
+              <div>
+                <p class="label">Direction</p>
+                <select
+                  class="input mt-2"
+                  value={selectedSplitNode?.direction}
+                  onchange={(event) => {
+                    const nextDirection = (event.target as HTMLSelectElement).value as 'row' | 'column';
+                    if (selectedSplitNode) {
+                      blueprint = updateSplitDirection(blueprint, selectedSplitNode.id, nextDirection);
+                    }
+                  }}
+                >
+                  <option value="row">横</option>
+                  <option value="column">縦</option>
+                </select>
+              </div>
+              <p class="text-xs text-slate-500">ドラッグで比率を変更できます。</p>
+              <Button.Root
+                class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
+                type="button"
+                onclick={() => handleDeleteSelected('split')}
+              >
+                分割を解除
+              </Button.Root>
+                </div>
+              {:else if selectedNode.type === 'tabs'}
+                <div class="space-y-4 text-sm text-slate-700">
+              <div class="flex items-center justify-between">
+                <p class="label">Tabs</p>
+                <Button.Root class="btn-ghost" type="button" onclick={handleAddTab}>タブ追加</Button.Root>
+              </div>
+              <div class="space-y-2">
+                {#each selectedTabsNode?.tabs ?? [] as tab}
+                  <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
+                    <input
+                      class="input"
+                      type="text"
+                      value={tab.title}
+                      onchange={(event) => handleRenameTab(tab.id, (event.target as HTMLInputElement).value)}
+                    />
+                    <Button.Root class="btn-ghost mt-2 w-full" type="button" onclick={() => handleRemoveTab(tab.id)}>
+                      このタブを削除
+                    </Button.Root>
+                  </div>
+                {/each}
+              </div>
+              <Button.Root
+                class="btn-ghost w-full border-rose-200/70 text-rose-600 hover:border-rose-300/80"
+                type="button"
+                onclick={() => handleDeleteSelected('tabs')}
+              >
+                タブセットを解除
+              </Button.Root>
+                </div>
+              {/if}
+            </Tabs.Content>
+          </Tabs.Root>
+        </aside>
+      </div>
     </div>
-    <div class="flex flex-wrap gap-2">
-      <Button.Root class="btn-ghost" type="button">⏮︎</Button.Root>
-      <Button.Root class="btn-primary" type="button">⏯︎</Button.Root>
-      <Button.Root class="btn-ghost" type="button">⏭︎</Button.Root>
     </div>
-  </div>
-  {#if statusDetail}
-    <p class="mt-2 text-xs text-slate-500">{statusDetail}</p>
+  {:else}
+    <div class="card p-4 min-h-[640px] lg:h-[var(--app-shell-height)]">
+      <LayoutNode
+        node={blueprint}
+        selectedId={selectedId}
+        sessionId={sessionId}
+        mode="operate"
+        editMode={editMode}
+        viewScale={1}
+        onSelect={updateSelection}
+        onResize={handleResize}
+        onTabChange={handleTabChange}
+      />
+    </div>
   {/if}
 </section>

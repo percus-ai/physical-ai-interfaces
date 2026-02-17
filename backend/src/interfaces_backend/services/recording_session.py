@@ -11,7 +11,11 @@ from fastapi import HTTPException
 
 from interfaces_backend.services.dataset_lifecycle import DatasetLifecycle, get_dataset_lifecycle
 from interfaces_backend.services.recorder_bridge import RecorderBridge, get_recorder_bridge
-from interfaces_backend.services.session_manager import BaseSessionManager, SessionState
+from interfaces_backend.services.session_manager import (
+    BaseSessionManager,
+    SessionProgressCallback,
+    SessionState,
+)
 from interfaces_backend.services.vlabor_profiles import extract_arm_namespaces
 from percus_ai.storage.naming import generate_dataset_id
 
@@ -36,8 +40,26 @@ class RecordingSessionManager(BaseSessionManager):
         # sessions by dataset_id directly.
         return generate_dataset_id()
 
-    async def create(self, *, profile: str | None = None, **kwargs: Any) -> SessionState:
-        state = await super().create(profile=profile, **kwargs)
+    async def create(
+        self,
+        *,
+        session_id: str | None = None,
+        profile: str | None = None,
+        progress_callback: SessionProgressCallback | None = None,
+        **kwargs: Any,
+    ) -> SessionState:
+        state = await super().create(
+            session_id=session_id,
+            profile=profile,
+            progress_callback=progress_callback,
+            **kwargs,
+        )
+        self._emit_progress(
+            progress_callback,
+            phase="prepare_recorder",
+            progress_percent=70.0,
+            message="録画ペイロードを組み立てています...",
+        )
 
         cameras = self._recorder.build_cameras(state.profile.snapshot)
         if not cameras:
@@ -55,6 +77,7 @@ class RecordingSessionManager(BaseSessionManager):
             "cameras": cameras,
             "metadata": {
                 "num_episodes": kwargs["num_episodes"],
+                "target_total_episodes": kwargs["target_total_episodes"],
                 "episode_time_s": kwargs["episode_time_s"],
                 "reset_time_s": kwargs["reset_time_s"],
                 "profile_name": state.profile.name,
@@ -66,6 +89,7 @@ class RecordingSessionManager(BaseSessionManager):
 
         state.extras["dataset_name"] = kwargs["dataset_name"]
         state.extras["task"] = kwargs["task"]
+        state.extras["target_total_episodes"] = kwargs["target_total_episodes"]
         state.extras["recorder_payload"] = recorder_payload
 
         await self._dataset.upsert_record(
@@ -74,6 +98,15 @@ class RecordingSessionManager(BaseSessionManager):
             task=kwargs["task"],
             profile_snapshot=state.profile.snapshot,
             status="ready",
+            target_total_episodes=kwargs["target_total_episodes"],
+            episode_time_s=kwargs["episode_time_s"],
+            reset_time_s=kwargs["reset_time_s"],
+        )
+        self._emit_progress(
+            progress_callback,
+            phase="persist",
+            progress_percent=95.0,
+            message="録画セッションを保存しました。",
         )
         return state
 

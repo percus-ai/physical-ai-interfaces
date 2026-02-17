@@ -293,16 +293,21 @@ export const ensureValidSelection = (node: BlueprintNode, selectedId: string | n
 
 export const createDefaultBlueprint = (): BlueprintNode =>
   createSplitNode(
-    'row',
+    'column',
     createSplitNode(
-      'column',
-      createViewNode('camera', { topic: '' }),
-      createViewNode('joint_state', { topic: '' }),
-      [0.6, 0.4]
+      'row',
+      createSplitNode(
+        'column',
+        createViewNode('camera', { topic: '' }),
+        createViewNode('joint_state', { topic: '' }),
+        [0.6, 0.4]
+      ),
+      createTabsNode([
+        createTabItem('Status', createViewNode('status', { topic: '/lerobot_recorder/status' })),
+        createTabItem('Controls', createViewNode('controls', {}))
+      ]),
+      [0.7, 0.3]
     ),
-    createTabsNode([
-      createTabItem('Status', createViewNode('status', { topic: '/lerobot_recorder/status' })),
-      createTabItem('Controls', createViewNode('controls', {}))
-    ]),
-    [0.7, 0.3]
+    createViewNode('timeline', {}),
+    [0.78, 0.22]
   );

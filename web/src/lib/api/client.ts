@@ -76,6 +76,30 @@ export type ExperimentUploadResponse = {
   keys?: string[];
 };
 
+export type StartupOperationAcceptedResponse = {
+  operation_id: string;
+  message?: string;
+};
+
+export type StartupOperationStatusResponse = {
+  operation_id: string;
+  kind: 'inference_start' | 'recording_create';
+  state: 'queued' | 'running' | 'completed' | 'failed';
+  phase?: string;
+  progress_percent?: number;
+  message?: string | null;
+  target_session_id?: string | null;
+  error?: string | null;
+  detail?: {
+    files_done?: number;
+    total_files?: number;
+    transferred_bytes?: number;
+    total_bytes?: number;
+    current_file?: string | null;
+  };
+  updated_at?: string | null;
+};
+
 let refreshPromise: Promise<boolean> | null = null;
 
 async function baseFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -339,8 +363,9 @@ export const api = {
       num_episodes: number;
       episode_time_s: number;
       reset_time_s: number;
+      continue_from_dataset_id?: string;
     }) =>
-      fetchApi('/api/recording/session/create', {
+      fetchApi<StartupOperationAcceptedResponse>('/api/recording/session/create', {
         method: 'POST',
         body: JSON.stringify(payload)
       }),
@@ -377,10 +402,16 @@ export const api = {
       fetchApi('/api/recording/episode/cancel', {
         method: 'POST'
       }),
+    nextEpisode: () =>
+      fetchApi('/api/recording/episode/next', {
+        method: 'POST'
+      }),
     cancelSession: (datasetId?: string) =>
       fetchApi(`/api/recording/session/cancel${datasetId ? `?dataset_id=${datasetId}` : ''}`, {
         method: 'POST'
       }),
+    continuePlan: (recordingId: string) =>
+      fetchApi(`/api/recording/recordings/${encodeURIComponent(recordingId)}/continue-plan`),
     sessionStatus: (sessionId: string) =>
       fetchApi(`/api/recording/sessions/${sessionId}/status`)
   },
@@ -501,12 +532,16 @@ export const api = {
   operate: {
     status: () => fetchApi('/api/operate/status')
   },
+  startup: {
+    operation: (operationId: string) =>
+      fetchApi<StartupOperationStatusResponse>(`/api/startup/operations/${encodeURIComponent(operationId)}`)
+  },
   inference: {
     models: () => fetchApi('/api/inference/models'),
     deviceCompatibility: () => fetchApi('/api/inference/device-compatibility'),
     runnerStatus: () => fetchApi('/api/inference/runner/status'),
     runnerStart: (payload: Record<string, unknown>) =>
-      fetchApi('/api/inference/runner/start', {
+      fetchApi<StartupOperationAcceptedResponse>('/api/inference/runner/start', {
         method: 'POST',
         body: JSON.stringify(payload)
       }),
