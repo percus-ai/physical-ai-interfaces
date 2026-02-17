@@ -1180,7 +1180,8 @@ class PhiClient:
                 - type: "start", "validating", "validated", "selecting_instance",
                         "instance_selected", "finding_location", "location_found",
                         "creating_instance", "instance_created", "waiting_ip",
-                        "ip_assigned", "connecting_ssh", "ssh_ready", "deploying",
+                        "ip_assigned", "waiting_running", "instance_running",
+                        "connecting_ssh", "ssh_ready", "deploying",
                         "starting_training", "complete", "error", "heartbeat"
                 - Additional fields depending on type (message, elapsed, timeout, etc.)
 

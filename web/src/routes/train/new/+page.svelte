@@ -198,6 +198,8 @@
     instance_created: 'インスタンス作成',
     waiting_ip: 'IP割り当て待機',
     ip_assigned: 'IP割り当て完了',
+    waiting_running: 'インスタンス起動待機',
+    instance_running: 'インスタンス起動完了',
     connecting_ssh: 'SSH接続',
     ssh_ready: 'SSH接続完了',
     deploying: 'ファイル転送',

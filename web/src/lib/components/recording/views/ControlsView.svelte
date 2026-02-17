@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Button } from 'bits-ui';
+  import toast from 'svelte-french-toast';
   import { api } from '$lib/api/client';
 
   let {
@@ -20,13 +21,20 @@
   let actionError = $state('');
   let actionMessage = $state('');
 
-  const runAction = async (label: string, action: () => Promise<unknown>) => {
+  const runAction = async (
+    label: string,
+    action: () => Promise<unknown>,
+    options: { successToast?: string } = {}
+  ) => {
     actionError = '';
     actionMessage = '';
     actionBusy = label;
     try {
       const result = (await action()) as { message?: string };
       actionMessage = result?.message ?? `${label} を実行しました。`;
+      if (options.successToast) {
+        toast.success(options.successToast);
+      }
     } catch (err) {
       actionError = err instanceof Error ? err.message : `${label} に失敗しました。`;
     } finally {
@@ -46,7 +54,9 @@
   };
   const handleNext = async () => {
     if (!confirm('現在のエピソードを保存して次へ進みますか？')) return;
-    await runAction('次へ', () => api.recording.nextEpisode());
+    await runAction('次へ', () => api.recording.nextEpisode(), {
+      successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
+    });
   };
   const handleStop = async () => {
     if (!confirm('録画セッションを終了しますか？（現在のエピソードは保存されます）')) return;

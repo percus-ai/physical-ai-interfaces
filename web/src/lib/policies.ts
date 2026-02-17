@@ -71,8 +71,8 @@ export const POLICY_TYPES: PolicyInfo[] = [
     defaultNumWorkers: 8,
     recommendedStorage: 200,
     recommendedGpu: 'H100',
-    compileModel: true,
-    gradientCheckpointing: false,
+    compileModel: false,
+    gradientCheckpointing: true,
     dtype: 'bfloat16',
     useAmp: false
   },
@@ -100,8 +100,8 @@ export const POLICY_TYPES: PolicyInfo[] = [
     defaultNumWorkers: 8,
     recommendedStorage: 200,
     recommendedGpu: 'H100',
-    compileModel: true,
-    gradientCheckpointing: false,
+    compileModel: false,
+    gradientCheckpointing: true,
     dtype: 'bfloat16',
     useAmp: false
   }

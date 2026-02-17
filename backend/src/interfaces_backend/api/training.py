@@ -336,7 +336,7 @@ def _create_ssh_connection(
     ip: str,
     user: str,
     private_key_path: str,
-    timeout: int = 300,
+    timeout: int = 30,
 ) -> SSHConnection:
     """Create and connect an SSHConnection to the remote host.
 
@@ -350,9 +350,43 @@ def _create_ssh_connection(
         Connected SSHConnection instance
     """
     key_path = Path(private_key_path).expanduser()
+    if not key_path.exists():
+        raise RuntimeError(f"SSH鍵が見つかりません: {key_path}")
+    if not key_path.is_file():
+        raise RuntimeError(f"SSH鍵パスが不正です: {key_path}")
     conn = SSHConnection(host=ip, user=user, private_key_path=key_path)
-    conn.connect(timeout_sec=timeout)
+    try:
+        conn.connect(timeout_sec=timeout)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
+    except Exception as exc:
+        raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
     return conn
+
+
+def _get_default_ssh_user() -> str:
+    return (os.environ.get("VERDA_SSH_USER", "root") or "root").strip() or "root"
+
+
+def _build_ssh_user_candidates(primary_user: str) -> list[str]:
+    candidates: list[str] = []
+    for user in (primary_user, "root", "ubuntu"):
+        user_normalized = (user or "").strip()
+        if user_normalized and user_normalized not in candidates:
+            candidates.append(user_normalized)
+    return candidates or ["root", "ubuntu"]
+
+
+def _resolve_ssh_private_key_path(private_key_path: str) -> str:
+    key_path = Path(private_key_path).expanduser()
+    if not key_path.exists():
+        raise RuntimeError(
+            f"SSH鍵が見つかりません: {key_path} "
+            "(バックエンド実行環境に鍵ファイルを配置してください)"
+        )
+    if not key_path.is_file():
+        raise RuntimeError(f"SSH鍵パスが不正です: {key_path}")
+    return str(key_path)
 
 
 def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
@@ -1177,7 +1211,13 @@ TMUX_TRAIN_SESSION_NAME = "training_run"
 # Timeout constants
 IP_WAIT_TIMEOUT_SEC = 900  # 15 minutes to wait for IP assignment
 SSH_WAIT_TIMEOUT_SEC = 300  # 5 minutes to wait for SSH to be ready
+INSTANCE_RUNNING_WAIT_TIMEOUT_SEC = 600  # 10 minutes to wait for instance running
 SETUP_TIMEOUT_SEC = 3600  # Max time to run setup_env.sh
+IP_POLL_INTERVAL_SEC = 15
+INSTANCE_STATUS_POLL_INTERVAL_SEC = 10
+SSH_CONNECT_ATTEMPT_TIMEOUT_SEC = 30
+SSH_CONNECT_RETRY_INTERVAL_SEC = 10
+INSTANCE_TERMINAL_STATUSES = {"offline", "error", "discontinued", "deleted"}
 
 
 def _get_setup_log_file_path(job_data: dict) -> str:
@@ -1229,7 +1269,7 @@ def _get_ssh_connection_for_job(
         key_path = Path(job_data.get("ssh_private_key", default_key)).expanduser()
         conn = SSHConnection(
             host=ip,
-            user=job_data.get("ssh_user", "root"),
+            user=job_data.get("ssh_user", _get_default_ssh_user()),
             private_key_path=key_path,
         )
         conn.connect(timeout_sec=timeout)
@@ -2709,7 +2749,7 @@ async def _revive_job_with_progress(
     )
     if not ssh_private_key:
         ssh_private_key = str(Path.home() / ".ssh" / "id_rsa")
-    ssh_user = job_data.get("ssh_user") or "root"
+    ssh_user = job_data.get("ssh_user") or _get_default_ssh_user()
 
     result = JobReviveResponse(
         job_id=job_id,
@@ -3065,6 +3105,11 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             "VERDA_SSH_PRIVATE_KEY",
             str(Path.home() / ".ssh" / "id_rsa"),
         )
+        ssh_user = _get_default_ssh_user()
+        try:
+            ssh_private_key = _resolve_ssh_private_key_path(ssh_private_key)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         if not ssh_key_name:
             raise HTTPException(
@@ -3144,7 +3189,7 @@ async def create_job(request: JobCreateRequest, background_tasks: BackgroundTask
             "mode": "train",
             "profile_instance_id": profile_instance_id,
             "profile_snapshot": profile_snapshot,
-            "ssh_user": "root",
+            "ssh_user": ssh_user,
             "ssh_private_key": ssh_private_key,
             "remote_base_dir": "/root/.physical-ai",
             "checkpoint_repo_id": request.checkpoint_repo_id,
@@ -3472,6 +3517,12 @@ def _create_job_with_progress(
                 "VERDA_SSH_PRIVATE_KEY",
                 str(Path.home() / ".ssh" / "id_rsa"),
             )
+            ssh_user = _get_default_ssh_user()
+            try:
+                ssh_private_key = _resolve_ssh_private_key_path(ssh_private_key)
+            except RuntimeError as exc:
+                emit_progress({"type": "error", "error": str(exc)})
+                return {"success": False, "error": str(exc)}
             if not ssh_key_name:
                 emit_progress(
                     {"type": "error", "error": "VERDA_SSH_KEY_NAMEが設定されていません"}
@@ -3554,7 +3605,7 @@ def _create_job_with_progress(
                 "mode": "train",
                 "profile_instance_id": profile_instance_id,
                 "profile_snapshot": profile_snapshot,
-                "ssh_user": "root",
+                "ssh_user": ssh_user,
                 "ssh_private_key": ssh_private_key,
                 "remote_base_dir": "/root/.physical-ai",
                 "checkpoint_repo_id": checkpoint_repo_id,
@@ -3574,7 +3625,7 @@ def _create_job_with_progress(
                     "type": "waiting_ip",
                     "message": "IPアドレス割り当て待機中...",
                     "elapsed": 0,
-                    "timeout": 900,
+                    "timeout": IP_WAIT_TIMEOUT_SEC,
                 }
             )
             ip = None
@@ -3594,10 +3645,10 @@ def _create_job_with_progress(
                         "type": "waiting_ip",
                         "message": f"IPアドレス割り当て待機中... ({elapsed}秒経過)",
                         "elapsed": elapsed,
-                        "timeout": 900,
+                        "timeout": IP_WAIT_TIMEOUT_SEC,
                     }
                 )
-                time.sleep(15)
+                time.sleep(IP_POLL_INTERVAL_SEC)
 
             if not ip:
                 job_data["status"] = "failed"
@@ -3614,11 +3665,71 @@ def _create_job_with_progress(
 
             # Update job with IP
             job_data["ip"] = ip
-            job_data["status"] = "deploying"
             _save_job_sync(job_data)
 
+            # Poll Verda status until instance becomes running
+            emit_progress(
+                {
+                    "type": "waiting_running",
+                    "message": "インスタンス起動待機中...",
+                    "elapsed": 0,
+                    "timeout": INSTANCE_RUNNING_WAIT_TIMEOUT_SEC,
+                }
+            )
+            running = False
+            status = ""
+            start_time = time.time()
+            running_deadline = start_time + INSTANCE_RUNNING_WAIT_TIMEOUT_SEC
+            while time.time() < running_deadline:
+                try:
+                    instance = client.instances.get_by_id(instance_id)
+                    status = (
+                        str(getattr(instance, "status", "") or "").strip().lower()
+                    )
+                    if status == "running":
+                        running = True
+                        break
+                    if status in INSTANCE_TERMINAL_STATUSES:
+                        break
+                except Exception:
+                    status = ""
+
+                elapsed = int(time.time() - start_time)
+                status_label = status or "unknown"
+                emit_progress(
+                    {
+                        "type": "waiting_running",
+                        "message": f"インスタンス起動待機中... (status={status_label}, {elapsed}秒経過)",
+                        "elapsed": elapsed,
+                        "timeout": INSTANCE_RUNNING_WAIT_TIMEOUT_SEC,
+                        "instance_status": status_label,
+                    }
+                )
+                time.sleep(INSTANCE_STATUS_POLL_INTERVAL_SEC)
+
+            if not running:
+                job_data["status"] = "failed"
+                if status in INSTANCE_TERMINAL_STATUSES:
+                    job_data["failure_reason"] = "INSTANCE_TERMINATED"
+                    job_data["error_message"] = (
+                        f"インスタンスが終了状態です: {status}"
+                    )
+                    error_message = f"インスタンスが終了状態です: {status}"
+                else:
+                    job_data["failure_reason"] = "INSTANCE_RUNNING_TIMEOUT"
+                    job_data["error_message"] = "インスタンス起動待機タイムアウト"
+                    error_message = "インスタンス起動待機タイムアウト (10分)"
+                job_data["completed_at"] = datetime.now().isoformat()
+                _save_job_sync(job_data)
+                emit_progress({"type": "error", "error": error_message})
+                return cleanup_instance_on_failure(error_message)
+
+            emit_progress({"type": "instance_running", "message": "インスタンス起動完了"})
+
             # SSH deployment using SSHConnection and RemoteExecutor
-            ssh_user = "root"
+            ssh_user = job_data.get("ssh_user", _get_default_ssh_user())
+            job_data["status"] = "deploying"
+            _save_job_sync(job_data)
 
             # Wait for SSH (up to 5 minutes)
             emit_progress(
@@ -3626,39 +3737,83 @@ def _create_job_with_progress(
                     "type": "connecting_ssh",
                     "message": "SSH接続中...",
                     "attempt": 0,
-                    "max_attempts": 30,
+                    "max_attempts": max(
+                        1,
+                        (
+                            SSH_WAIT_TIMEOUT_SEC
+                            + SSH_CONNECT_RETRY_INTERVAL_SEC
+                            - 1
+                        )
+                        // SSH_CONNECT_RETRY_INTERVAL_SEC,
+                    ),
                 }
             )
             conn: Optional[SSHConnection] = None
             start_time = time.time()
             ssh_deadline = start_time + SSH_WAIT_TIMEOUT_SEC
             attempt = 0
+            last_ssh_error = ""
+            ssh_user_candidates = _build_ssh_user_candidates(ssh_user)
+            fatal_ssh_config_error = False
+            max_attempts = max(
+                1,
+                (SSH_WAIT_TIMEOUT_SEC + SSH_CONNECT_RETRY_INTERVAL_SEC - 1)
+                // SSH_CONNECT_RETRY_INTERVAL_SEC,
+            )
             while time.time() < ssh_deadline:
                 attempt += 1
-                try:
-                    conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
+                connected_user: Optional[str] = None
+                for candidate_user in ssh_user_candidates:
+                    try:
+                        conn = _create_ssh_connection(
+                            ip,
+                            candidate_user,
+                            ssh_private_key,
+                            timeout=SSH_CONNECT_ATTEMPT_TIMEOUT_SEC,
+                        )
+                        connected_user = candidate_user
+                        break
+                    except Exception as exc:
+                        last_ssh_error = (
+                            f"user={candidate_user}: {type(exc).__name__}: {exc}"
+                        )
+                        if "SSH鍵が見つかりません" in str(exc) or "SSH鍵パスが不正" in str(exc):
+                            fatal_ssh_config_error = True
+                            break
+
+                if conn and connected_user:
+                    if connected_user != ssh_user:
+                        ssh_user = connected_user
+                        job_data["ssh_user"] = ssh_user
+                        _save_job_sync(job_data)
                     break
-                except Exception:
-                    elapsed = int(time.time() - start_time)
-                    emit_progress(
-                        {
-                            "type": "connecting_ssh",
-                            "message": f"SSH接続中... (試行 {attempt}/30, {elapsed}秒経過)",
-                            "attempt": attempt,
-                            "max_attempts": 30,
-                            "elapsed": elapsed,
-                        }
-                    )
-                    time.sleep(10)
+                if fatal_ssh_config_error:
+                    break
+
+                elapsed = int(time.time() - start_time)
+                detail = f" | {last_ssh_error}" if last_ssh_error else ""
+                emit_progress(
+                    {
+                        "type": "connecting_ssh",
+                        "message": f"SSH接続中... (試行 {attempt}/{max_attempts}, {elapsed}秒経過){detail}",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "elapsed": elapsed,
+                    }
+                )
+                time.sleep(SSH_CONNECT_RETRY_INTERVAL_SEC)
 
             if not conn:
                 job_data["status"] = "failed"
                 job_data["failure_reason"] = "SSH_TIMEOUT"
-                job_data["error_message"] = "SSH接続タイムアウト"
+                timeout_msg = "SSH接続タイムアウト"
+                if last_ssh_error:
+                    timeout_msg = f"{timeout_msg}: {last_ssh_error}"
+                job_data["error_message"] = timeout_msg
                 job_data["completed_at"] = datetime.now().isoformat()
                 _save_job_sync(job_data)
-                emit_progress({"type": "error", "error": "SSH接続タイムアウト (5分)"})
-                return cleanup_instance_on_failure("SSH接続タイムアウト (5分)")
+                emit_progress({"type": "error", "error": timeout_msg})
+                return cleanup_instance_on_failure(timeout_msg)
 
             emit_progress({"type": "ssh_ready", "message": "SSH接続完了"})
 
@@ -3882,7 +4037,9 @@ async def websocket_create_job(websocket: WebSocket):
     - {"type": "instance_created", "message": "...", "instance_id": "..."}
     - {"type": "waiting_ip", "message": "...", "elapsed": N, "timeout": 900}
     - {"type": "ip_assigned", "message": "...", "ip": "..."}
-    - {"type": "connecting_ssh", "message": "...", "attempt": N, "max_attempts": 30}
+    - {"type": "waiting_running", "message": "...", "elapsed": N, "timeout": 600, "instance_status": "..."}
+    - {"type": "instance_running", "message": "..."}
+    - {"type": "connecting_ssh", "message": "...", "attempt": N, "max_attempts": M}
     - {"type": "ssh_ready", "message": "..."}
     - {"type": "deploying", "message": "...", "file": "..."}
     - {"type": "setting_up", "message": "..."}
@@ -4035,7 +4192,7 @@ async def _deploy_and_start_training(
                         break
                 except Exception:
                     pass
-                time.sleep(15)
+                time.sleep(IP_POLL_INTERVAL_SEC)
 
             if not ip:
                 job_data["status"] = "failed"
@@ -4048,11 +4205,45 @@ async def _deploy_and_start_training(
 
             # Update job with IP
             job_data["ip"] = ip
+            await _save_job(job_data)
+
+            # Poll Verda status until instance becomes running
+            running = False
+            status = ""
+            running_deadline = time.time() + INSTANCE_RUNNING_WAIT_TIMEOUT_SEC
+            while time.time() < running_deadline:
+                try:
+                    instance = client.instances.get_by_id(instance_id)
+                    status = str(getattr(instance, "status", "") or "").strip().lower()
+                    if status == "running":
+                        running = True
+                        break
+                    if status in INSTANCE_TERMINAL_STATUSES:
+                        break
+                except Exception:
+                    status = ""
+                time.sleep(INSTANCE_STATUS_POLL_INTERVAL_SEC)
+
+            if not running:
+                job_data["status"] = "failed"
+                if status in INSTANCE_TERMINAL_STATUSES:
+                    job_data["failure_reason"] = "INSTANCE_TERMINATED"
+                    failure_msg = f"インスタンスが終了状態です: {status}"
+                    job_data["error_message"] = failure_msg
+                else:
+                    job_data["failure_reason"] = "INSTANCE_RUNNING_TIMEOUT"
+                    failure_msg = "インスタンス起動待機タイムアウト"
+                    job_data["error_message"] = failure_msg
+                job_data["completed_at"] = datetime.now().isoformat()
+                await _save_job(job_data)
+                await cleanup_on_failure(failure_msg)
+                return
+
             job_data["status"] = "deploying"
             await _save_job(job_data)
 
             # SSH deployment using SSHConnection
-            ssh_user = job_data.get("ssh_user", "root")
+            ssh_user = job_data.get("ssh_user", _get_default_ssh_user())
             ssh_private_key = job_data.get(
                 "ssh_private_key", str(Path.home() / ".ssh" / "id_rsa")
             )
@@ -4060,20 +4251,48 @@ async def _deploy_and_start_training(
             # Wait for SSH to be ready (up to 5 minutes)
             conn: Optional[SSHConnection] = None
             ssh_deadline = time.time() + SSH_WAIT_TIMEOUT_SEC
+            last_ssh_error = ""
+            ssh_user_candidates = _build_ssh_user_candidates(ssh_user)
+            fatal_ssh_config_error = False
             while time.time() < ssh_deadline:
-                try:
-                    conn = _create_ssh_connection(ip, ssh_user, ssh_private_key)
+                connected_user: Optional[str] = None
+                for candidate_user in ssh_user_candidates:
+                    try:
+                        conn = _create_ssh_connection(
+                            ip,
+                            candidate_user,
+                            ssh_private_key,
+                            timeout=SSH_CONNECT_ATTEMPT_TIMEOUT_SEC,
+                        )
+                        connected_user = candidate_user
+                        break
+                    except Exception as exc:
+                        last_ssh_error = (
+                            f"user={candidate_user}: {type(exc).__name__}: {exc}"
+                        )
+                        if "SSH鍵が見つかりません" in str(exc) or "SSH鍵パスが不正" in str(exc):
+                            fatal_ssh_config_error = True
+                            break
+                if conn and connected_user:
+                    if connected_user != ssh_user:
+                        ssh_user = connected_user
+                        job_data["ssh_user"] = ssh_user
+                        await _save_job(job_data)
                     break
-                except Exception:
-                    time.sleep(10)
+                if fatal_ssh_config_error:
+                    break
+                time.sleep(SSH_CONNECT_RETRY_INTERVAL_SEC)
 
             if not conn:
                 job_data["status"] = "failed"
                 job_data["failure_reason"] = "SSH_TIMEOUT"
-                job_data["error_message"] = "SSH接続タイムアウト"
+                failure_msg = "SSH接続タイムアウト"
+                if last_ssh_error:
+                    failure_msg = f"{failure_msg}: {last_ssh_error}"
+                job_data["error_message"] = failure_msg
                 job_data["completed_at"] = datetime.now().isoformat()
                 await _save_job(job_data)
-                await cleanup_on_failure("SSH接続タイムアウト")
+                await cleanup_on_failure(failure_msg)
                 return
 
             try:
@@ -4598,6 +4817,11 @@ async def create_continue_job(
             "VERDA_SSH_PRIVATE_KEY",
             str(Path.home() / ".ssh" / "id_rsa"),
         )
+        ssh_user = _get_default_ssh_user()
+        try:
+            ssh_private_key = _resolve_ssh_private_key_path(ssh_private_key)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         if not ssh_key_name:
             raise HTTPException(
@@ -4643,7 +4867,7 @@ async def create_continue_job(
             },
             "dataset_id": dataset_id,
             "policy_type": checkpoint_entry.policy_type,
-            "ssh_user": "root",
+            "ssh_user": ssh_user,
             "ssh_private_key": ssh_private_key,
             "remote_base_dir": "/root/.physical-ai",
             "created_at": now,

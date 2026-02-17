@@ -1570,10 +1570,11 @@ class TrainingWizard(BaseMenu):
             ("selecting", "2. インスタンス選択"),
             ("creating", "3. インスタンス作成"),
             ("waiting_ip", "4. IP割り当て待機"),
-            ("connecting", "5. SSH接続"),
-            ("deploying", "6. ファイル転送"),
-            ("setting_up", "7. 環境構築"),
-            ("starting", "8. 学習開始"),
+            ("waiting_running", "5. インスタンス起動待機"),
+            ("connecting", "6. SSH接続"),
+            ("deploying", "7. ファイル転送"),
+            ("setting_up", "8. 環境構築"),
+            ("starting", "9. 学習開始"),
         ]
 
         current = {
@@ -1681,17 +1682,20 @@ class TrainingWizard(BaseMenu):
             elif msg_type in ("waiting_ip", "ip_assigned"):
                 current["phase_index"] = 3
                 current["phase_name"] = "IP割り当て待機"
-            elif msg_type in ("connecting_ssh", "ssh_ready"):
+            elif msg_type in ("waiting_running", "instance_running"):
                 current["phase_index"] = 4
+                current["phase_name"] = "インスタンス起動待機"
+            elif msg_type in ("connecting_ssh", "ssh_ready"):
+                current["phase_index"] = 5
                 current["phase_name"] = "SSH接続"
             elif msg_type == "deploying":
-                current["phase_index"] = 5
+                current["phase_index"] = 6
                 current["phase_name"] = "ファイル転送"
             elif msg_type == "setting_up":
-                current["phase_index"] = 6
+                current["phase_index"] = 7
                 current["phase_name"] = "環境構築"
             elif msg_type == "starting_training":
-                current["phase_index"] = 7
+                current["phase_index"] = 8
                 current["phase_name"] = "学習開始"
 
             # Handle specific data
@@ -1706,6 +1710,12 @@ class TrainingWizard(BaseMenu):
                 current["timeout"] = data.get("timeout", 900)
             elif msg_type == "ip_assigned":
                 current["ip"] = data.get("ip", "")
+                current["elapsed"] = 0
+                current["timeout"] = 0
+            elif msg_type == "waiting_running":
+                current["elapsed"] = data.get("elapsed", 0)
+                current["timeout"] = data.get("timeout", 600)
+            elif msg_type == "instance_running":
                 current["elapsed"] = 0
                 current["timeout"] = 0
             elif msg_type == "connecting_ssh":

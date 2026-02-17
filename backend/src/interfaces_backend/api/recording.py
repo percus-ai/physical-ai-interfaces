@@ -413,7 +413,11 @@ async def cancel_episode():
     return RecordingSessionActionResponse(success=True, message="Episode cancelled", status=result)
 
 
-@router.post("/episode/next", response_model=RecordingSessionActionResponse)
+@router.post(
+    "/episode/next",
+    response_model=RecordingSessionActionResponse,
+    status_code=202,
+)
 async def next_episode():
     require_user_id()
     recorder = get_recorder_bridge()
@@ -425,7 +429,7 @@ async def next_episode():
         )
     return RecordingSessionActionResponse(
         success=True,
-        message="Episode completed and moving to next",
+        message=str(result.get("message") or "Episode transition accepted"),
         dataset_id=result.get("dataset_id"),
         status=result,
     )
