@@ -41,6 +41,15 @@ class _FakeSyncFailure:
         return SimpleNamespace(success=False, message="not found", skipped=False)
 
 
+class _FakeSyncUploadResult:
+    def __init__(self, ok: bool, error: str = ""):
+        self._ok = ok
+        self._error = error
+
+    async def upload_dataset_with_progress(self, _dataset_id, _progress_callback):
+        return self._ok, self._error
+
+
 def test_ensure_model_local_tracks_download_progress():
     lifecycle = DatasetLifecycle()
     lifecycle._sync = _FakeSyncDownloaded()
@@ -98,3 +107,12 @@ def test_ensure_model_local_emits_sync_status_callback():
     assert updates[0] == "checking"
     assert "syncing" in updates
     assert updates[-1] == "completed"
+
+
+def test_auto_upload_logs_error_when_sync_returns_failure(caplog):
+    lifecycle = DatasetLifecycle()
+    lifecycle._sync = _FakeSyncUploadResult(False, "upload failed")
+
+    asyncio.run(lifecycle.auto_upload("dataset-1"))
+
+    assert "Auto-upload failed for dataset dataset-1: upload failed" in caplog.text

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Any
@@ -29,6 +30,7 @@ from interfaces_backend.services.vlabor_profiles import (
 from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
 
 
 class InferenceSessionManager(BaseSessionManager):
@@ -184,9 +186,30 @@ class InferenceSessionManager(BaseSessionManager):
         if dataset_id:
             recording_stopped = False
             try:
-                self._recorder.stop(save_current=True)
-                logger.info("Stopped inference recording: dataset_id=%s", dataset_id)
-                recording_stopped = True
+                result = self._recorder.stop(save_current=True)
+                if result.get("success", False):
+                    final_status = await asyncio.to_thread(
+                        self._recorder.wait_until_finalized,
+                        dataset_id,
+                    )
+                    final_state = str((final_status or {}).get("state") or "").strip().lower()
+                    final_dataset_id = str((final_status or {}).get("dataset_id") or "").strip()
+                    if final_dataset_id == dataset_id and final_state in _ACTIVE_RECORDER_STATES:
+                        logger.warning(
+                            "Inference recording stop timed out before finalize: "
+                            "dataset_id=%s state=%s",
+                            dataset_id,
+                            final_state,
+                        )
+                    else:
+                        logger.info("Stopped inference recording: dataset_id=%s", dataset_id)
+                        recording_stopped = True
+                else:
+                    logger.warning(
+                        "Failed to stop inference recording: dataset_id=%s result=%s",
+                        dataset_id,
+                        result,
+                    )
             except Exception:
                 logger.warning("Failed to stop inference recording", exc_info=True)
             if recording_stopped:

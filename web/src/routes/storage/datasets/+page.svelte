@@ -52,6 +52,7 @@
   );
   const canMerge = $derived(selectedIds.length >= 2 && !profileMismatch && !actionLoading);
   const canArchive = $derived(selectedIds.length > 0 && !actionLoading);
+  const canReupload = $derived(selectedIds.length > 0 && !actionLoading);
 
   const refetchDatasets = async () => {
     await queryClient.invalidateQueries({ queryKey: ['storage', 'datasets', 'manage'] });
@@ -127,6 +128,37 @@
       await refetchDatasets();
     } catch (err) {
       actionError = err instanceof Error ? err.message : 'アーカイブに失敗しました。';
+    } finally {
+      actionLoading = false;
+    }
+  }
+
+  async function handleReuploadSelected() {
+    actionMessage = '';
+    actionError = '';
+
+    if (!selectedIds.length) {
+      actionError = '再アップロード対象を選択してください。';
+      return;
+    }
+
+    const confirmed = confirm(`${selectedIds.length}件をR2へ再アップロードしますか？`);
+    if (!confirmed) return;
+
+    actionLoading = true;
+    const ids = [...selectedIds];
+
+    try {
+      const results = await Promise.allSettled(ids.map((id) => api.storage.reuploadDataset(id)));
+      const failed = results.filter((result) => result.status === 'rejected');
+      if (failed.length) {
+        actionError = `再アップロードに失敗しました: ${failed.length}件`;
+      } else {
+        actionMessage = `再アップロード完了: ${ids.length}件`;
+      }
+      await refetchDatasets();
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : '再アップロードに失敗しました。';
     } finally {
       actionLoading = false;
     }
@@ -238,6 +270,20 @@
         onclick={handleMerge}
       >
         マージ実行
+      </button>
+    </div>
+  </div>
+  <div class="rounded-2xl border border-slate-200/70 bg-white/70 p-4">
+    <p class="text-sm font-semibold text-slate-800">再アップロード</p>
+    <p class="mt-1 text-xs text-slate-500">選択済みデータセットをR2へ再アップロードします。</p>
+    <div class="mt-4">
+      <button
+        class={`btn-primary ${canReupload ? '' : 'opacity-50 cursor-not-allowed'}`}
+        type="button"
+        disabled={!canReupload}
+        onclick={handleReuploadSelected}
+      >
+        再アップロード
       </button>
     </div>
   </div>

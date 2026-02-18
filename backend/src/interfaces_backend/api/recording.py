@@ -213,17 +213,9 @@ async def _run_recording_create_operation(
     manager = get_recording_session_manager()
     try:
         if request.continue_from_dataset_id:
-            row = await _fetch_recording_row(request.continue_from_dataset_id)
-            plan = _build_continue_plan_from_row(row)
-            if not plan.continuable:
-                raise HTTPException(status_code=400, detail=plan.reason or "Recording cannot continue")
-            state = await manager.create(
-                session_id=plan.recording_id,
-                profile=plan.profile_name,
-                dataset_name=plan.dataset_name,
-                task=plan.task,
-                num_episodes=plan.remaining_episodes,
-                target_total_episodes=plan.target_total_episodes,
+            state = await _create_continue_session(
+                manager=manager,
+                recording_id=request.continue_from_dataset_id,
                 episode_time_s=request.episode_time_s,
                 reset_time_s=request.reset_time_s,
                 progress_callback=progress_callback,
@@ -259,6 +251,31 @@ async def _run_recording_create_operation(
         )
 
 
+async def _create_continue_session(
+    *,
+    manager,
+    recording_id: str,
+    episode_time_s: float | None = None,
+    reset_time_s: float | None = None,
+    progress_callback=None,
+):
+    row = await _fetch_recording_row(recording_id)
+    plan = _build_continue_plan_from_row(row)
+    if not plan.continuable:
+        raise HTTPException(status_code=400, detail=plan.reason or "Recording cannot continue")
+    return await manager.create(
+        session_id=plan.recording_id,
+        profile=plan.profile_name,
+        dataset_name=plan.dataset_name,
+        task=plan.task,
+        num_episodes=plan.remaining_episodes,
+        target_total_episodes=plan.target_total_episodes,
+        episode_time_s=plan.episode_time_s if episode_time_s is None else episode_time_s,
+        reset_time_s=plan.reset_time_s if reset_time_s is None else reset_time_s,
+        progress_callback=progress_callback,
+    )
+
+
 @router.post(
     "/session/create",
     response_model=StartupOperationAcceptedResponse,
@@ -288,10 +305,18 @@ async def create_session(request: RecordingSessionCreateRequest):
 async def start_session(request: RecordingSessionStartRequest):
     require_user_id()
     mgr = get_recording_session_manager()
+    resumed = False
+    if mgr.status(request.dataset_id) is None:
+        await _create_continue_session(
+            manager=mgr,
+            recording_id=request.dataset_id,
+        )
+        resumed = True
+
     state = await mgr.start(request.dataset_id)
     return RecordingSessionActionResponse(
         success=True,
-        message="Recording session started",
+        message="Recording session resumed" if resumed else "Recording session started",
         dataset_id=state.id,
         status=state.extras.get("recorder_result"),
     )
@@ -322,7 +347,6 @@ async def stop_session(request: RecordingSessionStopRequest):
     result = recorder.stop(save_current=request.save_current)
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder stop failed")
-    recorder.stop_docker()
     return RecordingSessionActionResponse(
         success=True,
         message="Recording session stopped",
@@ -462,14 +486,12 @@ async def cancel_session(dataset_id: Optional[str] = None):
             except HTTPException as exc:
                 if exc.status_code != 503:
                     raise
-            recorder.stop_docker()
         client = await get_supabase_async_client()
         await client.table("datasets").update({"status": "archived"}).eq("id", dataset_id).execute()
     else:
         result = recorder.stop(save_current=False)
         if not result.get("success", False):
             raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
-        recorder.stop_docker()
 
     return RecordingSessionActionResponse(
         success=True,

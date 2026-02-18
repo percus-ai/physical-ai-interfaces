@@ -22,7 +22,6 @@ from interfaces_backend.models.inference import (
 from interfaces_backend.models.startup import StartupOperationAcceptedResponse
 from interfaces_backend.services.inference_runtime import get_inference_runtime_manager
 from interfaces_backend.services.inference_session import get_inference_session_manager
-from interfaces_backend.services.lerobot_runtime import stop_lerobot
 from interfaces_backend.services.session_manager import require_user_id
 from interfaces_backend.services.startup_operations import get_startup_operations_service
 from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
@@ -216,7 +215,6 @@ async def stop_inference_runner(request: InferenceRunnerStopRequest):
             raise HTTPException(
                 status_code=500, detail=f"Failed to stop inference worker: {exc}"
             ) from exc
-        stop_lerobot(strict=False)
 
     return InferenceRunnerStopResponse(
         success=True,

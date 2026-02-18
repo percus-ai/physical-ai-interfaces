@@ -16,6 +16,7 @@ from interfaces_backend.models.storage import (
     ArchiveBulkRequest,
     ArchiveBulkResponse,
     ArchiveResponse,
+    DatasetReuploadResponse,
     DatasetMergeRequest,
     DatasetMergeResponse,
     DatasetInfo,
@@ -360,6 +361,30 @@ async def restore_dataset(dataset_id: str):
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
     await client.table("datasets").update({"status": "active"}).eq("id", dataset_id).execute()
     return ArchiveResponse(id=dataset_id, success=True, message="Dataset restored", status="active")
+
+
+@router.post("/datasets/{dataset_id:path}/reupload", response_model=DatasetReuploadResponse)
+async def reupload_dataset(dataset_id: str):
+    dataset_id = dataset_id.strip()
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="Dataset ID is required")
+
+    local_path = get_datasets_dir() / dataset_id
+    if not local_path.exists():
+        raise HTTPException(status_code=404, detail=f"Local dataset not found: {dataset_id}")
+    if not local_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Invalid dataset path: {dataset_id}")
+
+    sync_service = R2DBSyncService()
+    ok, error = await sync_service.upload_dataset_with_progress(dataset_id, None)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Dataset re-upload failed: {error}")
+
+    return DatasetReuploadResponse(
+        id=dataset_id,
+        success=True,
+        message="Dataset re-upload completed",
+    )
 
 
 @router.get("/models", response_model=ModelListResponse)

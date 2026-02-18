@@ -433,6 +433,8 @@ export const api = {
       fetchApi(`/api/storage/datasets/${datasetId}`, { method: 'DELETE' }),
     restoreDataset: (datasetId: string) =>
       fetchApi(`/api/storage/datasets/${datasetId}/restore`, { method: 'POST' }),
+    reuploadDataset: (datasetId: string) =>
+      fetchApi(`/api/storage/datasets/${datasetId}/reupload`, { method: 'POST' }),
     archiveModel: (modelId: string) =>
       fetchApi(`/api/storage/models/${modelId}`, { method: 'DELETE' }),
     restoreModel: (modelId: string) =>

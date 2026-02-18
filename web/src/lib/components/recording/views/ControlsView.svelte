@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from 'bits-ui';
+  import { AlertDialog, Button } from 'bits-ui';
   import toast from 'svelte-french-toast';
   import { api } from '$lib/api/client';
 
@@ -20,6 +20,11 @@
   let actionBusy = $state('');
   let actionError = $state('');
   let actionMessage = $state('');
+  let confirmOpen = $state(false);
+  let confirmTitle = $state('');
+  let confirmDescription = $state('');
+  let confirmActionLabel = $state('実行');
+  let pendingConfirmAction = $state<(() => Promise<void>) | null>(null);
 
   const runAction = async (
     label: string,
@@ -44,28 +49,73 @@
 
   const handlePause = async () => runAction('中断', () => api.recording.pauseSession());
   const handleResume = async () => runAction('再開', () => api.recording.resumeSession());
+  const openConfirm = (options: {
+    title: string;
+    description: string;
+    actionLabel: string;
+    action: () => Promise<void>;
+  }) => {
+    if (actionBusy) return;
+    confirmTitle = options.title;
+    confirmDescription = options.description;
+    confirmActionLabel = options.actionLabel;
+    pendingConfirmAction = options.action;
+    confirmOpen = true;
+  };
+  const handleConfirmAction = async () => {
+    if (!pendingConfirmAction) return;
+    const action = pendingConfirmAction;
+    pendingConfirmAction = null;
+    await action();
+  };
+  const handleConfirmCancel = () => {
+    pendingConfirmAction = null;
+  };
   const handleStart = async () => {
     if (!sessionId) return;
     await runAction('開始', () => api.recording.startSession({ dataset_id: sessionId }));
   };
   const handleRetakeCurrent = async () => {
-    if (!confirm('現在のエピソードを破棄して、取り直しますか？')) return;
-    await runAction('取り直し', () => api.recording.cancelEpisode());
+    if (statusState === 'resetting') {
+      openConfirm({
+        title: '直前エピソードを取り直しますか？',
+        description: '現在のリセット中に、ひとつ前のエピソードを取り直します。',
+        actionLabel: '取り直す',
+        action: () => runAction('取り直し', () => api.recording.redoPreviousEpisode())
+      });
+      return;
+    }
+    openConfirm({
+      title: '現在のエピソードを取り直しますか？',
+      description: '現在のエピソードは破棄され、最初から録画し直します。',
+      actionLabel: '取り直す',
+      action: () => runAction('取り直し', () => api.recording.cancelEpisode())
+    });
   };
   const handleNext = async () => {
-    if (!confirm('現在のエピソードを保存して次へ進みますか？')) return;
-    await runAction('次へ', () => api.recording.nextEpisode(), {
-      successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
+    openConfirm({
+      title: '現在のエピソードを保存して次へ進みますか？',
+      description: '現在エピソードを保存して、次エピソードのリセットへ進みます。',
+      actionLabel: '保存して次へ',
+      action: () =>
+        runAction('次へ', () => api.recording.nextEpisode(), {
+          successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
+        })
     });
   };
   const handleStop = async () => {
-    if (!confirm('録画セッションを終了しますか？（現在のエピソードは保存されます）')) return;
-    await runAction('終了', () =>
-      api.recording.stopSession({
-        dataset_id: datasetId,
-        save_current: true
-      })
-    );
+    openConfirm({
+      title: '録画セッションを終了しますか？',
+      description: '現在のエピソードは保存された状態で終了します。',
+      actionLabel: '終了する',
+      action: () =>
+        runAction('終了', () =>
+          api.recording.stopSession({
+            dataset_id: datasetId,
+            save_current: true
+          })
+        )
+    });
   };
 
   const status = $derived(recorderStatus ?? {});
@@ -79,7 +129,7 @@
 
   const canPause = $derived(statusState === 'recording');
   const canResume = $derived(statusState === 'paused');
-  const canRetakeCurrent = $derived(['recording', 'paused'].includes(String(statusState)));
+  const canRetakeCurrent = $derived(['recording', 'paused', 'resetting'].includes(String(statusState)));
   const canNext = $derived(['recording', 'paused'].includes(String(statusState)));
   const canStop = $derived(['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)));
   const canStart = $derived(
@@ -151,8 +201,38 @@
       </div>
 
       <p class="text-[11px] text-slate-500">
-        ←: 現在エピソードを取り直し / →: 現在エピソードを保存して次へ
+        ←: 録画中は現在エピソード取り直し（リセット中は直前エピソード取り直し） / →: 現在エピソードを保存して次へ
       </p>
     </div>
   {/if}
 </div>
+
+<AlertDialog.Root bind:open={confirmOpen}>
+  <AlertDialog.Portal>
+    <AlertDialog.Overlay class="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[1px]" />
+    <AlertDialog.Content
+      class="fixed left-1/2 top-1/2 z-50 w-[min(92vw,28rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
+    >
+      <AlertDialog.Title class="text-base font-semibold text-slate-900">{confirmTitle}</AlertDialog.Title>
+      <AlertDialog.Description class="mt-2 text-sm text-slate-600">{confirmDescription}</AlertDialog.Description>
+      <div class="mt-5 flex items-center justify-end gap-2">
+        <AlertDialog.Cancel
+          class="btn-ghost"
+          type="button"
+          disabled={Boolean(actionBusy)}
+          onclick={handleConfirmCancel}
+        >
+          キャンセル
+        </AlertDialog.Cancel>
+        <AlertDialog.Action
+          class="btn-primary"
+          type="button"
+          disabled={!pendingConfirmAction || Boolean(actionBusy)}
+          onclick={handleConfirmAction}
+        >
+          {confirmActionLabel}
+        </AlertDialog.Action>
+      </div>
+    </AlertDialog.Content>
+  </AlertDialog.Portal>
+</AlertDialog.Root>

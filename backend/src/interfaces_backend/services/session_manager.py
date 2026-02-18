@@ -1,7 +1,7 @@
 """Base session manager for teleop / recording / inference.
 
 Provides a common lifecycle (create → start → stop → status) with
-profile resolution, Docker startup, and profile binding persistence.
+profile resolution and profile binding persistence.
 Subclasses call ``super()`` and add feature-specific logic.
 """
 
@@ -16,11 +16,6 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from interfaces_backend.services.lerobot_runtime import (
-    LerobotCommandError,
-    start_lerobot,
-    stop_lerobot,
-)
 from interfaces_backend.services.vlabor_profiles import (
     VlaborProfileSpec,
     get_active_profile_spec,
@@ -61,8 +56,8 @@ class BaseSessionManager(ABC):
     """Common lifecycle for all session kinds.
 
     Subclasses override ``create``, ``start``, ``stop`` and call
-    ``super()`` to get the shared behaviour (auth, profile, Docker,
-    binding, state tracking).
+    ``super()`` to get the shared behaviour (auth, profile, binding,
+    state tracking).
     """
 
     kind: ClassVar[str]
@@ -94,7 +89,7 @@ class BaseSessionManager(ABC):
         progress_callback: SessionProgressCallback | None = None,
         **kwargs: Any,
     ) -> SessionState:
-        """Resolve profile → start Docker → save binding → track state."""
+        """Resolve profile → save binding → track state."""
         require_user_id()
         self._emit_progress(
             progress_callback,
@@ -106,22 +101,16 @@ class BaseSessionManager(ABC):
 
         self._emit_progress(
             progress_callback,
-            phase="start_lerobot",
+            phase="initialize",
             progress_percent=25.0,
-            message="Lerobotスタックを起動しています...",
+            message="セッション情報を初期化しています...",
         )
-        try:
-            start_lerobot(strict=True)
-        except LerobotCommandError as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to start lerobot stack: {exc}"
-            ) from exc
 
         self._emit_progress(
             progress_callback,
             phase="persist",
             progress_percent=40.0,
-            message="セッション情報を初期化しています...",
+            message="セッション状態を保存しています...",
         )
         resolved_session_id = session_id or self._generate_id()
         state = SessionState(
@@ -157,13 +146,12 @@ class BaseSessionManager(ABC):
         return state
 
     async def stop(self, session_id: str, **kwargs: Any) -> SessionState:
-        """Remove session state and stop Docker."""
+        """Remove session state."""
         with self._lock:
             state = self._sessions.pop(session_id, None)
         if state is None:
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
         state.status = "stopped"
-        stop_lerobot(strict=False)
         return state
 
     def status(self, session_id: str) -> SessionState | None:

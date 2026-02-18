@@ -83,6 +83,14 @@ class ArchiveResponse(BaseModel):
     status: str
 
 
+class DatasetReuploadResponse(BaseModel):
+    """Response for dataset re-upload operation."""
+
+    id: str
+    success: bool
+    message: str
+
+
 class StorageUsageResponse(BaseModel):
     """Response for storage usage endpoint."""
 

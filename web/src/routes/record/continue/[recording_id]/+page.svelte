@@ -14,7 +14,7 @@
   const START_PHASE_LABELS: Record<string, string> = {
     queued: 'キュー待機',
     resolve_profile: 'プロファイル解決',
-    start_lerobot: 'Lerobot起動',
+    initialize: '初期化',
     prepare_recorder: '録画準備',
     persist: '状態保存',
     done: '完了',

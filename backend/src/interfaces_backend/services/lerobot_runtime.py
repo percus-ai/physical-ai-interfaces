@@ -14,15 +14,12 @@ from interfaces_backend.utils.docker_compose import build_compose_command, get_l
 
 logger = logging.getLogger(__name__)
 
-_LEROBOT_SERVICES = ["lerobot-ros2", "rosbridge"]
-
-
 class LerobotCommandError(RuntimeError):
     """Raised when a lerobot stack command fails."""
 
 
 def start_lerobot(*, strict: bool = True) -> subprocess.CompletedProcess[str]:
-    """Start the lerobot-ros2 Docker stack (``docker compose up -d --build``)."""
+    """Start the lerobot-ros2 Docker stack (all compose services)."""
     compose_file = get_lerobot_compose_file()
     if not compose_file.exists():
         message = f"Compose file not found: {compose_file}"
@@ -31,7 +28,7 @@ def start_lerobot(*, strict: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=message)
     compose_cmd = build_compose_command(compose_file)
     result = subprocess.run(
-        [*compose_cmd, "up", "-d", "--build", *_LEROBOT_SERVICES],
+        [*compose_cmd, "up", "-d", "--build"],
         capture_output=True,
         text=True,
     )

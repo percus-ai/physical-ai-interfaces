@@ -20,7 +20,6 @@
   };
 
   const status = $derived(recorderStatus ?? {});
-  const episodeIndex = $derived(asNumber((status as Record<string, unknown>)?.episode_index ?? 0, 0));
   const episodeCountValue = $derived(asNumber((status as Record<string, unknown>)?.episode_count ?? 0, 0));
   const numEpisodes = $derived(asNumber((status as Record<string, unknown>)?.num_episodes ?? 0, 0));
   const frameCount = $derived(asNumber((status as Record<string, unknown>)?.frame_count ?? 0, 0));
@@ -34,10 +33,52 @@
   const statusState = $derived(
     (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? ''
   );
+  const episodeDisplayNumber = $derived.by(() => {
+    if (numEpisodes <= 0) return '-';
+    const state = String(statusState);
+    const base = Math.max(episodeCountValue, 0);
+    const value = state === 'recording' || state === 'paused' ? base + 1 : base;
+    return String(Math.min(Math.max(value, 1), numEpisodes));
+  });
   const progress = $derived(numEpisodes > 0 ? Math.min(episodeCountValue / numEpisodes, 1) : 0);
   const connectionWarning = $derived(
     rosbridgeStatus !== 'connected' ? 'rosbridge が切断されています。状態は更新されません。' : ''
   );
+
+  let fps = $state(0);
+  let lastFrameCount = $state<number | null>(null);
+  let lastFrameAtMs = $state<number | null>(null);
+  const fpsDisplay = $derived(fps > 0 ? fps.toFixed(1) : '-');
+
+  $effect(() => {
+    const now = performance.now();
+    const totalFrames = frameCount;
+    const state = String(statusState);
+    const isRecording = state === 'recording';
+
+    if (!isRecording) {
+      fps = 0;
+      lastFrameCount = totalFrames;
+      lastFrameAtMs = now;
+      return;
+    }
+
+    if (lastFrameCount == null || lastFrameAtMs == null || totalFrames < lastFrameCount) {
+      lastFrameCount = totalFrames;
+      lastFrameAtMs = now;
+      return;
+    }
+
+    const elapsedMs = now - lastFrameAtMs;
+    if (elapsedMs <= 0) return;
+
+    const frameDelta = totalFrames - lastFrameCount;
+    const instantFps = frameDelta > 0 ? (frameDelta * 1000) / elapsedMs : 0;
+    const smoothFactor = 0.35;
+    fps = fps > 0 ? fps * (1 - smoothFactor) + instantFps * smoothFactor : instantFps;
+    lastFrameCount = totalFrames;
+    lastFrameAtMs = now;
+  });
 </script>
 
 <div class="flex h-full flex-col gap-3">
@@ -55,7 +96,7 @@
     {/if}
     <div class="rounded-2xl border border-slate-200/60 bg-white/70 p-3">
       <div class="flex items-center justify-between text-xs text-slate-500">
-        <span>Episode {numEpisodes ? Math.max(episodeIndex, 0) + 1 : '-'}</span>
+        <span>Episode {episodeDisplayNumber}</span>
         <span>{numEpisodes ? `${episodeCountValue}/${numEpisodes}` : '-'}</span>
       </div>
       <div class="mt-2 h-2 w-full rounded-full bg-slate-100">
@@ -65,7 +106,7 @@
         <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
           <p class="label">frame</p>
           <p class="mt-1 text-sm font-semibold text-slate-800">{frameCount}</p>
-          <p class="text-[11px] text-slate-500">episode: {episodeFrameCount}</p>
+          <p class="text-[11px] text-slate-500">current ep: {episodeFrameCount} ({fpsDisplay} fps)</p>
         </div>
         <div class="rounded-xl border border-slate-200/60 bg-white/70 p-2">
           <p class="label">episode time</p>

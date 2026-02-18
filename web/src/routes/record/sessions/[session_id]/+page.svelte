@@ -81,6 +81,7 @@
   };
 
   const STATUS_TOPIC = '/lerobot_recorder/status';
+  const STATUS_THROTTLE_MS = 66;
   let recorderStatus = $state<RecorderStatus | null>(null);
   let rosbridgeStatus = $state<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>('idle');
 
@@ -233,7 +234,7 @@
       (message) => {
         recorderStatus = parseRecorderPayload(message);
       },
-      { throttle_rate: 100 }
+      { throttle_rate: STATUS_THROTTLE_MS }
     );
     const offStatus = client.onStatusChange((next) => {
       rosbridgeStatus = next;

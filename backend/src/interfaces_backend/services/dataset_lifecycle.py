@@ -121,8 +121,11 @@ class DatasetLifecycle:
             logger.info("Auto-upload disabled by user config; skipping for %s", dataset_id)
             return
         try:
-            await self._get_sync_service().upload_dataset_with_progress(dataset_id, None)
-            logger.info("Auto-upload completed for dataset %s", dataset_id)
+            ok, error = await self._get_sync_service().upload_dataset_with_progress(dataset_id, None)
+            if ok:
+                logger.info("Auto-upload completed for dataset %s", dataset_id)
+            else:
+                logger.error("Auto-upload failed for dataset %s: %s", dataset_id, error)
         except Exception:
             logger.error("Auto-upload failed for dataset %s", dataset_id, exc_info=True)
 

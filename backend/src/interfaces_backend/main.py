@@ -78,6 +78,7 @@ from interfaces_backend.api import (
     user_router,
     webui_blueprints_router,
 )
+from interfaces_backend.services.lerobot_runtime import start_lerobot
 from interfaces_backend.core.request_auth import build_session_from_request, is_session_expired
 from interfaces_backend.services.vlabor_runtime import start_vlabor_on_backend_startup
 from interfaces_backend.services.vlabor_profiles import get_active_profile_spec
@@ -111,6 +112,12 @@ async def start_vlabor_container() -> None:
         startup_logger.warning("Could not resolve active profile; starting VLAbor without profile")
         profile_name = None
     start_vlabor_on_backend_startup(profile=profile_name, logger=startup_logger)
+    lerobot_result = start_lerobot(strict=False)
+    if lerobot_result.returncode != 0:
+        detail = (lerobot_result.stderr or lerobot_result.stdout).strip()
+        startup_logger.warning("Failed to start lerobot stack on backend startup: %s", detail)
+    else:
+        startup_logger.info("lerobot stack started on backend startup")
 
 
 def _extract_request_session_id(request: Request) -> Optional[str]:

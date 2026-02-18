@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _ACTIVE_PROFILE_TABLE = "vlabor_profile_selections"
 _SESSION_PROFILE_TABLE = "session_profile_bindings"
 _ACTIVE_PROFILE_SCOPE_ENV = "VLABOR_PROFILE_SCOPE_ID"
+_ACTIVE_PROFILE_GLOBAL_SCOPE = "global"
 
 _SO101_DEFAULT_JOINT_SUFFIXES = [
     "shoulder_pan",
@@ -49,14 +50,91 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _active_profile_scope_id() -> str:
+def _configured_active_profile_scope_id() -> str | None:
     configured = str(os.environ.get(_ACTIVE_PROFILE_SCOPE_ENV) or "").strip()
     if configured:
         return configured
+
+
+def _host_active_profile_scope_id() -> str:
     hostname = socket.gethostname().strip().lower()
     if hostname:
         return f"host:{hostname}"
     return "host:unknown"
+
+
+def _active_profile_read_scope_ids() -> list[str]:
+    configured = _configured_active_profile_scope_id()
+    if configured:
+        return [configured]
+    return [_host_active_profile_scope_id(), _ACTIVE_PROFILE_GLOBAL_SCOPE]
+
+
+def _active_profile_write_scope_ids() -> list[str]:
+    configured = _configured_active_profile_scope_id()
+    if configured:
+        return [configured]
+    return [_host_active_profile_scope_id(), _ACTIVE_PROFILE_GLOBAL_SCOPE]
+
+
+async def _load_selected_profile_name_for_scope(client: Any, scope_id: str) -> str | None:
+    rows = (
+        await client.table(_ACTIVE_PROFILE_TABLE)
+        .select("profile_name")
+        .eq("scope_id", scope_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    ).data or []
+    if not rows:
+        return None
+    return str(rows[0].get("profile_name") or "").strip() or None
+
+
+async def _load_latest_selected_profile_name(client: Any) -> str | None:
+    rows = (
+        await client.table(_ACTIVE_PROFILE_TABLE)
+        .select("profile_name")
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    ).data or []
+    if not rows:
+        return None
+    return str(rows[0].get("profile_name") or "").strip() or None
+
+
+async def _upsert_active_profile_selection(
+    client: Any,
+    *,
+    scope_id: str,
+    profile: VlaborProfileSpec,
+    now: str,
+) -> None:
+    existing = (
+        await client.table(_ACTIVE_PROFILE_TABLE)
+        .select("scope_id")
+        .eq("scope_id", scope_id)
+        .limit(1)
+        .execute()
+    ).data or []
+    payload = {
+        "profile_name": profile.name,
+        "profile_snapshot": profile.snapshot,
+        "updated_at": now,
+    }
+    if existing:
+        await client.table(_ACTIVE_PROFILE_TABLE).update(payload).eq("scope_id", scope_id).execute()
+        return
+    await client.table(_ACTIVE_PROFILE_TABLE).insert(
+        {
+            "scope_id": scope_id,
+            "profile_name": profile.name,
+            "profile_snapshot": profile.snapshot,
+            "created_at": now,
+            "updated_at": now,
+        }
+    ).execute()
 
 
 def _resolve_profiles_dir() -> Optional[Path]:
@@ -587,22 +665,17 @@ async def get_active_profile_spec() -> VlaborProfileSpec:
         raise HTTPException(status_code=404, detail="VLAbor profiles not found")
 
     by_name = {profile.name: profile for profile in profiles}
-    scope_id = _active_profile_scope_id()
     selected_name: Optional[str] = None
     client = await get_supabase_async_client()
     try:
-        rows = (
-            await client.table(_ACTIVE_PROFILE_TABLE)
-            .select("profile_name")
-            .eq("scope_id", scope_id)
-            .limit(1)
-            .execute()
-        ).data or []
+        for scope_id in _active_profile_read_scope_ids():
+            selected_name = await _load_selected_profile_name_for_scope(client, scope_id)
+            if selected_name:
+                break
+        if not selected_name:
+            selected_name = await _load_latest_selected_profile_name(client)
     except Exception as exc:  # noqa: BLE001 - fallback to default profile if table is unavailable
         logger.warning("Failed to load active VLAbor profile from DB: %s", exc)
-        rows = []
-    if rows:
-        selected_name = str(rows[0].get("profile_name") or "").strip() or None
 
     if selected_name and selected_name in by_name:
         return by_name[selected_name]
@@ -618,33 +691,15 @@ async def set_active_profile_spec(profile_name: str) -> VlaborProfileSpec:
     if not profile:
         raise HTTPException(status_code=404, detail=f"VLAbor profile not found: {profile_name}")
 
-    scope_id = _active_profile_scope_id()
     client = await get_supabase_async_client()
     now = _now_iso()
-    existing = (
-        await client.table(_ACTIVE_PROFILE_TABLE)
-        .select("scope_id")
-        .eq("scope_id", scope_id)
-        .limit(1)
-        .execute()
-    ).data or []
-    payload = {
-        "profile_name": profile.name,
-        "profile_snapshot": profile.snapshot,
-        "updated_at": now,
-    }
-    if existing:
-        await client.table(_ACTIVE_PROFILE_TABLE).update(payload).eq("scope_id", scope_id).execute()
-    else:
-        await client.table(_ACTIVE_PROFILE_TABLE).insert(
-            {
-                "scope_id": scope_id,
-                "profile_name": profile.name,
-                "profile_snapshot": profile.snapshot,
-                "created_at": now,
-                "updated_at": now,
-            }
-        ).execute()
+    for scope_id in _active_profile_write_scope_ids():
+        await _upsert_active_profile_selection(
+            client,
+            scope_id=scope_id,
+            profile=profile,
+            now=now,
+        )
     return profile
 
 

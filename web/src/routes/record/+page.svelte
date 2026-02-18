@@ -61,6 +61,7 @@
   const recordings = $derived($recordingsQuery.data?.recordings ?? []);
 
   const STATUS_TOPIC = '/lerobot_recorder/status';
+  const STATUS_THROTTLE_MS = 66;
   const STATUS_LABELS: Record<string, string> = {
     idle: '待機',
     warming: '準備中',
@@ -96,7 +97,7 @@
         recorderStatus = parseRecorderPayload(message);
         lastStatusAt = new Date().toLocaleTimeString();
       },
-      { throttle_rate: 100 }
+      { throttle_rate: STATUS_THROTTLE_MS }
     );
     const offStatus = client.onStatusChange((next) => {
       rosbridgeStatus = next;
@@ -195,7 +196,7 @@
             <tr class="border-t border-slate-200/60">
               <td class="py-3">
                 {#if recording.continuable}
-                  <a class="text-brand underline" href={`/record/continue/${encodeURIComponent(recording.recording_id)}`}>
+                  <a class="text-brand underline" href={`/record/sessions/${encodeURIComponent(recording.recording_id)}`}>
                     {recording.dataset_name ?? recording.recording_id}
                   </a>
                 {:else}

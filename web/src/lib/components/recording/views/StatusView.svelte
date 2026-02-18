@@ -34,9 +34,10 @@
   const subscribe = () => {
     if (!topic) return;
     const client = getRosbridgeClient();
+    const throttleRate = topic === '/lerobot_recorder/status' ? 66 : 200;
     unsubscribe?.();
     unsubscribe = client.subscribe(topic, handleMessage, {
-      throttle_rate: 200
+      throttle_rate: throttleRate
     });
     status = client.getStatus();
   };

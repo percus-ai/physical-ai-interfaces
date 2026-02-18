@@ -20,6 +20,7 @@ from interfaces_backend.services.vlabor_profiles import extract_arm_namespaces
 from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
 
 
 class RecordingSessionManager(BaseSessionManager):
@@ -115,12 +116,51 @@ class RecordingSessionManager(BaseSessionManager):
 
         self._recorder.ensure_running()
         payload = state.extras["recorder_payload"]
-        result = self._recorder.start(payload)
-        if not result.get("success", False):
+        recorder_status: dict[str, Any] | None = None
+        try:
+            recorder_status = self._recorder.status()
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+
+        if self._is_active_for_session(recorder_status, state.id):
+            result = {
+                "success": True,
+                "message": "Recorder already active",
+                "status": recorder_status,
+            }
+        elif self._is_active_for_other_session(recorder_status, state.id):
+            active_dataset_id = str((recorder_status or {}).get("dataset_id") or "").strip()
             raise HTTPException(
-                status_code=500,
-                detail=result.get("error") or "Recorder start failed",
+                status_code=409,
+                detail=f"Recorder already active for another session: {active_dataset_id}",
             )
+        else:
+            result = self._recorder.start(payload)
+            if not result.get("success", False):
+                if self._looks_like_already_active_error(result):
+                    latest_status: dict[str, Any] | None = None
+                    try:
+                        latest_status = self._recorder.status()
+                    except HTTPException as exc:
+                        if exc.status_code != 503:
+                            raise
+                    if self._is_active_for_session(latest_status, state.id):
+                        result = {
+                            "success": True,
+                            "message": "Recorder already active",
+                            "status": latest_status,
+                        }
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=result.get("error") or result.get("message") or "Recorder start failed",
+                        )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=result.get("error") or result.get("message") or "Recorder start failed",
+                    )
 
         await self._dataset.upsert_record(
             dataset_id=state.id,
@@ -134,6 +174,35 @@ class RecordingSessionManager(BaseSessionManager):
         self._start_completion_watcher(state.id)
         return state
 
+    @staticmethod
+    def _recorder_state(status: dict[str, Any] | None) -> str:
+        if not status:
+            return ""
+        return str(status.get("state") or "").strip().lower()
+
+    @staticmethod
+    def _recorder_dataset_id(status: dict[str, Any] | None) -> str:
+        if not status:
+            return ""
+        return str(status.get("dataset_id") or "").strip()
+
+    @classmethod
+    def _is_active_for_session(cls, status: dict[str, Any] | None, session_id: str) -> bool:
+        state = cls._recorder_state(status)
+        dataset_id = cls._recorder_dataset_id(status)
+        return state in _ACTIVE_RECORDER_STATES and dataset_id == session_id
+
+    @classmethod
+    def _is_active_for_other_session(cls, status: dict[str, Any] | None, session_id: str) -> bool:
+        state = cls._recorder_state(status)
+        dataset_id = cls._recorder_dataset_id(status)
+        return state in _ACTIVE_RECORDER_STATES and bool(dataset_id) and dataset_id != session_id
+
+    @staticmethod
+    def _looks_like_already_active_error(result: dict[str, Any]) -> bool:
+        message = str(result.get("message") or result.get("error") or "").strip().lower()
+        return "already" in message and "active" in message
+
     async def stop(self, session_id: str, **kwargs: Any) -> SessionState:
         state = self._get_or_raise(session_id)
         self._cancel_completion_watcher(session_id)
@@ -141,6 +210,7 @@ class RecordingSessionManager(BaseSessionManager):
         cancel = kwargs.get("cancel", False)
 
         recorder_result: dict = {}
+        stop_requested = False
         if state.extras.get("recording_started"):
             recorder_status = kwargs.get("recorder_status")
             if recorder_status is None:
@@ -153,6 +223,7 @@ class RecordingSessionManager(BaseSessionManager):
 
             if recorder_status is None:
                 recorder_result = self._recorder.stop(save_current=save_current)
+                stop_requested = True
                 if not cancel and not recorder_result.get("success", False):
                     raise HTTPException(
                         status_code=500,
@@ -169,6 +240,7 @@ class RecordingSessionManager(BaseSessionManager):
                 }
                 if recorder_active:
                     recorder_result = self._recorder.stop(save_current=save_current)
+                    stop_requested = True
                     if not cancel and not recorder_result.get("success", False):
                         raise HTTPException(
                             status_code=500,
@@ -180,6 +252,24 @@ class RecordingSessionManager(BaseSessionManager):
                         "message": "Recorder already finalized",
                         "status": recorder_status,
                     }
+
+        if stop_requested and recorder_result.get("success", False):
+            final_status = await asyncio.to_thread(
+                self._recorder.wait_until_finalized,
+                state.id,
+            )
+            if final_status:
+                recorder_result["status"] = final_status
+                final_state = str(final_status.get("state") or "").strip().lower()
+                final_dataset_id = str(final_status.get("dataset_id") or "").strip()
+                if final_dataset_id == state.id and final_state in _ACTIVE_RECORDER_STATES:
+                    detail = (
+                        "Recorder stop timed out before finalize "
+                        f"(state={final_state}, dataset_id={final_dataset_id})"
+                    )
+                    if not cancel:
+                        raise HTTPException(status_code=500, detail=detail)
+                    logger.warning(detail)
 
         if not cancel:
             await self._dataset.update_stats(state.id)

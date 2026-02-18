@@ -7,12 +7,10 @@ recording.py and inference.py.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 import urllib.error
 import urllib.request
-from typing import Any
 
 from fastapi import HTTPException
 
@@ -20,15 +18,13 @@ from interfaces_backend.services.lerobot_runtime import (
     LerobotCommandError,
     get_lerobot_service_state,
     start_lerobot,
-    stop_lerobot,
 )
 from interfaces_backend.services.vlabor_profiles import extract_camera_specs
 from percus_ai.observability import ArmId, CommOverheadReporter, PointId, resolve_ids
 
-logger = logging.getLogger(__name__)
-
 _RECORDER_URL = os.environ.get("LEROBOT_RECORDER_URL", "http://127.0.0.1:8082")
 _COMM_REPORTER = CommOverheadReporter("backend")
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
 
 
 class RecorderBridge:
@@ -53,6 +49,42 @@ class RecorderBridge:
 
     def status(self) -> dict:
         return self._call("/api/session/status")
+
+    def wait_until_finalized(
+        self,
+        dataset_id: str,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.5,
+    ) -> dict | None:
+        """Wait until recorder is finalized for the given dataset.
+
+        Returns the latest recorder status payload. If status endpoint is temporarily
+        unavailable, this method keeps polling until timeout.
+        """
+        deadline = time.time() + max(timeout_s, 0.0)
+        interval = max(poll_interval_s, 0.1)
+        latest_status: dict | None = None
+
+        while time.time() < deadline:
+            try:
+                status = self.status()
+            except HTTPException as exc:
+                if exc.status_code != 503:
+                    raise
+                time.sleep(interval)
+                continue
+
+            latest_status = status
+            state = str(status.get("state") or "").strip().lower()
+            status_dataset_id = str(status.get("dataset_id") or "").strip()
+            if not status_dataset_id or status_dataset_id != dataset_id:
+                return status
+            if state not in _ACTIVE_RECORDER_STATES:
+                return status
+
+            time.sleep(interval)
+
+        return latest_status
 
     def redo_episode(self) -> dict:
         return self._call("/api/episode/redo", {})
@@ -102,21 +134,6 @@ class RecorderBridge:
         if last_error and last_error.detail:
             detail = f"{detail}: {last_error.detail}"
         raise HTTPException(status_code=503, detail=detail)
-
-    def start_docker(self) -> None:
-        """Start the lerobot Docker stack."""
-        try:
-            start_lerobot(strict=True)
-        except LerobotCommandError as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to start lerobot stack: {exc}"
-            ) from exc
-
-    def stop_docker(self) -> None:
-        """Stop the lerobot Docker stack (best-effort)."""
-        result = stop_lerobot(strict=False)
-        if result.returncode != 0:
-            logger.warning("lerobot stack stop failed: %s", result.stderr.strip())
 
     # -- helpers --------------------------------------------------------------
 

@@ -123,6 +123,26 @@
     }
   }
 
+  async function handleReupload() {
+    actionMessage = '';
+    actionError = '';
+
+    if (!datasetId) return;
+    const confirmed = confirm(`${datasetId} をR2へ再アップロードしますか？`);
+    if (!confirmed) return;
+
+    actionLoading = true;
+    try {
+      const result = await api.storage.reuploadDataset(datasetId) as { message?: string };
+      await refetchDataset();
+      actionMessage = result.message ?? '再アップロードを完了しました。';
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : '再アップロードに失敗しました。';
+    } finally {
+      actionLoading = false;
+    }
+  }
+
   async function handleMerge() {
     actionMessage = '';
     actionError = '';
@@ -227,6 +247,14 @@
           復元
         </button>
       {:else}
+        <button
+          class={`btn-primary ${actionLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+          type="button"
+          disabled={actionLoading}
+          onclick={handleReupload}
+        >
+          再アップロード
+        </button>
         <button
           class={`btn-ghost ${actionLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
           type="button"
