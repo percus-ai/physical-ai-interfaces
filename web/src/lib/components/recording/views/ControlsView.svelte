@@ -21,29 +21,28 @@
   let recorderStatus = $state<RecorderStatus | null>(null);
   let rosbridgeStatus = $state<RosbridgeStatus>('idle');
   let actionBusy = $state('');
-  let actionError = $state('');
-  let actionMessage = $state('');
   let confirmOpen = $state(false);
   let confirmTitle = $state('');
   let confirmDescription = $state('');
   let confirmActionLabel = $state('実行');
   let pendingConfirmAction = $state<(() => Promise<boolean>) | null>(null);
+  let wasDisconnected = false;
+  let wasFinalizing = false;
+  let finalizingToastId: string | null = null;
 
   const runAction = async (
     label: string,
     action: () => Promise<unknown>,
     options: { successToast?: string } = {}
   ): Promise<boolean> => {
-    actionError = '';
-    actionMessage = '';
     actionBusy = label;
     try {
-      const result = (await action()) as { message?: string };
-      actionMessage = result?.message ?? `${label} を実行しました。`;
+      await action();
       toast.success(options.successToast ?? `${label}リクエストを受け付けました。`);
       return true;
     } catch (err) {
-      actionError = err instanceof Error ? err.message : `${label} に失敗しました。`;
+      const message = err instanceof Error ? err.message : `${label} に失敗しました。`;
+      toast.error(message);
       return false;
     } finally {
       actionBusy = '';
@@ -206,9 +205,40 @@
   const canStart = $derived(
     Boolean(sessionId) && ['idle', 'completed', 'inactive', ''].includes(String(statusState))
   );
-  const connectionWarning = $derived(
-    rosbridgeStatus !== 'connected' ? 'rosbridge が切断されています。状態は更新されません。' : ''
-  );
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const disconnected = rosbridgeStatus !== 'connected';
+    if (disconnected && !wasDisconnected) {
+      toast.error('rosbridge が切断されています。状態は更新されません。');
+    } else if (!disconnected && wasDisconnected) {
+      toast.success('rosbridge 接続が復旧しました。');
+    }
+    wasDisconnected = disconnected;
+  });
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    if (isFinalizing && !wasFinalizing) {
+      finalizingToastId = String(toast.loading('エピソード保存中です...'));
+    } else if (!isFinalizing && wasFinalizing) {
+      if (finalizingToastId !== null) {
+        toast.dismiss(finalizingToastId);
+        finalizingToastId = null;
+      }
+      toast.success('エピソード保存が完了しました。');
+    }
+    wasFinalizing = isFinalizing;
+  });
+
+  $effect(() => {
+    return () => {
+      if (finalizingToastId !== null) {
+        toast.dismiss(finalizingToastId);
+        finalizingToastId = null;
+      }
+    };
+  });
 </script>
 
 <div class="flex h-full flex-col gap-3">
@@ -216,19 +246,6 @@
     <p class="text-xs font-semibold uppercase tracking-widest text-slate-500">{title}</p>
     <span class="text-[10px] text-slate-400">{statusState || 'unknown'}</span>
   </div>
-
-  {#if actionError}
-    <p class="text-xs text-rose-600">{actionError}</p>
-  {/if}
-  {#if actionMessage}
-    <p class="text-xs text-emerald-600">{actionMessage}</p>
-  {/if}
-  {#if connectionWarning}
-    <p class="text-xs text-amber-600">{connectionWarning}</p>
-  {/if}
-  {#if isFinalizing}
-    <p class="text-xs text-sky-700">エピソード保存中です（動画エンコード中の可能性）。完了まで操作できません。</p>
-  {/if}
 
   {#if mode !== 'recording'}
     <div class="rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 text-xs text-amber-700">
