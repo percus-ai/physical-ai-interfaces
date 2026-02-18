@@ -175,10 +175,13 @@
   const completedEpisodeCount = $derived(
     asNumber((status as Record<string, unknown>)?.episode_count ?? 0, 0)
   );
+  const statusPhase = $derived(String((status as Record<string, unknown>)?.phase ?? 'wait'));
+  const isFinalizing = $derived(statusPhase === 'finalizing');
 
-  const canPause = $derived(statusState === 'recording');
-  const canResume = $derived(statusState === 'paused');
+  const canPause = $derived(statusState === 'recording' && !isFinalizing);
+  const canResume = $derived(statusState === 'paused' && !isFinalizing);
   const canRetakePrevious = $derived.by(() => {
+    if (isFinalizing) return false;
     const state = String(statusState);
     if (state === 'resetting') {
       return false;
@@ -189,14 +192,17 @@
     return state === 'recording' && completedEpisodeCount > 0;
   });
   const canRetakeCurrent = $derived.by(() => {
+    if (isFinalizing) return false;
     const state = String(statusState);
     if (state === 'resetting') {
       return false;
     }
     return state === 'recording' || state === 'paused';
   });
-  const canNext = $derived(['recording', 'paused'].includes(String(statusState)));
-  const canStop = $derived(['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)));
+  const canNext = $derived(['recording', 'paused'].includes(String(statusState)) && !isFinalizing);
+  const canStop = $derived(
+    ['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)) && !isFinalizing
+  );
   const canStart = $derived(
     Boolean(sessionId) && ['idle', 'completed', 'inactive', ''].includes(String(statusState))
   );
@@ -219,6 +225,9 @@
   {/if}
   {#if connectionWarning}
     <p class="text-xs text-amber-600">{connectionWarning}</p>
+  {/if}
+  {#if isFinalizing}
+    <p class="text-xs text-sky-700">エピソード保存中です（動画エンコード中の可能性）。完了まで操作できません。</p>
   {/if}
 
   {#if mode !== 'recording'}

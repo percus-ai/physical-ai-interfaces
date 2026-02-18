@@ -48,6 +48,7 @@
     return rawStatusPhase;
   });
   const statusDetail = $derived(String((status as Record<string, unknown>)?.last_error ?? ''));
+  const finalizeElapsed = $derived(asNumber((status as Record<string, unknown>)?.finalize_elapsed_s ?? 0));
   const episodeIndex = $derived((status as Record<string, unknown>)?.episode_index ?? null);
   const episodeTotal = $derived(asNumber((status as Record<string, unknown>)?.num_episodes ?? 0));
   const episodeTime = $derived(asNumber((status as Record<string, unknown>)?.episode_time_s ?? 0));
@@ -56,19 +57,41 @@
   const resetElapsed = $derived(asNumber((status as Record<string, unknown>)?.reset_elapsed_s ?? 0));
 
   const timelineMode = $derived(
-    statusPhase === 'recording' ? 'recording' : statusPhase === 'reset' ? 'reset' : 'wait'
+    statusPhase === 'finalizing'
+      ? 'finalizing'
+      : statusPhase === 'recording'
+        ? 'recording'
+        : statusPhase === 'reset'
+          ? 'reset'
+          : 'wait'
   );
   const timelineTotal = $derived(
     timelineMode === 'recording' ? episodeTime : timelineMode === 'reset' ? resetTime : 0
   );
   const timelineElapsed = $derived(
-    timelineMode === 'recording' ? episodeElapsed : timelineMode === 'reset' ? resetElapsed : 0
+    timelineMode === 'recording'
+      ? episodeElapsed
+      : timelineMode === 'reset'
+        ? resetElapsed
+        : timelineMode === 'finalizing'
+          ? finalizeElapsed
+          : 0
   );
   const timelineProgress = $derived(
-    timelineTotal > 0 ? Math.min(Math.max(timelineElapsed / timelineTotal, 0), 1) : 0
+    timelineMode === 'finalizing'
+      ? 1
+      : timelineTotal > 0
+        ? Math.min(Math.max(timelineElapsed / timelineTotal, 0), 1)
+        : 0
   );
   const timelineLabel = $derived(
-    timelineMode === 'recording' ? '録画中' : timelineMode === 'reset' ? 'リセット中' : '待機中'
+    timelineMode === 'recording'
+      ? '録画中'
+      : timelineMode === 'reset'
+        ? 'リセット中'
+        : timelineMode === 'finalizing'
+          ? '保存中'
+          : '待機中'
   );
   const connectionWarning = $derived(
     rosbridgeStatus !== 'connected' ? 'rosbridge が切断されています。状態は更新されません。' : ''
@@ -105,13 +128,31 @@
       </div>
       <div class="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-200/70">
         <div
-          class={`h-full rounded-full transition ${timelineMode === 'reset' ? 'bg-amber-400' : 'bg-brand'}`}
+          class={`h-full rounded-full transition ${
+            timelineMode === 'reset'
+              ? 'bg-amber-400'
+              : timelineMode === 'finalizing'
+                ? 'bg-sky-400 animate-pulse'
+                : 'bg-brand'
+          }`}
           style={`width: ${(timelineProgress * 100).toFixed(1)}%`}
         ></div>
       </div>
       <div class="mt-2 flex justify-between text-[10px] text-slate-500">
-        <span>{formatSeconds(timelineElapsed)}</span>
-        <span>{formatSeconds(timelineTotal)}</span>
+        <span>
+          {#if timelineMode === 'finalizing'}
+            {formatSeconds(timelineElapsed)}
+          {:else}
+            {formatSeconds(timelineElapsed)}
+          {/if}
+        </span>
+        <span>
+          {#if timelineMode === 'finalizing'}
+            エピソード保存中
+          {:else}
+            {formatSeconds(timelineTotal)}
+          {/if}
+        </span>
       </div>
     </div>
 
