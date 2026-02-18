@@ -89,19 +89,18 @@
       successToast: '開始リクエストを受け付けました。状態反映を待っています。'
     });
   };
+  const handleRetakePrevious = async () => {
+    openConfirm({
+      title: '直前エピソードを取り直しますか？',
+      description: '直前に保存したエピソードを取り消して、録画し直します。',
+      actionLabel: '取り直す',
+      action: () =>
+        runAction('直前取り直し', () => api.recording.redoPreviousEpisode(), {
+          successToast: '直前エピソードの取り直しを受け付けました。'
+        })
+    });
+  };
   const handleRetakeCurrent = async () => {
-    if (statusState === 'resetting') {
-      openConfirm({
-        title: '直前エピソードを取り直しますか？',
-        description: '現在のリセット中に、ひとつ前のエピソードを取り直します。',
-        actionLabel: '取り直す',
-        action: () =>
-          runAction('取り直し', () => api.recording.redoPreviousEpisode(), {
-            successToast: '直前エピソードの取り直しを受け付けました。'
-          })
-      });
-      return;
-    }
     openConfirm({
       title: '現在のエピソードを取り直しますか？',
       description: '現在のエピソードは破棄され、最初から録画し直します。',
@@ -154,6 +153,11 @@
   });
 
   const status = $derived(recorderStatus ?? {});
+  const asNumber = (value: unknown, fallback = 0) => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
   const statusDatasetId = $derived.by(() => {
     const value = (status as Record<string, unknown>)?.dataset_id;
     return typeof value === 'string' ? value : '';
@@ -168,10 +172,29 @@
     const value = (status as Record<string, unknown>)?.dataset_id;
     return typeof value === 'string' ? value : sessionId;
   });
+  const completedEpisodeCount = $derived(
+    asNumber((status as Record<string, unknown>)?.episode_count ?? 0, 0)
+  );
 
   const canPause = $derived(statusState === 'recording');
   const canResume = $derived(statusState === 'paused');
-  const canRetakeCurrent = $derived(['recording', 'paused', 'resetting'].includes(String(statusState)));
+  const canRetakePrevious = $derived.by(() => {
+    const state = String(statusState);
+    if (state === 'resetting') {
+      return false;
+    }
+    if (state === 'paused') {
+      return false;
+    }
+    return state === 'recording' && completedEpisodeCount > 0;
+  });
+  const canRetakeCurrent = $derived.by(() => {
+    const state = String(statusState);
+    if (state === 'resetting') {
+      return false;
+    }
+    return state === 'recording' || state === 'paused';
+  });
   const canNext = $derived(['recording', 'paused'].includes(String(statusState)));
   const canStop = $derived(['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)));
   const canStart = $derived(
@@ -204,7 +227,15 @@
     </div>
   {:else}
     <div class="grid gap-2 text-sm">
-      <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+      <div class="grid grid-cols-[1fr_1fr_auto_1fr] items-center gap-2">
+        <Button.Root
+          class="btn-ghost"
+          type="button"
+          onclick={handleRetakePrevious}
+          disabled={!canRetakePrevious || Boolean(actionBusy)}
+        >
+          {actionBusy === '直前取り直し' ? '前を取り直し中...' : '⇤'}
+        </Button.Root>
         <Button.Root
           class="btn-ghost"
           type="button"
@@ -243,7 +274,7 @@
       </div>
 
       <p class="text-[11px] text-slate-500">
-        ←: 録画中は現在エピソード取り直し（リセット中は直前エピソード取り直し） / →: 現在エピソードを保存して次へ
+        ⇤: 直前エピソードを取り直し / ←: 現在エピソードを取り直し / →: 現在エピソードを保存して次へ
       </p>
     </div>
   {/if}
