@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from interfaces_backend.services.recorder_bridge import get_recorder_bridge
+from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
 from interfaces_backend.services.recording_session import get_recording_session_manager
 from interfaces_backend.services.session_manager import require_user_id
 from interfaces_backend.services.startup_operations import get_startup_operations_service
@@ -61,6 +62,19 @@ class RecordingSessionStatusResponse(BaseModel):
     status: Dict[str, Any]
 
 
+class RecordingUploadStatusResponse(BaseModel):
+    dataset_id: str
+    status: str = "idle"
+    phase: str = "idle"
+    progress_percent: float = 0.0
+    message: str = ""
+    files_done: int = 0
+    total_files: int = 0
+    current_file: Optional[str] = None
+    error: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class RecordingInfo(BaseModel):
     recording_id: str
     dataset_name: str
@@ -75,6 +89,7 @@ class RecordingInfo(BaseModel):
     continuable: bool = False
     continue_block_reason: Optional[str] = None
     size_bytes: int = 0
+    is_local: bool = False
 
 
 class RecordingListResponse(BaseModel):
@@ -518,6 +533,17 @@ async def get_session_status(session_id: str):
     return RecordingSessionStatusResponse(dataset_id=active_id, status=status)
 
 
+@router.get(
+    "/sessions/{session_id}/upload-status",
+    response_model=RecordingUploadStatusResponse,
+)
+async def get_session_upload_status(session_id: str):
+    require_user_id()
+    lifecycle = get_dataset_lifecycle()
+    status = lifecycle.get_dataset_upload_status(session_id)
+    return RecordingUploadStatusResponse(**status)
+
+
 # -- Recording management endpoints (DB / filesystem) ------------------------
 
 
@@ -557,6 +583,7 @@ async def list_recordings():
                 continuable=plan.continuable,
                 continue_block_reason=plan.reason,
                 size_bytes=row.get("size_bytes") or 0,
+                is_local=(get_datasets_dir() / str(row.get("id"))).exists(),
             )
         )
     return RecordingListResponse(recordings=recordings, total=len(recordings))
@@ -589,6 +616,7 @@ async def get_recording(recording_id: str):
         continuable=plan.continuable,
         continue_block_reason=plan.reason,
         size_bytes=row.get("size_bytes") or 0,
+        is_local=(get_datasets_dir() / str(row.get("id"))).exists(),
     )
 
 

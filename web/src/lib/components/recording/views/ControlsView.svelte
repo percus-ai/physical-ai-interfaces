@@ -2,6 +2,7 @@
   import { AlertDialog, Button } from 'bits-ui';
   import toast from 'svelte-french-toast';
   import { api } from '$lib/api/client';
+  import { connectStream } from '$lib/realtime/stream';
   import {
     subscribeRecorderStatus,
     type RecorderStatus,
@@ -28,7 +29,22 @@
   let pendingConfirmAction = $state<(() => Promise<boolean>) | null>(null);
   let wasDisconnected = false;
   let wasFinalizing = false;
+  let previousStatusState = '';
   let finalizingToastId: string | null = null;
+  let uploadModalOpen = $state(false);
+  let uploadStatus = $state<{
+    dataset_id: string;
+    status: string;
+    phase: string;
+    progress_percent: number;
+    message?: string;
+    files_done?: number;
+    total_files?: number;
+    current_file?: string | null;
+    error?: string | null;
+    updated_at?: string | null;
+  } | null>(null);
+  let stopUploadStream: (() => void) | null = null;
 
   const runAction = async (
     label: string,
@@ -122,12 +138,16 @@
     });
   };
   const handleStop = async () => {
+    const targetDatasetId = String(datasetId || sessionId || '').trim();
     openConfirm({
-      title: '録画セッションを終了しますか？',
+      title: 'データセット収録を終了しますか？',
       description: '現在のエピソードは保存された状態で終了します。',
       actionLabel: '終了する',
-      action: () =>
-        runAction('終了', () =>
+      action: async () => {
+        if (targetDatasetId) {
+          startUploadModal(targetDatasetId);
+        }
+        const success = await runAction('終了', () =>
           api.recording.stopSession({
             dataset_id: datasetId,
             save_current: true
@@ -135,8 +155,112 @@
           {
             successToast: '終了リクエストを受け付けました。状態反映を待っています。'
           }
-        )
+        );
+        if (!success) {
+          disconnectUploadStream();
+          uploadModalOpen = false;
+          return false;
+        }
+        return true;
+      }
     });
+  };
+
+  const isTerminalUploadStatus = (status: { status?: string; phase?: string } | null) => {
+    if (!status) return false;
+    const phase = String(status.phase ?? '').toLowerCase();
+    const value = String(status.status ?? '').toLowerCase();
+    return (
+      phase === 'completed' ||
+      phase === 'failed' ||
+      phase === 'disabled' ||
+      value === 'completed' ||
+      value === 'failed' ||
+      value === 'disabled'
+    );
+  };
+
+  const uploadPhaseLabel = $derived.by(() => {
+    const phase = String(uploadStatus?.phase ?? '').toLowerCase();
+    if (actionBusy === '終了' && (!phase || phase === 'idle')) {
+      return '収録終了処理中';
+    }
+    if (phase === 'starting') return 'アップロード準備中';
+    if (phase === 'uploading') return 'アップロード中';
+    if (phase === 'completed') return 'アップロード完了';
+    if (phase === 'failed') return 'アップロード失敗';
+    if (phase === 'disabled') return 'アップロード無効';
+    return '待機中';
+  });
+
+  const uploadProgressPercent = $derived.by(() => {
+    const raw = uploadStatus?.progress_percent;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return Math.min(Math.max(raw, 0), 100);
+    }
+    return 0;
+  });
+
+  const disconnectUploadStream = () => {
+    if (stopUploadStream) {
+      stopUploadStream();
+      stopUploadStream = null;
+    }
+  };
+
+  const startUploadStream = (datasetIdForStatus: string) => {
+    if (typeof window === 'undefined') return;
+    disconnectUploadStream();
+    stopUploadStream = connectStream({
+      path: `/api/stream/recording/sessions/${encodeURIComponent(datasetIdForStatus)}/upload-status`,
+      onMessage: (next) => {
+        uploadStatus = next as {
+          dataset_id: string;
+          status: string;
+          phase: string;
+          progress_percent: number;
+          message?: string;
+          files_done?: number;
+          total_files?: number;
+          current_file?: string | null;
+          error?: string | null;
+          updated_at?: string | null;
+        };
+        if (isTerminalUploadStatus(uploadStatus) && actionBusy !== '終了') {
+          disconnectUploadStream();
+        }
+      }
+    });
+  };
+
+  const startUploadModal = (datasetIdForStatus: string) => {
+    if (typeof window === 'undefined') return;
+    uploadModalOpen = true;
+    uploadStatus = {
+      dataset_id: datasetIdForStatus,
+      status: 'running',
+      phase: 'starting',
+      progress_percent: 0,
+      message: 'アップロード準備中...'
+    };
+    startUploadStream(datasetIdForStatus);
+  };
+
+  const retryUpload = async () => {
+    const targetDatasetId = String(uploadStatus?.dataset_id || datasetId || sessionId || '').trim();
+    if (!targetDatasetId) return;
+    const success = await runAction('再アップロード', () => api.storage.reuploadDataset(targetDatasetId), {
+      successToast: '再アップロードを受け付けました。'
+    });
+    if (!success) return;
+    uploadStatus = {
+      dataset_id: targetDatasetId,
+      status: 'running',
+      phase: 'starting',
+      progress_percent: 0,
+      message: 'アップロード準備中...'
+    };
+    startUploadStream(targetDatasetId);
   };
 
   $effect(() => {
@@ -219,6 +343,7 @@
 
   $effect(() => {
     if (typeof window === 'undefined') return;
+    if (uploadModalOpen) return;
     if (isFinalizing && !wasFinalizing) {
       finalizingToastId = String(toast.loading('エピソード保存中です...'));
     } else if (!isFinalizing && wasFinalizing) {
@@ -239,6 +364,39 @@
       }
     };
   });
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const current = String(statusState);
+    const previous = previousStatusState;
+    const isCompletedNow = current === 'completed';
+    const wasCompleted = previous === 'completed';
+    const sameSession = statusDatasetId === sessionId;
+    if (
+      isCompletedNow &&
+      !wasCompleted &&
+      previous !== '' &&
+      sameSession &&
+      !uploadModalOpen
+    ) {
+      startUploadModal(sessionId);
+      toast.success('録画が完了しました。アップロード進捗を表示します。');
+    }
+    previousStatusState = current;
+  });
+
+  $effect(() => {
+    return () => {
+      disconnectUploadStream();
+    };
+  });
+
+  $effect(() => {
+    if (!uploadStatus) return;
+    if (!isTerminalUploadStatus(uploadStatus)) return;
+    if (actionBusy === '終了') return;
+    disconnectUploadStream();
+  });
 </script>
 
 <div class="flex h-full flex-col gap-3">
@@ -249,7 +407,7 @@
 
   {#if mode !== 'recording'}
     <div class="rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 text-xs text-amber-700">
-      このビューは録画セッションのみ対応しています。
+      このビューはデータセット収録のみ対応しています。
     </div>
   {:else}
     <div class="grid gap-2 text-sm">
@@ -331,6 +489,68 @@
         >
           {confirmActionLabel}
         </AlertDialog.Action>
+      </div>
+    </AlertDialog.Content>
+  </AlertDialog.Portal>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={uploadModalOpen}>
+  <AlertDialog.Portal>
+    <AlertDialog.Overlay class="fixed inset-0 z-40 bg-slate-900/45 backdrop-blur-[1px]" />
+    <AlertDialog.Content
+      class="fixed left-1/2 top-1/2 z-50 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
+    >
+      <AlertDialog.Title class="text-base font-semibold text-slate-900">アップロード進捗</AlertDialog.Title>
+      <AlertDialog.Description class="mt-2 text-sm text-slate-600">
+        収録終了後のデータアップロード状況を表示しています。
+      </AlertDialog.Description>
+
+      <div class="mt-4 space-y-3 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <div class="flex items-center justify-between text-xs text-slate-500">
+          <span>{uploadPhaseLabel}</span>
+          <span>{uploadProgressPercent.toFixed(1)}%</span>
+        </div>
+        <div class="h-2 w-full rounded-full bg-slate-200">
+          <div class="h-2 rounded-full bg-brand transition-all" style={`width:${uploadProgressPercent}%`}></div>
+        </div>
+        <div class="grid gap-1 text-xs text-slate-600">
+          <p>データセット: {uploadStatus?.dataset_id ?? sessionId}</p>
+          <p>
+            files: {uploadStatus?.files_done ?? 0}
+            {#if (uploadStatus?.total_files ?? 0) > 0}
+              / {uploadStatus?.total_files}
+            {/if}
+          </p>
+          {#if uploadStatus?.current_file}
+            <p class="truncate">current: {uploadStatus.current_file}</p>
+          {/if}
+          {#if uploadStatus?.error}
+            <p class="text-rose-600">{uploadStatus.error}</p>
+          {/if}
+        </div>
+      </div>
+
+      <div class="mt-5 flex items-center justify-end gap-2">
+        <AlertDialog.Cancel
+          class="btn-ghost"
+          type="button"
+          onclick={() => {
+            uploadModalOpen = false;
+            disconnectUploadStream();
+          }}
+        >
+          閉じる
+        </AlertDialog.Cancel>
+        {#if String(uploadStatus?.phase ?? uploadStatus?.status ?? '').toLowerCase() === 'failed'}
+          <Button.Root
+            class="btn-primary"
+            type="button"
+            onclick={retryUpload}
+            disabled={Boolean(actionBusy)}
+          >
+            {actionBusy === '再アップロード' ? '再アップロード中...' : '再アップロード'}
+          </Button.Root>
+        {/if}
       </div>
     </AlertDialog.Content>
   </AlertDialog.Portal>

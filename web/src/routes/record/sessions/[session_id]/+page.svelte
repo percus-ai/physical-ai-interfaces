@@ -344,15 +344,15 @@
 <section class="card-strong p-6">
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div>
-      <p class="section-title">Record Session</p>
-      <h1 class="text-3xl font-semibold text-slate-900">録画セッション</h1>
+      <p class="section-title">Record Dataset</p>
+      <h1 class="text-3xl font-semibold text-slate-900">データセット収録</h1>
     </div>
     <div class="flex flex-wrap gap-3">
       <Button.Root class="btn-ghost" type="button" onclick={toggleEditMode}>
         {editMode ? '閲覧モード' : '編集モード'}
       </Button.Root>
       <Button.Root class="btn-ghost" href="/record">録画一覧</Button.Root>
-      <Button.Root class="btn-ghost" href="/record/new">新規セッション</Button.Root>
+      <Button.Root class="btn-ghost" href="/record/new">新規データセット</Button.Root>
       <Button.Root class="btn-ghost" type="button" onclick={handleReconnect}>再接続</Button.Root>
     </div>
   </div>

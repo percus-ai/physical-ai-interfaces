@@ -17,10 +17,12 @@ from interfaces_backend.models.startup import (
     StartupOperationState,
     StartupOperationStatusResponse,
 )
+from interfaces_backend.services.realtime_events import get_realtime_event_bus
 
 _ACTIVE_STATES: set[StartupOperationState] = {"queued", "running"}
 _TERMINAL_STATES: set[StartupOperationState] = {"completed", "failed"}
 _DEFAULT_TTL_SECONDS = 1800
+STARTUP_OPERATION_TOPIC = "startup.operation"
 
 ProgressCallback = Callable[[str, float, str, dict[str, Any] | None], None]
 
@@ -84,7 +86,9 @@ class StartupOperationsService:
                 kind=kind,
                 message="処理を開始しました。",
             )
-            return StartupOperationAcceptedResponse(operation_id=operation_id, message="accepted")
+            record = self._operations[operation_id].to_response()
+        self._publish_status(record)
+        return StartupOperationAcceptedResponse(operation_id=operation_id, message="accepted")
 
     def get(self, *, user_id: str, operation_id: str) -> StartupOperationStatusResponse:
         with self._lock:
@@ -169,6 +173,7 @@ class StartupOperationsService:
         error: str | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
+        response: StartupOperationStatusResponse | None = None
         with self._lock:
             record = self._operations.get(operation_id)
             if record is None:
@@ -189,6 +194,17 @@ class StartupOperationsService:
                 detail_payload.update(detail)
                 record.detail = StartupOperationDetail.model_validate(detail_payload)
             record.updated_at = _utcnow()
+            response = record.to_response()
+        if response is not None:
+            self._publish_status(response)
+
+    @staticmethod
+    def _publish_status(status: StartupOperationStatusResponse) -> None:
+        get_realtime_event_bus().publish_threadsafe(
+            STARTUP_OPERATION_TOPIC,
+            status.operation_id,
+            status.model_dump(mode="json"),
+        )
 
     def _cleanup_locked(self) -> None:
         cutoff = _utcnow() - timedelta(seconds=self._ttl_seconds)

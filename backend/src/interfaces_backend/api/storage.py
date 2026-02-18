@@ -29,6 +29,7 @@ from interfaces_backend.models.storage import (
     ModelListResponse,
     StorageUsageResponse,
 )
+from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
 from interfaces_backend.services.vlabor_profiles import resolve_profile_spec
 from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.hash import compute_directory_hash, compute_directory_size
@@ -375,8 +376,8 @@ async def reupload_dataset(dataset_id: str):
     if not local_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Invalid dataset path: {dataset_id}")
 
-    sync_service = R2DBSyncService()
-    ok, error = await sync_service.upload_dataset_with_progress(dataset_id, None)
+    lifecycle = get_dataset_lifecycle()
+    ok, error = await lifecycle.reupload(dataset_id)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Dataset re-upload failed: {error}")
 

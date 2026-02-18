@@ -108,7 +108,7 @@
 
   {#if mode !== 'recording'}
     <div class="rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 text-xs text-amber-700">
-      このビューは録画セッションのみ対応しています。
+      このビューはデータセット収録のみ対応しています。
     </div>
   {:else}
     {#if connectionWarning}

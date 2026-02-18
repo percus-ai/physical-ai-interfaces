@@ -58,16 +58,15 @@ _install_lerobot_stubs()
 storage_api = _load_storage_api_module()
 
 
-class _FakeSyncOk:
-    async def upload_dataset_with_progress(self, dataset_id, progress_callback):
+class _FakeLifecycleOk:
+    async def reupload(self, dataset_id):
         assert dataset_id == "dataset-1"
-        assert progress_callback is None
         return True, ""
 
 
-class _FakeSyncFail:
-    async def upload_dataset_with_progress(self, dataset_id, progress_callback):
-        _ = (dataset_id, progress_callback)
+class _FakeLifecycleFail:
+    async def reupload(self, dataset_id):
+        _ = dataset_id
         return False, "upload failed"
 
 
@@ -76,7 +75,7 @@ def test_reupload_dataset_success(monkeypatch, tmp_path: Path):
     (datasets_dir / "dataset-1").mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(storage_api, "get_datasets_dir", lambda: datasets_dir)
-    monkeypatch.setattr(storage_api, "R2DBSyncService", lambda: _FakeSyncOk())
+    monkeypatch.setattr(storage_api, "get_dataset_lifecycle", lambda: _FakeLifecycleOk())
 
     response = asyncio.run(storage_api.reupload_dataset("dataset-1"))
 
@@ -103,7 +102,7 @@ def test_reupload_dataset_propagates_sync_failure(monkeypatch, tmp_path: Path):
     (datasets_dir / "dataset-1").mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(storage_api, "get_datasets_dir", lambda: datasets_dir)
-    monkeypatch.setattr(storage_api, "R2DBSyncService", lambda: _FakeSyncFail())
+    monkeypatch.setattr(storage_api, "get_dataset_lifecycle", lambda: _FakeLifecycleFail())
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(storage_api.reupload_dataset("dataset-1"))

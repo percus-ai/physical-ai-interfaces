@@ -6,21 +6,27 @@ recording.py and inference.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import yaml
 from fastapi import HTTPException
+from supabase import create_async_client
+from supabase._async.client import AsyncClient
 
 from interfaces_backend.models.inference import InferenceModelSyncStatus
+from interfaces_backend.services.realtime_events import get_realtime_event_bus
 from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.paths import get_datasets_dir, get_user_config_path
 from percus_ai.storage.r2_db_sync import R2DBSyncService
 
 logger = logging.getLogger(__name__)
+UPLOAD_TOPIC = "recording.upload"
 
 
 class DatasetLifecycle:
@@ -30,6 +36,23 @@ class DatasetLifecycle:
         self._sync: R2DBSyncService | None = None
         self._model_sync_lock = threading.Lock()
         self._model_sync_status = InferenceModelSyncStatus()
+        self._dataset_upload_lock = threading.Lock()
+        self._dataset_upload_status: dict[str, dict] = {}
+        self._service_client: AsyncClient | None = None
+        self._service_client_lock = asyncio.Lock()
+
+    async def _get_internal_db_client(self) -> AsyncClient:
+        """Return a DB client that is safe for long-running background tasks."""
+        supabase_url = os.environ.get("SUPABASE_URL")
+        service_key = os.environ.get("SUPABASE_SECRET_KEY")
+        if supabase_url and service_key:
+            if self._service_client is not None:
+                return self._service_client
+            async with self._service_client_lock:
+                if self._service_client is None:
+                    self._service_client = await create_async_client(supabase_url, service_key)
+                return self._service_client
+        return await get_supabase_async_client()
 
     # -- DB operations --------------------------------------------------------
 
@@ -89,17 +112,17 @@ class DatasetLifecycle:
 
         size_bytes = sum(p.stat().st_size for p in dataset_root.rglob("*") if p.is_file())
         payload = {
-            "id": dataset_id,
             "episode_count": episode_count,
             "size_bytes": size_bytes,
             "status": "active",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        await upsert_with_owner("datasets", "id", payload)
+        client = await self._get_internal_db_client()
+        await client.table("datasets").update(payload).eq("id", dataset_id).execute()
 
     async def mark_active(self, dataset_id: str) -> None:
         """Set datasets.status to 'active'."""
-        client = await get_supabase_async_client()
+        client = await self._get_internal_db_client()
         await (
             client.table("datasets")
             .update(
@@ -119,15 +142,183 @@ class DatasetLifecycle:
         user_config = self._load_user_config()
         if not user_config.get("auto_upload_after_recording", True):
             logger.info("Auto-upload disabled by user config; skipping for %s", dataset_id)
+            self._set_dataset_upload_status(
+                dataset_id=dataset_id,
+                status="disabled",
+                phase="disabled",
+                progress_percent=100.0,
+                message="Auto-upload is disabled by user config.",
+                files_done=0,
+                total_files=0,
+                current_file=None,
+                error=None,
+            )
             return
+
+        ok, error = await self._upload_dataset_with_status(
+            dataset_id=dataset_id,
+            running_message="Uploading dataset to R2...",
+        )
+        if ok:
+            logger.info("Auto-upload completed for dataset %s", dataset_id)
+            return
+        logger.error("Auto-upload failed for dataset %s: %s", dataset_id, error)
+
+    async def reupload(self, dataset_id: str) -> tuple[bool, str]:
+        """Upload a dataset to R2 regardless of auto-upload user settings."""
+        return await self._upload_dataset_with_status(
+            dataset_id=dataset_id,
+            running_message="Re-uploading dataset to R2...",
+        )
+
+    def _build_dataset_upload_progress_callback(
+        self,
+        *,
+        dataset_id: str,
+        running_message: str,
+    ) -> Callable[[dict], None]:
+        def upload_progress(message: dict) -> None:
+            event_type = str(message.get("type") or "")
+            files_done = self._to_int(message.get("files_done"))
+            total_files = self._to_int(message.get("total_files"))
+            current_file_raw = message.get("current_file")
+            current_file = str(current_file_raw) if current_file_raw else None
+            progress_percent = 0.0
+            if total_files > 0:
+                progress_percent = round(min(max(files_done / total_files, 0.0), 1.0) * 100.0, 2)
+
+            if event_type == "start":
+                self._set_dataset_upload_status(
+                    dataset_id=dataset_id,
+                    status="running",
+                    phase="starting",
+                    progress_percent=0.0,
+                    message=running_message,
+                    files_done=0,
+                    total_files=total_files,
+                    current_file=None,
+                    error=None,
+                )
+                return
+
+            if event_type in {"uploading", "progress", "uploaded"}:
+                self._set_dataset_upload_status(
+                    dataset_id=dataset_id,
+                    status="running",
+                    phase="uploading",
+                    progress_percent=progress_percent,
+                    message=running_message,
+                    files_done=files_done,
+                    total_files=total_files,
+                    current_file=current_file,
+                    error=None,
+                )
+                return
+
+            if event_type == "complete":
+                self._set_dataset_upload_status(
+                    dataset_id=dataset_id,
+                    status="completed",
+                    phase="completed",
+                    progress_percent=100.0,
+                    message="Upload completed.",
+                    files_done=total_files,
+                    total_files=total_files,
+                    current_file=None,
+                    error=None,
+                )
+                return
+
+            if event_type == "error":
+                self._set_dataset_upload_status(
+                    dataset_id=dataset_id,
+                    status="failed",
+                    phase="failed",
+                    progress_percent=progress_percent,
+                    message="Upload failed.",
+                    files_done=files_done,
+                    total_files=total_files,
+                    current_file=current_file,
+                    error=str(message.get("error") or "unknown error"),
+                )
+
+        return upload_progress
+
+    async def _upload_dataset_with_status(
+        self,
+        *,
+        dataset_id: str,
+        running_message: str,
+    ) -> tuple[bool, str]:
+        self._set_dataset_upload_status(
+            dataset_id=dataset_id,
+            status="running",
+            phase="starting",
+            progress_percent=0.0,
+            message=running_message,
+            files_done=0,
+            total_files=0,
+            current_file=None,
+            error=None,
+        )
+        upload_progress = self._build_dataset_upload_progress_callback(
+            dataset_id=dataset_id,
+            running_message=running_message,
+        )
+
         try:
-            ok, error = await self._get_sync_service().upload_dataset_with_progress(dataset_id, None)
+            ok, error = await self._get_sync_service().upload_dataset_with_progress(
+                dataset_id,
+                upload_progress,
+            )
             if ok:
-                logger.info("Auto-upload completed for dataset %s", dataset_id)
-            else:
-                logger.error("Auto-upload failed for dataset %s: %s", dataset_id, error)
+                self._set_dataset_upload_status(
+                    dataset_id=dataset_id,
+                    status="completed",
+                    phase="completed",
+                    progress_percent=100.0,
+                    message="Upload completed.",
+                    current_file=None,
+                    error=None,
+                )
+                return True, ""
+
+            self._set_dataset_upload_status(
+                dataset_id=dataset_id,
+                status="failed",
+                phase="failed",
+                message="Upload failed.",
+                error=error,
+            )
+            return False, str(error or "unknown error")
         except Exception:
-            logger.error("Auto-upload failed for dataset %s", dataset_id, exc_info=True)
+            logger.error("Dataset upload failed for %s", dataset_id, exc_info=True)
+            self._set_dataset_upload_status(
+                dataset_id=dataset_id,
+                status="failed",
+                phase="failed",
+                message="Upload failed.",
+                error="unexpected error",
+            )
+            return False, "unexpected error"
+
+    def get_dataset_upload_status(self, dataset_id: str) -> dict:
+        with self._dataset_upload_lock:
+            snapshot = self._dataset_upload_status.get(dataset_id)
+            if snapshot is None:
+                return {
+                    "dataset_id": dataset_id,
+                    "status": "idle",
+                    "phase": "idle",
+                    "progress_percent": 0.0,
+                    "message": "No upload activity.",
+                    "files_done": 0,
+                    "total_files": 0,
+                    "current_file": None,
+                    "error": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            return dict(snapshot)
 
     async def ensure_model_local(
         self,
@@ -318,6 +509,31 @@ class DatasetLifecycle:
             payload["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._model_sync_status = InferenceModelSyncStatus.model_validate(payload)
             return self._model_sync_status.model_copy(deep=True)
+
+    def _set_dataset_upload_status(self, *, dataset_id: str, **updates: object) -> dict:
+        with self._dataset_upload_lock:
+            payload = self._dataset_upload_status.get(dataset_id, {}).copy()
+            payload.setdefault("dataset_id", dataset_id)
+            payload.setdefault("status", "idle")
+            payload.setdefault("phase", "idle")
+            payload.setdefault("progress_percent", 0.0)
+            payload.setdefault("message", "")
+            payload.setdefault("files_done", 0)
+            payload.setdefault("total_files", 0)
+            payload.setdefault("current_file", None)
+            payload.setdefault("error", None)
+            payload.update(updates)
+            progress_percent = payload.get("progress_percent")
+            try:
+                normalized = float(progress_percent or 0.0)
+            except (TypeError, ValueError):
+                normalized = 0.0
+            payload["progress_percent"] = min(max(normalized, 0.0), 100.0)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._dataset_upload_status[dataset_id] = payload
+            snapshot = dict(payload)
+        get_realtime_event_bus().publish_threadsafe(UPLOAD_TOPIC, dataset_id, snapshot)
+        return snapshot
 
 
 # -- singleton ----------------------------------------------------------------

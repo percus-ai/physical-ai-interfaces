@@ -85,3 +85,45 @@ def sse_response(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def sse_queue_response(
+    request: Request,
+    queue: asyncio.Queue[dict[str, Any]],
+    *,
+    event: Optional[str] = None,
+    heartbeat: float = 25.0,
+    payload_key: Optional[str] = "payload",
+    on_close: Optional[Callable[[], None]] = None,
+) -> StreamingResponse:
+    async def event_stream():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=heartbeat)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+
+                if payload_key is None:
+                    payload = item
+                else:
+                    payload = item.get(payload_key)
+                    if payload is None:
+                        payload = item
+                encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                yield _format_event(encoded, event)
+        finally:
+            if on_close is not None:
+                on_close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

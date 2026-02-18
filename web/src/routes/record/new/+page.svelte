@@ -92,7 +92,7 @@
     }
     if (status.state === 'failed') {
       submitting = false;
-      error = status.error ?? status.message ?? '録画セッションの作成に失敗しました。';
+      error = status.error ?? status.message ?? '収録データセットの作成に失敗しました。';
     }
   };
 
@@ -163,7 +163,7 @@
       const snapshot = await api.startup.operation(result.operation_id);
       await handleStartupStatusUpdate(snapshot);
     } catch (err) {
-      error = err instanceof Error ? err.message : '録画セッションの作成に失敗しました。';
+      error = err instanceof Error ? err.message : '収録データセットの作成に失敗しました。';
       submitting = false;
     }
   };
@@ -188,8 +188,8 @@
   <p class="section-title">Record</p>
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1 class="text-3xl font-semibold text-slate-900">新規録画セッション</h1>
-      <p class="mt-2 text-sm text-slate-600">録画セッションを作成します。開始は次の画面で行います。</p>
+      <h1 class="text-3xl font-semibold text-slate-900">新規データセット収録</h1>
+      <p class="mt-2 text-sm text-slate-600">新しい収録データセットを作成します。開始は次の画面で行います。</p>
     </div>
     <Button.Root class="btn-ghost" href="/record">録画一覧に戻る</Button.Root>
   </div>
@@ -233,7 +233,7 @@
     {#if showStartupBlock}
       <div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
         <div class="flex items-center justify-between gap-3 text-xs text-emerald-800">
-          <p>{startupStatus?.message ?? '録画セッションを準備中です...'}</p>
+          <p>{startupStatus?.message ?? '収録データセットを準備中です...'}</p>
           <p class="font-semibold">{Math.round(startupProgressPercent)}%</p>
         </div>
         <p class="mt-1 text-xs text-emerald-900/80">フェーズ: {startupPhaseLabel}</p>
@@ -259,7 +259,7 @@
     {/if}
     <div class="mt-2 flex flex-wrap gap-3">
       <Button.Root class="btn-primary" type="submit" disabled={submitting || startupActive} aria-busy={submitting || startupActive}>
-        {startupActive ? '準備中...' : '録画セッションを作成'}
+        {startupActive ? '準備中...' : '収録データセットを作成'}
       </Button.Root>
       <Button.Root class="btn-ghost" href="/record">キャンセル</Button.Root>
     </div>

@@ -356,6 +356,12 @@ class RecordingSessionManager(BaseSessionManager):
                             session_id,
                             exc.detail,
                         )
+                except Exception as exc:  # noqa: BLE001 - keep watcher alive and logged
+                    logger.exception(
+                        "recording session %s auto-finalize crashed: %s",
+                        session_id,
+                        exc,
+                    )
                 return
         except asyncio.CancelledError:
             return

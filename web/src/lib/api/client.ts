@@ -413,7 +413,9 @@ export const api = {
     continuePlan: (recordingId: string) =>
       fetchApi(`/api/recording/recordings/${encodeURIComponent(recordingId)}/continue-plan`),
     sessionStatus: (sessionId: string) =>
-      fetchApi(`/api/recording/sessions/${sessionId}/status`)
+      fetchApi(`/api/recording/sessions/${sessionId}/status`),
+    sessionUploadStatus: (sessionId: string) =>
+      fetchApi(`/api/recording/sessions/${sessionId}/upload-status`)
   },
   storage: {
     datasets: (profileName?: string) =>

@@ -88,7 +88,7 @@
     }
     if (status.state === 'failed') {
       submitting = false;
-      error = status.error ?? status.message ?? '継続録画セッションの作成に失敗しました。';
+      error = status.error ?? status.message ?? '継続収録の作成に失敗しました。';
     }
   };
 
@@ -126,7 +126,7 @@
       return;
     }
     if (!continuePlan.continuable || additionalEpisodes <= 0) {
-      error = continuePlan.reason ?? 'このセッションは継続できません。';
+      error = continuePlan.reason ?? 'このデータセットは継続できません。';
       return;
     }
 
@@ -159,7 +159,7 @@
       const snapshot = await api.startup.operation(result.operation_id);
       await handleStartupStatusUpdate(snapshot);
     } catch (err) {
-      error = err instanceof Error ? err.message : '継続録画セッションの作成に失敗しました。';
+      error = err instanceof Error ? err.message : '継続収録の作成に失敗しました。';
       submitting = false;
     }
   };
@@ -187,8 +187,8 @@
   <p class="section-title">Record</p>
   <div class="mt-2 flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1 class="text-3xl font-semibold text-slate-900">継続録画セッション</h1>
-      <p class="mt-2 text-sm text-slate-600">前回の続きから録画セッションを作成します。</p>
+      <h1 class="text-3xl font-semibold text-slate-900">データセット収録を再開</h1>
+      <p class="mt-2 text-sm text-slate-600">前回の続きから同じデータセットに収録を追加します。</p>
     </div>
     <Button.Root class="btn-ghost" href="/record">録画一覧に戻る</Button.Root>
   </div>
@@ -229,7 +229,7 @@
 
       {#if !continuePlan.continuable}
         <p class="text-sm text-rose-600">
-          このセッションは継続できません。{continuePlan.reason ? `(${continuePlan.reason})` : ''}
+          このデータセットは継続できません。{continuePlan.reason ? `(${continuePlan.reason})` : ''}
         </p>
       {/if}
 
@@ -240,7 +240,7 @@
       {#if showStartupBlock}
         <div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
           <div class="flex items-center justify-between gap-3 text-xs text-emerald-800">
-            <p>{startupStatus?.message ?? '継続録画セッションを準備中です...'}</p>
+            <p>{startupStatus?.message ?? '継続収録を準備中です...'}</p>
             <p class="font-semibold">{Math.round(startupProgressPercent)}%</p>
           </div>
           <p class="mt-1 text-xs text-emerald-900/80">フェーズ: {startupPhaseLabel}</p>
@@ -272,7 +272,7 @@
           disabled={submitting || startupActive || !continuePlan.continuable || additionalEpisodes <= 0}
           aria-busy={submitting || startupActive}
         >
-          {startupActive ? '準備中...' : '録画セッションを作成'}
+          {startupActive ? '準備中...' : '収録を再開'}
         </Button.Root>
         <Button.Root class="btn-ghost" href="/record">キャンセル</Button.Root>
       </div>

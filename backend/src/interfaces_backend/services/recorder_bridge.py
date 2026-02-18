@@ -50,6 +50,14 @@ class RecorderBridge:
     def status(self) -> dict:
         return self._call("/api/session/status")
 
+    def websocket_url(self) -> str:
+        base = self._base_url.rstrip("/")
+        if base.startswith("https://"):
+            return "wss://" + base[len("https://") :] + "/ws"
+        if base.startswith("http://"):
+            return "ws://" + base[len("http://") :] + "/ws"
+        return base + "/ws"
+
     def wait_until_finalized(
         self,
         dataset_id: str,
