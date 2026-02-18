@@ -48,6 +48,8 @@
   let saveCheckpoint = $state(true);
 
   let validationEnable = $state(true);
+  let validationTrainRatioPercent = $state(70);
+  let validationSplitSeed = $state(42);
   let validationEvalFreq = $state(100);
   let validationMaxBatches = $state(0);
   let validationBatchSize = $state(0);
@@ -94,6 +96,8 @@
     numWorkers = info.defaultNumWorkers;
     saveCheckpoint = true;
     validationEnable = true;
+    validationTrainRatioPercent = 70;
+    validationSplitSeed = 42;
     validationEvalFreq = 100;
     validationMaxBatches = 0;
     validationBatchSize = 0;
@@ -275,6 +279,15 @@
     if (datasetVideoBackend !== 'auto') {
       (payload.dataset as Record<string, unknown>).video_backend = datasetVideoBackend;
     }
+    const normalizedTrainRatio = Math.min(
+      100,
+      Math.max(1, Number(validationTrainRatioPercent) || 70)
+    ) / 100;
+    const normalizedSplitSeed = Math.max(0, Math.floor(Number(validationSplitSeed) || 42));
+    (payload.dataset as Record<string, unknown>).split = {
+      train_ratio: normalizedTrainRatio,
+      seed: normalizedSplitSeed
+    };
 
     if (validationEnable) {
       const validationPayload = payload.validation as Record<string, unknown>;
@@ -484,6 +497,23 @@
           </select>
         </label>
       </div>
+      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">Video backend の説明</p>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
+          <li>
+            <span class="font-semibold text-slate-700">auto:</span>
+            <br />自動選択です。まず <code>torchcodec</code> を試し、使えない場合は <code>pyav</code> を使います。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">torchcodec:</span>
+            <br />PyTorch系の動画デコード実装です。環境が合えば高速で安定しやすい選択です。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">pyav:</span>
+            <br />FFmpegベースの実装です。互換性が広く、<code>torchcodec</code> で問題が出る場合の代替になります。
+          </li>
+        </ul>
+      </div>
     </section>
 
     <section class="card p-6">
@@ -519,6 +549,35 @@
           </div>
         </label>
       </div>
+      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">学習パラメータの説明</p>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
+          <li>
+            <span class="font-semibold text-slate-700">ステップ数:</span>
+            <br />学習を何回更新するかです。大きいほど学習は進みますが、時間も増えます。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">バッチサイズ:</span>
+            <br />1回の更新で使うデータ量です。大きいほどメモリ使用量が増えます。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">保存頻度:</span>
+            <br />何ステップごとにチェックポイントを保存するかです。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">ログ頻度:</span>
+            <br />何ステップごとに学習ログを記録するかです。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">DataLoader workers:</span>
+            <br />データ読み込みを並列処理する数です。増やすと前処理が速くなる場合があります。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">チェックポイント保存:</span>
+            <br />有効にすると途中状態を保存します。再開やEarly Stopping運用には有効化が推奨です。
+          </li>
+        </ul>
+      </div>
     </section>
 
     <section class="card p-6">
@@ -531,6 +590,27 @@
         </div>
       </div>
       <div class="mt-4 grid gap-4 sm:grid-cols-3">
+        <label class="text-sm font-semibold text-slate-700">
+          <span class="label">学習データ割合 (%)</span>
+          <input
+            class="input mt-2"
+            type="number"
+            min="1"
+            max="100"
+            bind:value={validationTrainRatioPercent}
+            disabled={!validationEnable}
+          />
+        </label>
+        <label class="text-sm font-semibold text-slate-700">
+          <span class="label">分割seed</span>
+          <input
+            class="input mt-2"
+            type="number"
+            min="0"
+            bind:value={validationSplitSeed}
+            disabled={!validationEnable}
+          />
+        </label>
         <label class="text-sm font-semibold text-slate-700">
           <span class="label">検証頻度</span>
           <input
@@ -561,6 +641,28 @@
             disabled={!validationEnable}
           />
         </label>
+      </div>
+
+      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">検証の設定について</p>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
+          <li>
+            <span class="font-semibold text-slate-700">学習データ割合:</span>
+            <br />残り割合（100 - 学習データ割合）が検証に使われます。<br />（例: 70% なら train:val = 7:3）
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">分割seed:</span>
+            <br />train/val の振り分けを決める乱数の種です。<br />同じseedなら同じ分割、seedを変えると分割内容が変わります。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">検証バッチサイズ:</span>
+            <br />検証時だけ使うバッチサイズです。<br />（例: 0 なら学習バッチサイズを使用）
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">検証バッチ数上限:</span>
+            <br />1回の検証で見る最大バッチ数です。<br />（例: 0 なら全件）
+          </li>
+        </ul>
       </div>
 
       <div class="divider my-6"></div>
@@ -600,6 +702,27 @@
             disabled={!earlyStoppingEnable}
           />
         </label>
+      </div>
+      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">Early Stopping の設定について</p>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
+          <li>
+            <span class="font-semibold text-slate-700">動作タイミング:</span>
+            <br />検証が走るたび（検証頻度ごと）に、検証指標を見て停止判定します。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">モード:</span>
+            <br /><code>min</code> は小さいほど良い（通常は val_loss）、<code>max</code> は大きいほど良い指標向けです。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">Patience:</span>
+            <br />改善しない検証が何回続いたら止めるかの回数です。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">min_delta:</span>
+            <br />改善とみなす最小変化量です。差がこれ未満なら「改善なし」と判定します。
+          </li>
+        </ul>
       </div>
     </section>
 
@@ -642,6 +765,27 @@
             <option value="false">無効</option>
           </select>
         </label>
+      </div>
+      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">モデル設定の説明</p>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
+          <li>
+            <span class="font-semibold text-slate-700">dtype:</span>
+            <br />重みや計算の精度です。<code>auto</code> はモデル既定値を使います。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">AMP:</span>
+            <br />混合精度で学習を高速化します。<code>dtype=bfloat16</code> 選択時は無効化されます。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">Gradient checkpointing:</span>
+            <br />メモリ使用量を下げる代わりに計算時間が増える設定です。
+          </li>
+          <li>
+            <span class="font-semibold text-slate-700">torch.compile:</span>
+            <br />モデル実行を最適化して高速化を狙う設定です。環境によって効果は変わります。
+          </li>
+        </ul>
       </div>
     </section>
   </div>

@@ -166,10 +166,29 @@ class DatasetLifecycle:
 
     async def reupload(self, dataset_id: str) -> tuple[bool, str]:
         """Upload a dataset to R2 regardless of auto-upload user settings."""
-        return await self._upload_dataset_with_status(
+        ok, error = await self._upload_dataset_with_status(
             dataset_id=dataset_id,
             running_message="Re-uploading dataset to R2...",
         )
+        if not ok:
+            return False, error
+
+        try:
+            # Re-upload should also normalize DB visibility in storage views.
+            await self.update_stats(dataset_id)
+            await self.mark_active(dataset_id)
+        except Exception as exc:
+            msg = f"upload completed but failed to refresh dataset metadata: {exc}"
+            logger.error("Failed to refresh dataset metadata after re-upload for %s: %s", dataset_id, exc)
+            self._set_dataset_upload_status(
+                dataset_id=dataset_id,
+                status="failed",
+                phase="failed",
+                message="Upload completed but metadata refresh failed.",
+                error=str(exc),
+            )
+            return False, msg
+        return True, ""
 
     def _build_dataset_upload_progress_callback(
         self,

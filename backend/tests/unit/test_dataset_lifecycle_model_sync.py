@@ -116,3 +116,46 @@ def test_auto_upload_logs_error_when_sync_returns_failure(caplog):
     asyncio.run(lifecycle.auto_upload("dataset-1"))
 
     assert "Auto-upload failed for dataset dataset-1: upload failed" in caplog.text
+
+
+def test_reupload_refreshes_dataset_metadata_after_upload():
+    lifecycle = DatasetLifecycle()
+    lifecycle._sync = _FakeSyncUploadResult(True, "")
+    calls: list[tuple[str, str]] = []
+
+    async def _fake_update_stats(dataset_id: str):
+        calls.append(("update_stats", dataset_id))
+
+    async def _fake_mark_active(dataset_id: str):
+        calls.append(("mark_active", dataset_id))
+
+    lifecycle.update_stats = _fake_update_stats  # type: ignore[method-assign]
+    lifecycle.mark_active = _fake_mark_active  # type: ignore[method-assign]
+
+    ok, error = asyncio.run(lifecycle.reupload("dataset-1"))
+
+    assert ok is True
+    assert error == ""
+    assert calls == [("update_stats", "dataset-1"), ("mark_active", "dataset-1")]
+
+
+def test_reupload_fails_when_metadata_refresh_fails():
+    lifecycle = DatasetLifecycle()
+    lifecycle._sync = _FakeSyncUploadResult(True, "")
+
+    async def _fake_update_stats(_dataset_id: str):
+        raise RuntimeError("db refresh failed")
+
+    async def _fake_mark_active(_dataset_id: str):
+        return None
+
+    lifecycle.update_stats = _fake_update_stats  # type: ignore[method-assign]
+    lifecycle.mark_active = _fake_mark_active  # type: ignore[method-assign]
+
+    ok, error = asyncio.run(lifecycle.reupload("dataset-1"))
+
+    assert ok is False
+    assert "upload completed but failed to refresh dataset metadata" in error
+    status = lifecycle.get_dataset_upload_status("dataset-1")
+    assert status["status"] == "failed"
+    assert status["phase"] == "failed"

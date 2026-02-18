@@ -161,10 +161,17 @@ class JobMetricsResponse(BaseModel):
 class DatasetConfig(BaseModel):
     """Dataset configuration for training."""
 
+    class DatasetSplitConfig(BaseModel):
+        """Dataset split configuration."""
+
+        train_ratio: float = Field(0.7, gt=0.0, le=1.0, description="Train split ratio")
+        seed: int = Field(42, description="Split random seed")
+
     id: str = Field(..., description="Dataset ID")
     source: str = Field("r2", description="Dataset source: r2, hub, local")
     hf_repo_id: Optional[str] = Field(None, description="HuggingFace repo ID (for hub source)")
     video_backend: Optional[str] = Field(None, description="Video decode backend: torchcodec, pyav, etc.")
+    split: Optional[DatasetSplitConfig] = Field(None, description="Dataset split config")
 
 
 class PolicyConfig(BaseModel):

@@ -444,6 +444,11 @@ def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
         config["policy"]["use_amp"] = False
     if dataset.video_backend:
         config["dataset"]["video_backend"] = dataset.video_backend
+    if dataset.split:
+        config["dataset"]["split"] = {
+            "train_ratio": dataset.split.train_ratio,
+            "seed": dataset.split.seed,
+        }
 
     return config
 
@@ -3427,6 +3432,7 @@ def _create_job_with_progress(
                 source=dataset_data.get("source", "r2"),
                 hf_repo_id=dataset_data.get("hf_repo_id"),
                 video_backend=dataset_data.get("video_backend"),
+                split=dataset_data.get("split"),
             )
             policy = PolicyConfig(
                 type=policy_data.get("type", "act"),
