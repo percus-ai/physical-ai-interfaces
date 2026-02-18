@@ -16,7 +16,10 @@ from interfaces_backend.services.session_manager import (
     SessionProgressCallback,
     SessionState,
 )
-from interfaces_backend.services.vlabor_profiles import extract_arm_namespaces
+from interfaces_backend.services.vlabor_profiles import (
+    extract_arm_namespaces,
+    extract_recorder_topic_suffixes,
+)
 from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,10 @@ class RecordingSessionManager(BaseSessionManager):
             raise HTTPException(status_code=400, detail="No enabled cameras in active profile")
 
         arm_namespaces = extract_arm_namespaces(state.profile.snapshot)
+        topic_suffixes = extract_recorder_topic_suffixes(
+            state.profile.snapshot,
+            arm_namespaces=arm_namespaces,
+        )
 
         recorder_payload: dict[str, Any] = {
             "dataset_id": state.id,
@@ -87,6 +94,7 @@ class RecordingSessionManager(BaseSessionManager):
         }
         if arm_namespaces:
             recorder_payload["arm_namespaces"] = arm_namespaces
+        recorder_payload.update(topic_suffixes)
 
         state.extras["dataset_name"] = kwargs["dataset_name"]
         state.extras["task"] = kwargs["task"]

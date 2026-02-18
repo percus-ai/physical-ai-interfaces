@@ -7,6 +7,7 @@ from fastapi import HTTPException
 os.environ.setdefault("COMM_EXPORTER_MODE", "noop")
 
 import interfaces_backend.services.recording_session as recording_session
+import interfaces_backend.services.session_manager as session_manager
 from interfaces_backend.services.recording_session import RecordingSessionManager
 from interfaces_backend.services.session_manager import SessionState
 
@@ -22,6 +23,9 @@ class _FakeRecorder:
 
     def ensure_running(self):
         self.ensure_running_called = True
+
+    def build_cameras(self, _snapshot):
+        return [{"name": "cam_top", "topic": "/top_camera/image_raw/compressed"}]
 
     def start(self, payload):
         self.start_payloads.append(payload)
@@ -204,3 +208,48 @@ def test_start_handles_race_when_recorder_reports_already_active():
     assert state.extras["recorder_result"]["success"] is True
     assert state.extras["recorder_result"]["message"] == "Recorder already active"
     assert dataset.upserts[-1]["status"] == "recording"
+
+
+def test_create_includes_profile_topic_suffixes(monkeypatch):
+    async def fake_resolve_profile(self, _profile):
+        return SimpleNamespace(name="profile-a", snapshot={"profile": {}})
+
+    async def fake_save_session_profile_binding(**_kwargs):
+        return None
+
+    monkeypatch.setattr(RecordingSessionManager, "_resolve_profile", fake_resolve_profile)
+    monkeypatch.setattr(session_manager, "get_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(
+        session_manager,
+        "save_session_profile_binding",
+        fake_save_session_profile_binding,
+    )
+    monkeypatch.setattr(recording_session, "extract_arm_namespaces", lambda _snapshot: ["follower_arm"])
+    monkeypatch.setattr(
+        recording_session,
+        "extract_recorder_topic_suffixes",
+        lambda _snapshot, arm_namespaces: {
+            "state_topic_suffix": "joint_states_single",
+            "action_topic_suffix": "joint_ctrl_single",
+        },
+    )
+
+    recorder = _FakeRecorder()
+    dataset = _FakeDataset()
+    manager = RecordingSessionManager(recorder=recorder, dataset=dataset)
+
+    state = asyncio.run(
+        manager.create(
+            session_id="session-1",
+            dataset_name="dataset-a",
+            task="pick-place",
+            num_episodes=5,
+            target_total_episodes=5,
+            episode_time_s=60.0,
+            reset_time_s=10.0,
+        )
+    )
+
+    payload = state.extras["recorder_payload"]
+    assert payload["state_topic_suffix"] == "joint_states_single"
+    assert payload["action_topic_suffix"] == "joint_ctrl_single"

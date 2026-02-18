@@ -545,6 +545,106 @@ def extract_arm_namespaces(snapshot: dict[str, Any]) -> list[str]:
     return namespaces
 
 
+def _topic_suffix_for_namespace(topic: object, namespace: str, settings: dict[str, Any]) -> str | None:
+    resolved_topic = str(_render_setting(topic, settings) or "").strip()
+    if not resolved_topic:
+        return None
+    prefix = f"/{namespace}/"
+    if not resolved_topic.startswith(prefix):
+        return None
+    suffix = resolved_topic[len(prefix) :].strip("/")
+    return suffix or None
+
+
+def _pick_common_topic_suffix(
+    suffixes_by_namespace: dict[str, set[str]],
+    arm_namespaces: list[str],
+) -> str | None:
+    if not arm_namespaces:
+        return None
+
+    resolved_per_namespace: list[str] = []
+    for namespace in arm_namespaces:
+        candidates = suffixes_by_namespace.get(namespace) or set()
+        if len(candidates) != 1:
+            return None
+        resolved_per_namespace.append(next(iter(candidates)))
+
+    unique = set(resolved_per_namespace)
+    if len(unique) != 1:
+        return None
+    return resolved_per_namespace[0]
+
+
+def extract_recorder_topic_suffixes(
+    snapshot: dict[str, Any],
+    *,
+    arm_namespaces: Optional[list[str]] = None,
+) -> dict[str, str]:
+    """Extract recorder topic suffixes from profile snapshot.
+
+    Recorder currently accepts one state/action suffix shared across all arms.
+    This helper returns suffixes only when all target arms can resolve to a
+    single common value.
+    """
+    profile = snapshot.get("profile")
+    if not isinstance(profile, dict):
+        return {}
+
+    target_namespaces: list[str] = []
+    for namespace in arm_namespaces or extract_arm_namespaces(snapshot):
+        text = str(namespace or "").strip()
+        if text and text not in target_namespaces:
+            target_namespaces.append(text)
+    if not target_namespaces:
+        return {}
+
+    settings = build_profile_settings(snapshot)
+    state_suffixes: dict[str, set[str]] = {namespace: set() for namespace in target_namespaces}
+    action_suffixes: dict[str, set[str]] = {namespace: set() for namespace in target_namespaces}
+
+    lerobot = profile.get("lerobot")
+    if isinstance(lerobot, dict):
+        for key, value in lerobot.items():
+            if key == "cameras" or not isinstance(value, dict):
+                continue
+            namespace = str(_render_setting(value.get("namespace"), settings) or "").strip()
+            if namespace not in state_suffixes:
+                continue
+
+            state_suffix = _topic_suffix_for_namespace(value.get("topic"), namespace, settings)
+            if state_suffix:
+                state_suffixes[namespace].add(state_suffix)
+
+            action_suffix = _topic_suffix_for_namespace(value.get("action_topic"), namespace, settings)
+            if action_suffix:
+                action_suffixes[namespace].add(action_suffix)
+
+    teleop = profile.get("teleop")
+    if isinstance(teleop, dict):
+        mappings = teleop.get("topic_mappings")
+        if isinstance(mappings, list):
+            for mapping in mappings:
+                if not isinstance(mapping, dict):
+                    continue
+                dst = mapping.get("dst")
+                for namespace in target_namespaces:
+                    action_suffix = _topic_suffix_for_namespace(dst, namespace, settings)
+                    if action_suffix:
+                        action_suffixes[namespace].add(action_suffix)
+
+    result: dict[str, str] = {}
+    state_topic_suffix = _pick_common_topic_suffix(state_suffixes, target_namespaces)
+    if state_topic_suffix:
+        result["state_topic_suffix"] = state_topic_suffix
+
+    action_topic_suffix = _pick_common_topic_suffix(action_suffixes, target_namespaces)
+    if action_topic_suffix:
+        result["action_topic_suffix"] = action_topic_suffix
+
+    return result
+
+
 def build_inference_joint_names(snapshot: dict[str, Any]) -> list[str]:
     profile = snapshot.get("profile")
     if not isinstance(profile, dict):
