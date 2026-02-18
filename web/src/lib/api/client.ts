@@ -363,7 +363,6 @@ export const api = {
       num_episodes: number;
       episode_time_s: number;
       reset_time_s: number;
-      continue_from_dataset_id?: string;
     }) =>
       fetchApi<StartupOperationAcceptedResponse>('/api/recording/session/create', {
         method: 'POST',
@@ -410,8 +409,6 @@ export const api = {
       fetchApi(`/api/recording/session/cancel${datasetId ? `?dataset_id=${datasetId}` : ''}`, {
         method: 'POST'
       }),
-    continuePlan: (recordingId: string) =>
-      fetchApi(`/api/recording/recordings/${encodeURIComponent(recordingId)}/continue-plan`),
     sessionStatus: (sessionId: string) =>
       fetchApi(`/api/recording/sessions/${sessionId}/status`),
     sessionUploadStatus: (sessionId: string) =>
