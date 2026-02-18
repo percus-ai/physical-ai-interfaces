@@ -44,16 +44,6 @@
     topics?: string[];
   };
 
-  const STATUS_LABELS: Record<string, string> = {
-    idle: '待機',
-    warming: '準備中',
-    recording: '録画中',
-    paused: '一時停止',
-    resetting: 'リセット中',
-    inactive: '停止',
-    completed: '完了'
-  };
-
   const BLUEPRINT_KIND = 'recording' as const;
 
   const sessionId = $derived(page.params.session_id ?? '');
@@ -62,28 +52,6 @@
     queryKey: ['profiles', 'active', 'status'],
     queryFn: api.profiles.activeStatus
   });
-
-  type RecorderStatus = Record<string, unknown> & {
-    state?: string;
-    status?: string;
-    phase?: string;
-    task?: string;
-    dataset_id?: string;
-    episode_index?: number | null;
-    num_episodes?: number;
-    episode_time_s?: number;
-    reset_time_s?: number;
-    episode_elapsed_s?: number;
-    episode_remaining_s?: number;
-    reset_elapsed_s?: number;
-    reset_remaining_s?: number;
-    last_error?: string;
-  };
-
-  const STATUS_TOPIC = '/lerobot_recorder/status';
-  const STATUS_THROTTLE_MS = 66;
-  let recorderStatus = $state<RecorderStatus | null>(null);
-  let rosbridgeStatus = $state<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>('idle');
 
   let blueprint: BlueprintNode = $state(createDefaultBlueprint());
   let selectedId = $state('');
@@ -152,17 +120,6 @@
     mounted = true;
   });
 
-  const parseRecorderPayload = (msg: Record<string, unknown>): RecorderStatus => {
-    if (typeof msg.data === 'string') {
-      try {
-        return JSON.parse(msg.data) as RecorderStatus;
-      } catch {
-        return { state: 'unknown' };
-      }
-    }
-    return msg as RecorderStatus;
-  };
-
   const applyBlueprintDetail = (
     detail: WebuiBlueprintDetail,
     useDraft: boolean,
@@ -225,26 +182,6 @@
       toast.dismiss(loadingToastId);
     }
   };
-
-  $effect(() => {
-    if (typeof window === 'undefined') return;
-    const client = getRosbridgeClient();
-    const unsubscribe = client.subscribe(
-      STATUS_TOPIC,
-      (message) => {
-        recorderStatus = parseRecorderPayload(message);
-      },
-      { throttle_rate: STATUS_THROTTLE_MS }
-    );
-    const offStatus = client.onStatusChange((next) => {
-      rosbridgeStatus = next;
-    });
-    rosbridgeStatus = client.getStatus();
-    return () => {
-      unsubscribe();
-      offStatus();
-    };
-  });
 
   $effect(() => {
     if (mounted && sessionId && sessionId !== lastSessionId) {
@@ -396,22 +333,6 @@
     }
   };
 
-  const status = $derived(recorderStatus ?? {});
-  const datasetId = $derived((status as RecorderStatus)?.dataset_id ?? sessionId);
-  const statusState = $derived((status as RecorderStatus)?.state ?? (status as RecorderStatus)?.status ?? '');
-  const statusLabel = $derived(STATUS_LABELS[String(statusState)] ?? String(statusState || 'unknown'));
-  const taskLabel = $derived((status as RecorderStatus)?.task ?? '');
-
-  const connectionLabel = $derived(
-    rosbridgeStatus === 'connected'
-      ? '接続中'
-      : rosbridgeStatus === 'connecting'
-        ? '接続中...'
-        : rosbridgeStatus === 'error'
-          ? 'エラー'
-          : '切断中'
-  );
-
   const handleReconnect = () => {
     const client = getRosbridgeClient();
     client.connect().catch(() => {
@@ -425,17 +346,6 @@
     <div>
       <p class="section-title">Record Session</p>
       <h1 class="text-3xl font-semibold text-slate-900">録画セッション</h1>
-      <!-- <p class="mt-2 text-sm text-slate-600">{taskLabel || 'タスク未設定 / 状態を同期中...'}</p>
-      <div class="mt-3 flex flex-wrap gap-2">
-        <span class="chip">状態: {statusLabel}</span>
-        <span class="chip">接続: {connectionLabel}</span>
-        {#if datasetId}
-          <span class="chip">Dataset: {datasetId}</span>
-        {/if}
-      </div>
-      {#if rosbridgeStatus !== 'connected'}
-        <p class="mt-2 text-xs text-rose-600">rosbridge に接続できません。接続を確認してください。</p>
-      {/if} -->
     </div>
     <div class="flex flex-wrap gap-3">
       <Button.Root class="btn-ghost" type="button" onclick={toggleEditMode}>
@@ -522,8 +432,6 @@
             node={blueprint}
             selectedId={selectedId}
             sessionId={sessionId}
-            recorderStatus={recorderStatus}
-            rosbridgeStatus={rosbridgeStatus}
             mode="recording"
             editMode={editMode}
             viewScale={editorViewScale}
@@ -697,8 +605,6 @@
         node={blueprint}
         selectedId={selectedId}
         sessionId={sessionId}
-        recorderStatus={recorderStatus}
-        rosbridgeStatus={rosbridgeStatus}
         mode="recording"
         editMode={editMode}
         viewScale={1}

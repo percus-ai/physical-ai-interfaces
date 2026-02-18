@@ -124,6 +124,47 @@ def _fetch_ros2_topics() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+async def _stream_script_to_websocket(
+    websocket: WebSocket,
+    *,
+    script_name: str,
+    args: list[str],
+    timeout: int,
+) -> tuple[bool, str | None]:
+    queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _run() -> None:
+        for event in stream_vlabor_script(script_name, args, timeout=timeout):
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+        loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+    loop.run_in_executor(None, _run)
+
+    saw_complete = False
+    exit_code = ""
+    error_message: str | None = None
+    while True:
+        event = await queue.get()
+        if event is None:
+            break
+        await websocket.send_json(event)
+        event_type = str(event.get("type") or "").strip().lower()
+        if event_type == "complete":
+            saw_complete = True
+            exit_code = str(event.get("exit_code") or "").strip()
+        elif event_type == "error":
+            error_message = str(event.get("message") or "Unknown error").strip()
+
+    if error_message:
+        return False, error_message
+    if not saw_complete:
+        return False, "VLAbor script finished without completion status"
+    if exit_code != "0":
+        return False, f"exit code={exit_code or 'unknown'}"
+    return True, None
+
+
 @router.get("", response_model=VlaborProfilesResponse)
 async def list_profiles():
     _require_user_id()
@@ -289,22 +330,106 @@ async def websocket_restart_vlabor(websocket: WebSocket):
             {"type": "log", "line": f"Restarting VLAbor with profile: {profile_name}"}
         )
         args: list[str] = [profile_name] if profile_name else []
+        await _stream_script_to_websocket(
+            websocket,
+            script_name="restart",
+            args=args,
+            timeout=300,
+        )
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
-        queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
 
-        def _run() -> None:
-            for event in stream_vlabor_script("restart", args, timeout=300):
-                loop.call_soon_threadsafe(queue.put_nowait, event)
-            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+@router.websocket("/ws/vlabor/switch-profile")
+async def websocket_switch_profile(websocket: WebSocket):
+    """Switch active profile and stream VLAbor restart logs."""
+    await websocket.accept()
+    try:
+        requested_profile = str(websocket.query_params.get("profile") or "").strip()
+        if not requested_profile:
+            await websocket.send_json(
+                {"type": "error", "message": "profile query parameter is required"}
+            )
+            return
 
-        loop.run_in_executor(None, _run)
+        available = {profile.name for profile in list_vlabor_profiles()}
+        if requested_profile not in available:
+            await websocket.send_json(
+                {"type": "error", "message": f"VLAbor profile not found: {requested_profile}"}
+            )
+            return
 
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            await websocket.send_json(event)
+        previous = await get_active_profile_spec()
+        await websocket.send_json(
+            {
+                "type": "log",
+                "line": f"Switching active profile: {previous.name} -> {requested_profile}",
+            }
+        )
+
+        active = await set_active_profile_spec(requested_profile)
+        await websocket.send_json(
+            {"type": "log", "line": f"Restarting VLAbor with profile: {active.name}"}
+        )
+        switched, switch_detail = await _stream_script_to_websocket(
+            websocket,
+            script_name="restart",
+            args=[active.name],
+            timeout=300,
+        )
+        if switched:
+            return
+
+        await websocket.send_json(
+            {
+                "type": "log",
+                "line": (
+                    f"Switch failed ({switch_detail or 'unknown'}). "
+                    f"Rolling back to profile: {previous.name}"
+                ),
+            }
+        )
+        try:
+            await set_active_profile_spec(previous.name)
+            await websocket.send_json(
+                {"type": "log", "line": f"Active profile reverted to: {previous.name}"}
+            )
+        except Exception as exc:  # noqa: BLE001 - send precise API detail
+            await websocket.send_json(
+                {"type": "error", "message": f"Failed to revert active profile: {exc}"}
+            )
+            return
+
+        await websocket.send_json(
+            {"type": "log", "line": f"Restarting VLAbor with rollback profile: {previous.name}"}
+        )
+        rollback_ok, rollback_detail = await _stream_script_to_websocket(
+            websocket,
+            script_name="restart",
+            args=[previous.name],
+            timeout=300,
+        )
+        if not rollback_ok:
+            await websocket.send_json(
+                {"type": "error", "message": f"Rollback restart failed: {rollback_detail}"}
+            )
+            return
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"Failed to switch profile to {active.name}: {switch_detail}",
+            }
+        )
     except WebSocketDisconnect:
         return
     except Exception as exc:

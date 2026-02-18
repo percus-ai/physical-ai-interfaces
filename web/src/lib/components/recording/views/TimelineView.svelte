@@ -1,15 +1,22 @@
 <script lang="ts">
+  import {
+    subscribeRecorderStatus,
+    type RecorderStatus,
+    type RosbridgeStatus
+  } from '$lib/recording/recorderStatus';
+
   let {
+    sessionId = '',
     title = 'Timeline',
-    mode = 'recording',
-    recorderStatus = null,
-    rosbridgeStatus = 'idle'
+    mode = 'recording'
   }: {
+    sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
-    recorderStatus?: Record<string, unknown> | null;
-    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
   } = $props();
+
+  let recorderStatus = $state<RecorderStatus | null>(null);
+  let rosbridgeStatus = $state<RosbridgeStatus>('idle');
 
   const asNumber = (value: unknown, fallback = 0) => {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -17,8 +24,29 @@
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    return subscribeRecorderStatus({
+      onStatus: (next) => {
+        recorderStatus = next;
+      },
+      onConnectionChange: (next) => {
+        rosbridgeStatus = next;
+      }
+    });
+  });
+
   const status = $derived(recorderStatus ?? {});
-  const statusPhase = $derived(String((status as Record<string, unknown>)?.phase ?? 'wait'));
+  const statusDatasetId = $derived.by(() => {
+    const value = (status as Record<string, unknown>)?.dataset_id;
+    return typeof value === 'string' ? value : '';
+  });
+  const rawStatusPhase = $derived(String((status as Record<string, unknown>)?.phase ?? 'wait'));
+  const statusPhase = $derived.by(() => {
+    if (!sessionId) return rawStatusPhase;
+    if (!statusDatasetId || statusDatasetId !== sessionId) return 'wait';
+    return rawStatusPhase;
+  });
   const statusDetail = $derived(String((status as Record<string, unknown>)?.last_error ?? ''));
   const episodeIndex = $derived((status as Record<string, unknown>)?.episode_index ?? null);
   const episodeTotal = $derived(asNumber((status as Record<string, unknown>)?.num_episodes ?? 0));

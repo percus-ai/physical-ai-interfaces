@@ -2,21 +2,24 @@
   import { AlertDialog, Button } from 'bits-ui';
   import toast from 'svelte-french-toast';
   import { api } from '$lib/api/client';
+  import {
+    subscribeRecorderStatus,
+    type RecorderStatus,
+    type RosbridgeStatus
+  } from '$lib/recording/recorderStatus';
 
   let {
     sessionId = '',
     title = 'Controls',
-    mode = 'recording',
-    recorderStatus = null,
-    rosbridgeStatus = 'idle'
+    mode = 'recording'
   }: {
     sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
-    recorderStatus?: Record<string, unknown> | null;
-    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
   } = $props();
 
+  let recorderStatus = $state<RecorderStatus | null>(null);
+  let rosbridgeStatus = $state<RosbridgeStatus>('idle');
   let actionBusy = $state('');
   let actionError = $state('');
   let actionMessage = $state('');
@@ -24,36 +27,42 @@
   let confirmTitle = $state('');
   let confirmDescription = $state('');
   let confirmActionLabel = $state('実行');
-  let pendingConfirmAction = $state<(() => Promise<void>) | null>(null);
+  let pendingConfirmAction = $state<(() => Promise<boolean>) | null>(null);
 
   const runAction = async (
     label: string,
     action: () => Promise<unknown>,
     options: { successToast?: string } = {}
-  ) => {
+  ): Promise<boolean> => {
     actionError = '';
     actionMessage = '';
     actionBusy = label;
     try {
       const result = (await action()) as { message?: string };
       actionMessage = result?.message ?? `${label} を実行しました。`;
-      if (options.successToast) {
-        toast.success(options.successToast);
-      }
+      toast.success(options.successToast ?? `${label}リクエストを受け付けました。`);
+      return true;
     } catch (err) {
       actionError = err instanceof Error ? err.message : `${label} に失敗しました。`;
+      return false;
     } finally {
       actionBusy = '';
     }
   };
 
-  const handlePause = async () => runAction('中断', () => api.recording.pauseSession());
-  const handleResume = async () => runAction('再開', () => api.recording.resumeSession());
+  const handlePause = async () =>
+    runAction('中断', () => api.recording.pauseSession(), {
+      successToast: '一時停止リクエストを受け付けました。'
+    });
+  const handleResume = async () =>
+    runAction('再開', () => api.recording.resumeSession(), {
+      successToast: '再開リクエストを受け付けました。'
+    });
   const openConfirm = (options: {
     title: string;
     description: string;
     actionLabel: string;
-    action: () => Promise<void>;
+    action: () => Promise<boolean>;
   }) => {
     if (actionBusy) return;
     confirmTitle = options.title;
@@ -66,14 +75,19 @@
     if (!pendingConfirmAction) return;
     const action = pendingConfirmAction;
     pendingConfirmAction = null;
-    await action();
+    const success = await action();
+    if (success) {
+      confirmOpen = false;
+    }
   };
   const handleConfirmCancel = () => {
     pendingConfirmAction = null;
   };
   const handleStart = async () => {
     if (!sessionId) return;
-    await runAction('開始', () => api.recording.startSession({ dataset_id: sessionId }));
+    await runAction('開始', () => api.recording.startSession({ dataset_id: sessionId }), {
+      successToast: '開始リクエストを受け付けました。状態反映を待っています。'
+    });
   };
   const handleRetakeCurrent = async () => {
     if (statusState === 'resetting') {
@@ -81,7 +95,10 @@
         title: '直前エピソードを取り直しますか？',
         description: '現在のリセット中に、ひとつ前のエピソードを取り直します。',
         actionLabel: '取り直す',
-        action: () => runAction('取り直し', () => api.recording.redoPreviousEpisode())
+        action: () =>
+          runAction('取り直し', () => api.recording.redoPreviousEpisode(), {
+            successToast: '直前エピソードの取り直しを受け付けました。'
+          })
       });
       return;
     }
@@ -89,7 +106,10 @@
       title: '現在のエピソードを取り直しますか？',
       description: '現在のエピソードは破棄され、最初から録画し直します。',
       actionLabel: '取り直す',
-      action: () => runAction('取り直し', () => api.recording.cancelEpisode())
+      action: () =>
+        runAction('取り直し', () => api.recording.cancelEpisode(), {
+          successToast: '現在エピソードの取り直しを受け付けました。'
+        })
     });
   };
   const handleNext = async () => {
@@ -113,15 +133,37 @@
           api.recording.stopSession({
             dataset_id: datasetId,
             save_current: true
-          })
+          }),
+          {
+            successToast: '終了リクエストを受け付けました。状態反映を待っています。'
+          }
         )
     });
   };
 
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    return subscribeRecorderStatus({
+      onStatus: (next) => {
+        recorderStatus = next;
+      },
+      onConnectionChange: (next) => {
+        rosbridgeStatus = next;
+      }
+    });
+  });
+
   const status = $derived(recorderStatus ?? {});
-  const statusState = $derived(
-    (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? ''
-  );
+  const statusDatasetId = $derived.by(() => {
+    const value = (status as Record<string, unknown>)?.dataset_id;
+    return typeof value === 'string' ? value : '';
+  });
+  const statusState = $derived.by(() => {
+    const state = (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? '';
+    if (!sessionId) return String(state);
+    if (!statusDatasetId || statusDatasetId !== sessionId) return 'inactive';
+    return String(state);
+  });
   const datasetId = $derived.by(() => {
     const value = (status as Record<string, unknown>)?.dataset_id;
     return typeof value === 'string' ? value : sessionId;

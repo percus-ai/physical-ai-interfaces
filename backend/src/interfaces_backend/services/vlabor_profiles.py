@@ -6,9 +6,9 @@ selection/session snapshots on backend side.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +22,8 @@ from percus_ai.storage.paths import get_project_root
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_PROFILE_TABLE = "vlabor_profile_selections"
 _SESSION_PROFILE_TABLE = "session_profile_bindings"
-_ACTIVE_PROFILE_SCOPE_ENV = "VLABOR_PROFILE_SCOPE_ID"
-_ACTIVE_PROFILE_GLOBAL_SCOPE = "global"
+_ACTIVE_PROFILE_FILE_ENV = "VLABOR_ACTIVE_PROFILE_FILE"
 
 _SO101_DEFAULT_JOINT_SUFFIXES = [
     "shoulder_pan",
@@ -50,91 +48,39 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _configured_active_profile_scope_id() -> str | None:
-    configured = str(os.environ.get(_ACTIVE_PROFILE_SCOPE_ENV) or "").strip()
+def _active_profile_local_path() -> Path:
+    configured = str(os.environ.get(_ACTIVE_PROFILE_FILE_ENV) or "").strip()
     if configured:
-        return configured
+        return Path(configured).expanduser()
+    return Path.home() / ".vlabor" / "active_profile.json"
 
 
-def _host_active_profile_scope_id() -> str:
-    hostname = socket.gethostname().strip().lower()
-    if hostname:
-        return f"host:{hostname}"
-    return "host:unknown"
-
-
-def _active_profile_read_scope_ids() -> list[str]:
-    configured = _configured_active_profile_scope_id()
-    if configured:
-        return [configured]
-    return [_host_active_profile_scope_id(), _ACTIVE_PROFILE_GLOBAL_SCOPE]
-
-
-def _active_profile_write_scope_ids() -> list[str]:
-    configured = _configured_active_profile_scope_id()
-    if configured:
-        return [configured]
-    return [_host_active_profile_scope_id(), _ACTIVE_PROFILE_GLOBAL_SCOPE]
-
-
-async def _load_selected_profile_name_for_scope(client: Any, scope_id: str) -> str | None:
-    rows = (
-        await client.table(_ACTIVE_PROFILE_TABLE)
-        .select("profile_name")
-        .eq("scope_id", scope_id)
-        .order("updated_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data or []
-    if not rows:
+def _load_active_profile_name_local() -> str | None:
+    path = _active_profile_local_path()
+    if not path.is_file():
         return None
-    return str(rows[0].get("profile_name") or "").strip() or None
-
-
-async def _load_latest_selected_profile_name(client: Any) -> str | None:
-    rows = (
-        await client.table(_ACTIVE_PROFILE_TABLE)
-        .select("profile_name")
-        .order("updated_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data or []
-    if not rows:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - fall back to default profile
+        logger.warning("Failed to read local active profile file (%s): %s", path, exc)
         return None
-    return str(rows[0].get("profile_name") or "").strip() or None
+    if not isinstance(payload, dict):
+        logger.warning("Invalid local active profile payload: %s", path)
+        return None
+    return str(payload.get("profile_name") or "").strip() or None
 
 
-async def _upsert_active_profile_selection(
-    client: Any,
-    *,
-    scope_id: str,
-    profile: VlaborProfileSpec,
-    now: str,
-) -> None:
-    existing = (
-        await client.table(_ACTIVE_PROFILE_TABLE)
-        .select("scope_id")
-        .eq("scope_id", scope_id)
-        .limit(1)
-        .execute()
-    ).data or []
+def _save_active_profile_name_local(profile_name: str) -> None:
+    path = _active_profile_local_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "profile_name": profile.name,
-        "profile_snapshot": profile.snapshot,
-        "updated_at": now,
+        "profile_name": profile_name,
+        "updated_at": _now_iso(),
     }
-    if existing:
-        await client.table(_ACTIVE_PROFILE_TABLE).update(payload).eq("scope_id", scope_id).execute()
-        return
-    await client.table(_ACTIVE_PROFILE_TABLE).insert(
-        {
-            "scope_id": scope_id,
-            "profile_name": profile.name,
-            "profile_snapshot": profile.snapshot,
-            "created_at": now,
-            "updated_at": now,
-        }
-    ).execute()
+    path.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _resolve_profiles_dir() -> Optional[Path]:
@@ -665,17 +611,7 @@ async def get_active_profile_spec() -> VlaborProfileSpec:
         raise HTTPException(status_code=404, detail="VLAbor profiles not found")
 
     by_name = {profile.name: profile for profile in profiles}
-    selected_name: Optional[str] = None
-    client = await get_supabase_async_client()
-    try:
-        for scope_id in _active_profile_read_scope_ids():
-            selected_name = await _load_selected_profile_name_for_scope(client, scope_id)
-            if selected_name:
-                break
-        if not selected_name:
-            selected_name = await _load_latest_selected_profile_name(client)
-    except Exception as exc:  # noqa: BLE001 - fallback to default profile if table is unavailable
-        logger.warning("Failed to load active VLAbor profile from DB: %s", exc)
+    selected_name = _load_active_profile_name_local()
 
     if selected_name and selected_name in by_name:
         return by_name[selected_name]
@@ -691,15 +627,10 @@ async def set_active_profile_spec(profile_name: str) -> VlaborProfileSpec:
     if not profile:
         raise HTTPException(status_code=404, detail=f"VLAbor profile not found: {profile_name}")
 
-    client = await get_supabase_async_client()
-    now = _now_iso()
-    for scope_id in _active_profile_write_scope_ids():
-        await _upsert_active_profile_selection(
-            client,
-            scope_id=scope_id,
-            profile=profile,
-            now=now,
-        )
+    try:
+        _save_active_profile_name_local(profile.name)
+    except Exception as exc:  # noqa: BLE001 - surfaced as API detail
+        raise HTTPException(status_code=500, detail=f"Failed to save active profile locally: {exc}") from exc
     return profile
 
 

@@ -1,23 +1,40 @@
 <script lang="ts">
+  import {
+    subscribeRecorderStatus,
+    type RecorderStatus,
+    type RosbridgeStatus
+  } from '$lib/recording/recorderStatus';
+
   let {
     sessionId = '',
     title = 'Progress',
-    mode = 'recording',
-    recorderStatus = null,
-    rosbridgeStatus = 'idle'
+    mode = 'recording'
   }: {
     sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
-    recorderStatus?: Record<string, unknown> | null;
-    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
   } = $props();
+
+  let recorderStatus = $state<RecorderStatus | null>(null);
+  let rosbridgeStatus = $state<RosbridgeStatus>('idle');
 
   const asNumber = (value: unknown, fallback = 0) => {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    return subscribeRecorderStatus({
+      onStatus: (next) => {
+        recorderStatus = next;
+      },
+      onConnectionChange: (next) => {
+        rosbridgeStatus = next;
+      }
+    });
+  });
 
   const status = $derived(recorderStatus ?? {});
   const episodeCountValue = $derived(asNumber((status as Record<string, unknown>)?.episode_count ?? 0, 0));
@@ -30,9 +47,16 @@
   const episodeRemaining = $derived(asNumber((status as Record<string, unknown>)?.episode_remaining_s ?? 0, 0));
   const resetElapsed = $derived(asNumber((status as Record<string, unknown>)?.reset_elapsed_s ?? 0, 0));
   const resetRemaining = $derived(asNumber((status as Record<string, unknown>)?.reset_remaining_s ?? 0, 0));
-  const statusState = $derived(
-    (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? ''
-  );
+  const statusDatasetId = $derived.by(() => {
+    const value = (status as Record<string, unknown>)?.dataset_id;
+    return typeof value === 'string' ? value : '';
+  });
+  const statusState = $derived.by(() => {
+    const state = (status as Record<string, unknown>)?.state ?? (status as Record<string, unknown>)?.status ?? '';
+    if (!sessionId) return String(state);
+    if (!statusDatasetId || statusDatasetId !== sessionId) return 'inactive';
+    return String(state);
+  });
   const episodeDisplayNumber = $derived.by(() => {
     if (numEpisodes <= 0) return '-';
     const state = String(statusState);
@@ -46,9 +70,11 @@
   );
 
   let fps = $state(0);
-  let lastFrameCount = $state<number | null>(null);
-  let lastFrameAtMs = $state<number | null>(null);
+  let fpsSamples: { t: number; frames: number }[] = [];
+  let lastFpsFrameCount: number | null = null;
   const fpsDisplay = $derived(fps > 0 ? fps.toFixed(1) : '-');
+  const FPS_WINDOW_MS = 2000;
+  const FPS_EMA_ALPHA = 0.15;
 
   $effect(() => {
     const now = performance.now();
@@ -58,26 +84,37 @@
 
     if (!isRecording) {
       fps = 0;
-      lastFrameCount = totalFrames;
-      lastFrameAtMs = now;
+      fpsSamples = [];
+      lastFpsFrameCount = null;
       return;
     }
 
-    if (lastFrameCount == null || lastFrameAtMs == null || totalFrames < lastFrameCount) {
-      lastFrameCount = totalFrames;
-      lastFrameAtMs = now;
+    if (lastFpsFrameCount != null && totalFrames === lastFpsFrameCount) {
       return;
     }
 
-    const elapsedMs = now - lastFrameAtMs;
-    if (elapsedMs <= 0) return;
+    const lastSample = fpsSamples.length ? fpsSamples[fpsSamples.length - 1] : null;
+    if (lastSample && totalFrames < lastSample.frames) {
+      // Frame counter was reset (retake/restart). Restart FPS window.
+      fpsSamples = [];
+    }
 
-    const frameDelta = totalFrames - lastFrameCount;
-    const instantFps = frameDelta > 0 ? (frameDelta * 1000) / elapsedMs : 0;
-    const smoothFactor = 0.35;
-    fps = fps > 0 ? fps * (1 - smoothFactor) + instantFps * smoothFactor : instantFps;
-    lastFrameCount = totalFrames;
-    lastFrameAtMs = now;
+    fpsSamples = [...fpsSamples, { t: now, frames: totalFrames }].filter((sample) => now - sample.t <= FPS_WINDOW_MS);
+    lastFpsFrameCount = totalFrames;
+    if (fpsSamples.length < 2) {
+      return;
+    }
+
+    const first = fpsSamples[0];
+    const last = fpsSamples[fpsSamples.length - 1];
+    const elapsedMs = last.t - first.t;
+    const frameDelta = last.frames - first.frames;
+    if (elapsedMs <= 0 || frameDelta < 0) {
+      return;
+    }
+
+    const windowFps = (frameDelta * 1000) / elapsedMs;
+    fps = fps > 0 ? fps * (1 - FPS_EMA_ALPHA) + windowFps * FPS_EMA_ALPHA : windowFps;
   });
 </script>
 

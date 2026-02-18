@@ -10,8 +10,6 @@
     node,
     selectedId = '',
     sessionId = '',
-    recorderStatus = null,
-    rosbridgeStatus = 'idle',
     mode = 'recording',
     editMode = true,
     viewScale = 1,
@@ -22,8 +20,6 @@
     node: BlueprintNode;
     selectedId?: string;
     sessionId?: string;
-    recorderStatus?: Record<string, unknown> | null;
-    rosbridgeStatus?: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
     mode?: 'recording' | 'operate';
     editMode?: boolean;
     viewScale?: number;
@@ -56,8 +52,6 @@
     } as Record<string, unknown>;
     if (viewType === 'controls' || viewType === 'progress' || viewType === 'timeline') {
       baseProps.sessionId = sessionId;
-      baseProps.recorderStatus = recorderStatus;
-      baseProps.rosbridgeStatus = rosbridgeStatus;
     }
     return baseProps;
   };
@@ -88,8 +82,6 @@
             node={node.children[0]}
             {selectedId}
             {sessionId}
-            {recorderStatus}
-            {rosbridgeStatus}
             {mode}
             {editMode}
             {viewScale}
@@ -105,8 +97,6 @@
             node={node.children[1]}
             {selectedId}
             {sessionId}
-            {recorderStatus}
-            {rosbridgeStatus}
             {mode}
             {editMode}
             {viewScale}
@@ -125,8 +115,6 @@
             node={tab.child}
             {selectedId}
             {sessionId}
-            {recorderStatus}
-            {rosbridgeStatus}
             {mode}
             {editMode}
             {viewScale}

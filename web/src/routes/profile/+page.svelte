@@ -112,6 +112,71 @@
     }
   }
 
+  function runVlaborWsOperation(path: string): Promise<void> {
+    if (restartWs) {
+      return Promise.reject(new Error('別のVLAbor操作が進行中です。'));
+    }
+    restartingVlabor = true;
+    restartError = '';
+    restartLogs = [];
+
+    const wsUrl = getBackendUrl().replace(/^http/, 'ws') + path;
+    const ws = new WebSocket(wsUrl);
+    restartWs = ws;
+
+    return new Promise((resolve, reject) => {
+      let completed = false;
+      let operationError = '';
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'log') {
+            restartLogs = [...restartLogs, data.line].slice(-MAX_LOG_LINES);
+            requestAnimationFrame(() => {
+              if (logEl) logEl.scrollTop = logEl.scrollHeight;
+            });
+            return;
+          }
+          if (data.type === 'complete') {
+            completed = true;
+            const exitCode = String(data.exit_code ?? '');
+            if (exitCode !== '0') {
+              operationError = `終了コード: ${exitCode}`;
+            }
+            return;
+          }
+          if (data.type === 'error') {
+            operationError = String(data.message ?? '処理に失敗しました。');
+          }
+        } catch {
+          // ignore parse errors
+        }
+      };
+
+      ws.onerror = () => {
+        if (!operationError) {
+          operationError = 'WebSocket接続に失敗しました。';
+        }
+      };
+
+      ws.onclose = () => {
+        restartingVlabor = false;
+        restartWs = null;
+
+        if (!operationError && !completed) {
+          operationError = '処理が完了する前に切断されました。';
+        }
+        if (operationError) {
+          restartError = operationError;
+          reject(new Error(operationError));
+          return;
+        }
+        resolve();
+      };
+    });
+  }
+
   async function handleProfileChange(event: Event) {
     const target = event.target as HTMLSelectElement;
     const profileName = target.value;
@@ -119,10 +184,12 @@
     switchingProfile = true;
     selectionError = '';
     try {
-      await api.profiles.setActive({ profile_name: profileName });
+      const switchPath = `/api/profiles/ws/vlabor/switch-profile?profile=${encodeURIComponent(profileName)}`;
+      await runVlaborWsOperation(switchPath);
       await refetchQuery($activeProfileQuery);
       await refetchQuery($profilesQuery);
       await refetchQuery($activeStatusQuery);
+      await refetchQuery($vlaborStatusQuery);
     } catch (error) {
       console.error(error);
       selectionError = error instanceof Error ? error.message : 'プロファイル切り替えに失敗しました。';
@@ -133,48 +200,11 @@
 
   function handleRestartVlabor() {
     if (restartWs) return;
-    restartingVlabor = true;
-    restartError = '';
-    restartLogs = [];
-
     const selectedProfile = (activeProfileName ?? '').trim();
     const restartPath = selectedProfile
       ? `/api/profiles/ws/vlabor/restart?profile=${encodeURIComponent(selectedProfile)}`
       : '/api/profiles/ws/vlabor/restart';
-    const wsUrl = getBackendUrl().replace(/^http/, 'ws') + restartPath;
-    const ws = new WebSocket(wsUrl);
-    restartWs = ws;
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'log') {
-          restartLogs = [...restartLogs, data.line].slice(-MAX_LOG_LINES);
-          requestAnimationFrame(() => {
-            if (logEl) logEl.scrollTop = logEl.scrollHeight;
-          });
-        } else if (data.type === 'complete') {
-          if (data.exit_code !== '0') {
-            restartError = `終了コード: ${data.exit_code}`;
-          }
-        } else if (data.type === 'error') {
-          restartError = data.message;
-        }
-      } catch {
-        // ignore parse errors
-      }
-    };
-
-    ws.onerror = () => {
-      restartError = 'WebSocket接続に失敗しました。';
-      restartingVlabor = false;
-      restartWs = null;
-    };
-
-    ws.onclose = () => {
-      restartingVlabor = false;
-      restartWs = null;
-    };
+    void runVlaborWsOperation(restartPath);
   }
 
   let stopVlaborStream = () => {};
@@ -214,7 +244,7 @@
     <div class="flex flex-wrap items-center gap-2">
       <select
         class="input min-w-[260px]"
-        disabled={switchingProfile || !($profilesQuery.data?.profiles ?? []).length}
+        disabled={switchingProfile || restartingVlabor || !($profilesQuery.data?.profiles ?? []).length}
         value={activeProfileName}
         onchange={handleProfileChange}
       >
