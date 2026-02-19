@@ -713,34 +713,15 @@ def build_inference_joint_names(snapshot: dict[str, Any]) -> list[str]:
 
 
 def build_inference_camera_aliases(snapshot: dict[str, Any]) -> dict[str, str]:
-    profile = snapshot.get("profile")
-    if not isinstance(profile, dict):
-        return {}
-
-    canonical_names = ["top_camera", "arm_camera_1", "arm_camera_2", "arm_camera_3"]
-    source_names: list[str] = []
-
-    lerobot = profile.get("lerobot")
-    if isinstance(lerobot, dict):
-        cameras = lerobot.get("cameras")
-        if isinstance(cameras, list):
-            for camera in cameras:
-                if not isinstance(camera, dict):
-                    continue
-                source_name = str(camera.get("source") or camera.get("name") or "").strip()
-                if source_name and source_name not in source_names:
-                    source_names.append(source_name)
-    if not source_names:
-        for spec in extract_camera_specs(snapshot):
-            source_name = str(spec.get("name") or "").strip()
-            if source_name and source_name not in source_names:
-                source_names.append(source_name)
-
     aliases: dict[str, str] = {}
-    for index, source_name in enumerate(source_names):
-        if index >= len(canonical_names):
-            break
-        aliases[source_name] = canonical_names[index]
+    for spec in extract_camera_specs(snapshot):
+        if not _as_bool(spec.get("enabled", True)):
+            continue
+        source_name = str(spec.get("source") or "").strip()
+        camera_name = str(spec.get("name") or "").strip()
+        if not source_name or not camera_name:
+            continue
+        aliases[source_name] = camera_name
     return aliases
 
 
