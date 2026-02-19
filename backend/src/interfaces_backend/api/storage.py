@@ -2,13 +2,16 @@
 
 import asyncio
 import logging
+from pathlib import Path
 import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from huggingface_hub import HfApi, snapshot_download, upload_folder
+from postgrest.exceptions import APIError
 from pydantic import ValidationError
 
 from interfaces_backend.models.storage import (
@@ -16,6 +19,8 @@ from interfaces_backend.models.storage import (
     ArchiveBulkRequest,
     ArchiveBulkResponse,
     ArchiveResponse,
+    DatasetPlaybackCameraInfo,
+    DatasetPlaybackResponse,
     DatasetReuploadResponse,
     DatasetMergeRequest,
     DatasetMergeResponse,
@@ -67,9 +72,70 @@ def _delete_local_model(model_id: str) -> None:
         shutil.rmtree(model_path)
 
 
-async def _detach_models_from_dataset(dataset_id: str) -> None:
-    client = await get_supabase_async_client()
+def _camera_label_from_key(video_key: str) -> str:
+    prefix = "observation.images."
+    if video_key.startswith(prefix):
+        return video_key[len(prefix) :]
+    return video_key.split(".")[-1]
+
+
+def _build_playback_response(dataset_id: str, metadata: LeRobotDatasetMetadata) -> DatasetPlaybackResponse:
+    cameras: list[DatasetPlaybackCameraInfo] = []
+    for video_key in metadata.video_keys:
+        feature = metadata.features.get(video_key) if isinstance(metadata.features, dict) else None
+        info = feature.get("info") if isinstance(feature, dict) else {}
+        cameras.append(
+            DatasetPlaybackCameraInfo(
+                key=video_key,
+                label=_camera_label_from_key(video_key),
+                width=info.get("video.width"),
+                height=info.get("video.height"),
+                fps=info.get("video.fps"),
+                codec=info.get("video.codec"),
+                pix_fmt=info.get("video.pix_fmt"),
+            )
+        )
+
+    return DatasetPlaybackResponse(
+        dataset_id=dataset_id,
+        is_local=True,
+        total_episodes=metadata.total_episodes,
+        fps=metadata.fps,
+        use_videos=bool(metadata.video_path) and len(metadata.video_keys) > 0,
+        cameras=cameras,
+    )
+
+
+async def _detach_models_from_dataset(client, dataset_id: str) -> None:
     await client.table("models").update({"dataset_id": None}).eq("dataset_id", dataset_id).execute()
+
+
+async def _detach_training_jobs_from_dataset(client, dataset_id: str) -> None:
+    await client.table("training_jobs").update({"dataset_id": None}).eq("dataset_id", dataset_id).execute()
+    try:
+        await (
+            client.table("training_jobs")
+            .update({"new_dataset_id": None})
+            .eq("new_dataset_id", dataset_id)
+            .execute()
+        )
+    except APIError as exc:
+        if _is_missing_column_error(exc, table_name="training_jobs", column_name="new_dataset_id"):
+            logger.info("Skip training_jobs.new_dataset_id detach: column not found")
+            return
+        raise
+
+
+async def _detach_dataset_references(client, dataset_id: str) -> None:
+    await _detach_models_from_dataset(client, dataset_id)
+    await _detach_training_jobs_from_dataset(client, dataset_id)
+
+
+def _is_missing_column_error(exc: APIError, *, table_name: str, column_name: str) -> bool:
+    if str(getattr(exc, "code", "")).strip() != "PGRST204":
+        return False
+    message = str(getattr(exc, "message", "") or "").lower()
+    return table_name.lower() in message and column_name.lower() in message
 
 
 def _extract_profile_name(snapshot: object) -> Optional[str]:
@@ -338,6 +404,66 @@ async def get_dataset(dataset_id: str):
     return _dataset_row_to_info(rows[0])
 
 
+@router.get("/datasets/{dataset_id:path}/playback", response_model=DatasetPlaybackResponse)
+async def get_dataset_playback(dataset_id: str):
+    """Get local playback metadata for a dataset."""
+    client = await get_supabase_async_client()
+    rows = (await client.table("datasets").select("id").eq("id", dataset_id).execute()).data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+
+    dataset_path = get_datasets_dir() / dataset_id
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Local dataset not found: {dataset_id}")
+
+    try:
+        metadata = LeRobotDatasetMetadata(dataset_id, root=dataset_path)
+        return _build_playback_response(dataset_id, metadata)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load dataset playback metadata: {exc}") from exc
+
+
+@router.get("/datasets/{dataset_id:path}/playback/{video_key:path}/{episode_index}")
+async def get_dataset_playback_video(dataset_id: str, video_key: str, episode_index: int):
+    """Stream a dataset episode video for playback."""
+    if episode_index < 0:
+        raise HTTPException(status_code=400, detail="episode_index must be >= 0")
+
+    client = await get_supabase_async_client()
+    rows = (await client.table("datasets").select("id").eq("id", dataset_id).execute()).data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+
+    dataset_path = get_datasets_dir() / dataset_id
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Local dataset not found: {dataset_id}")
+
+    try:
+        metadata = LeRobotDatasetMetadata(dataset_id, root=dataset_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load dataset metadata: {exc}") from exc
+
+    if video_key not in metadata.video_keys:
+        raise HTTPException(status_code=404, detail=f"Video stream not found: {video_key}")
+    if episode_index >= metadata.total_episodes:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Episode index out of range: {episode_index} (total={metadata.total_episodes})",
+        )
+
+    relative_path = metadata.get_video_file_path(episode_index, video_key)
+    video_path = Path(dataset_path) / relative_path
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Video file not found: {relative_path}")
+
+    return FileResponse(
+        path=video_path,
+        media_type="video/mp4",
+        filename=video_path.name,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.delete("/datasets/{dataset_id:path}", response_model=ArchiveResponse)
 async def archive_dataset(dataset_id: str):
     """Archive (soft delete) a dataset."""
@@ -496,7 +622,7 @@ async def delete_archived_dataset(dataset_id: str):
     if existing[0].get("status") != "archived":
         raise HTTPException(status_code=400, detail="Dataset is not archived")
 
-    await _detach_models_from_dataset(dataset_id)
+    await _detach_dataset_references(client, dataset_id)
     sync_service = R2DBSyncService()
     sync_service.delete_dataset_remote(dataset_id)
     _delete_local_dataset(dataset_id)
@@ -577,7 +703,7 @@ async def delete_archived_items(request: ArchiveBulkRequest):
         if existing[0].get("status") != "archived":
             errors.append(f"Dataset is not archived: {dataset_id}")
             continue
-        await _detach_models_from_dataset(dataset_id)
+        await _detach_dataset_references(client, dataset_id)
         sync_service.delete_dataset_remote(dataset_id)
         _delete_local_dataset(dataset_id)
         await client.table("datasets").delete().eq("id", dataset_id).execute()

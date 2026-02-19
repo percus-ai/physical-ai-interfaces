@@ -22,9 +22,11 @@ from interfaces_backend.services.session_manager import (
     SessionState,
 )
 from interfaces_backend.services.vlabor_profiles import (
+    build_inference_bridge_config,
     build_inference_camera_aliases,
     build_inference_joint_names,
     extract_arm_namespaces,
+    extract_recorder_topic_suffixes,
     save_session_profile_binding,
 )
 from percus_ai.storage.naming import generate_dataset_id
@@ -47,6 +49,69 @@ class InferenceSessionManager(BaseSessionManager):
         self._recorder = recorder or get_recorder_bridge()
         self._dataset = dataset or get_dataset_lifecycle()
 
+    @staticmethod
+    def _validate_inference_bridge_resolution(
+        *,
+        profile_name: str,
+        profile_source: str,
+        bridge_stream_config: dict[str, Any],
+    ) -> None:
+        errors: list[str] = []
+        arm_namespaces = bridge_stream_config.get("arm_namespaces")
+        state_topic_suffix = bridge_stream_config.get("state_topic_suffix")
+        action_topic_suffix = bridge_stream_config.get("action_topic_suffix")
+        camera_streams = bridge_stream_config.get("camera_streams")
+        if not isinstance(arm_namespaces, list) or not arm_namespaces:
+            errors.append(
+                "no arm namespaces resolved (expected profile.lerobot.<arm>.namespace "
+                "or profile.teleop.follower_arms[*].namespace)"
+            )
+        if not str(state_topic_suffix or "").strip():
+            errors.append(
+                "state_topic_suffix unresolved (expected profile.lerobot.<arm>.topic per target arm)"
+            )
+        if not str(action_topic_suffix or "").strip():
+            errors.append(
+                "action_topic_suffix unresolved (expected profile.lerobot.<arm>.action_topic "
+                "or profile.teleop.topic_mappings[*].dst per target arm)"
+            )
+        if not isinstance(camera_streams, list) or not camera_streams:
+            errors.append(
+                "no enabled cameras resolved (expected profile.lerobot.cameras[*].topic)"
+            )
+        if not errors:
+            return
+
+        detail = (
+            "Inference profile resolution failed. "
+            f"profile={profile_name} source={profile_source}; "
+            + "; ".join(errors)
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+    @staticmethod
+    def _recorder_state(status: dict[str, Any] | None) -> str:
+        if not status:
+            return ""
+        return str(status.get("state") or "").strip().lower()
+
+    @staticmethod
+    def _recorder_dataset_id(status: dict[str, Any] | None) -> str:
+        if not status:
+            return ""
+        return str(status.get("dataset_id") or "").strip()
+
+    @classmethod
+    def _is_recorder_active_for_dataset(
+        cls,
+        status: dict[str, Any] | None,
+        dataset_id: str,
+    ) -> bool:
+        return (
+            cls._recorder_state(status) in _ACTIVE_RECORDER_STATES
+            and cls._recorder_dataset_id(status) == dataset_id
+        )
+
     async def create(
         self,
         *,
@@ -67,6 +132,12 @@ class InferenceSessionManager(BaseSessionManager):
                 detail="No inference joints configured in active profile",
             )
         camera_key_aliases = build_inference_camera_aliases(state.profile.snapshot)
+        bridge_stream_config = build_inference_bridge_config(state.profile.snapshot)
+        self._validate_inference_bridge_resolution(
+            profile_name=state.profile.name,
+            profile_source=getattr(state.profile, "source_path", "unknown"),
+            bridge_stream_config=bridge_stream_config,
+        )
 
         # Download model from R2
         self._emit_progress(
@@ -136,6 +207,7 @@ class InferenceSessionManager(BaseSessionManager):
                 task=kwargs.get("task"),
                 joint_names=joint_names,
                 camera_key_aliases=camera_key_aliases,
+                bridge_stream_config=bridge_stream_config,
                 progress_callback=progress_callback,
             )
         except FileNotFoundError as exc:
@@ -152,6 +224,7 @@ class InferenceSessionManager(BaseSessionManager):
 
         state.extras["worker_session_id"] = worker_session_id
         state.extras["model_id"] = kwargs["model_id"]
+        state.extras["bridge_stream_config"] = bridge_stream_config
 
         # Simultaneous recording (best-effort)
         self._emit_progress(
@@ -185,21 +258,20 @@ class InferenceSessionManager(BaseSessionManager):
         dataset_id = state.extras.get("dataset_id")
         if dataset_id:
             recording_stopped = False
+            recorder_result: dict[str, Any] | None = None
             try:
-                result = self._recorder.stop(save_current=True)
-                if result.get("success", False):
+                recorder_result = self._recorder.stop(save_current=True)
+                if recorder_result.get("success", False):
                     final_status = await asyncio.to_thread(
                         self._recorder.wait_until_finalized,
                         dataset_id,
                     )
-                    final_state = str((final_status or {}).get("state") or "").strip().lower()
-                    final_dataset_id = str((final_status or {}).get("dataset_id") or "").strip()
-                    if final_dataset_id == dataset_id and final_state in _ACTIVE_RECORDER_STATES:
+                    if self._is_recorder_active_for_dataset(final_status, dataset_id):
                         logger.warning(
                             "Inference recording stop timed out before finalize: "
                             "dataset_id=%s state=%s",
                             dataset_id,
-                            final_state,
+                            self._recorder_state(final_status),
                         )
                     else:
                         logger.info("Stopped inference recording: dataset_id=%s", dataset_id)
@@ -208,7 +280,33 @@ class InferenceSessionManager(BaseSessionManager):
                     logger.warning(
                         "Failed to stop inference recording: dataset_id=%s result=%s",
                         dataset_id,
-                        result,
+                        recorder_result,
+                    )
+            except HTTPException as exc:
+                if exc.status_code == 503:
+                    final_status = await asyncio.to_thread(
+                        self._recorder.wait_until_finalized,
+                        dataset_id,
+                    )
+                    if not self._is_recorder_active_for_dataset(final_status, dataset_id):
+                        logger.info(
+                            "Recorder stop request timed out but session is already inactive: "
+                            "dataset_id=%s",
+                            dataset_id,
+                        )
+                        recording_stopped = True
+                    else:
+                        logger.warning(
+                            "Recorder stop request timed out and session may still be active: "
+                            "dataset_id=%s state=%s",
+                            dataset_id,
+                            self._recorder_state(final_status),
+                        )
+                else:
+                    logger.warning(
+                        "Failed to stop inference recording: dataset_id=%s detail=%s",
+                        dataset_id,
+                        exc.detail,
                     )
             except Exception:
                 logger.warning("Failed to stop inference recording", exc_info=True)
@@ -233,6 +331,22 @@ class InferenceSessionManager(BaseSessionManager):
             dataset_id = generate_dataset_id()
             cameras = self._recorder.build_cameras(state.profile.snapshot)
             arm_namespaces = extract_arm_namespaces(state.profile.snapshot)
+            topic_suffixes = extract_recorder_topic_suffixes(
+                state.profile.snapshot,
+                arm_namespaces=arm_namespaces,
+            )
+            if not cameras:
+                logger.warning("Skip inference recording: no recorder cameras resolved")
+                return
+            if not arm_namespaces:
+                logger.warning("Skip inference recording: no recorder arm namespaces resolved")
+                return
+            if "state_topic_suffix" not in topic_suffixes:
+                logger.warning("Skip inference recording: state_topic_suffix unresolved")
+                return
+            if "action_topic_suffix" not in topic_suffixes:
+                logger.warning("Skip inference recording: action_topic_suffix unresolved")
+                return
 
             payload: dict[str, Any] = {
                 "dataset_id": dataset_id,
@@ -248,9 +362,9 @@ class InferenceSessionManager(BaseSessionManager):
                     "session_kind": "inference",
                     "inference_session_id": state.id,
                 },
+                "arm_namespaces": arm_namespaces,
             }
-            if arm_namespaces:
-                payload["arm_namespaces"] = arm_namespaces
+            payload.update(topic_suffixes)
 
             result = self._recorder.start(payload)
             if result.get("success"):

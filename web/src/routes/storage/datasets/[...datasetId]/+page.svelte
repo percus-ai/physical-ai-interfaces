@@ -4,7 +4,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { createQuery, useQueryClient } from '@tanstack/svelte-query';
-  import { api } from '$lib/api/client';
+  import { api, type DatasetPlaybackResponse } from '$lib/api/client';
   import { formatBytes, formatDate } from '$lib/format';
 
   type DatasetInfo = {
@@ -15,6 +15,7 @@
     status?: string;
     size_bytes?: number;
     episode_count?: number;
+    is_local?: boolean;
     created_at?: string;
     updated_at?: string;
   };
@@ -71,9 +72,30 @@
   );
   const canMerge = $derived(!isArchived && mergeSelection.length > 0 && !actionLoading);
 
+  const playbackQuery = createQuery<DatasetPlaybackResponse>(
+    toStore(() => ({
+      queryKey: ['storage', 'dataset', datasetId, 'playback'],
+      queryFn: () => api.storage.datasetPlayback(datasetId),
+      enabled: Boolean(datasetId) && Boolean(dataset?.is_local)
+    }))
+  );
+
+  let selectedEpisode = $state(0);
+  const playbackEpisodes = $derived($playbackQuery.data?.total_episodes ?? 0);
+
+  $effect(() => {
+    if (playbackEpisodes <= 0) {
+      selectedEpisode = 0;
+      return;
+    }
+    if (selectedEpisode < 0) selectedEpisode = 0;
+    if (selectedEpisode >= playbackEpisodes) selectedEpisode = playbackEpisodes - 1;
+  });
+
   const refetchDataset = async () => {
     if (!datasetId) return;
     await queryClient.invalidateQueries({ queryKey: ['storage', 'dataset', datasetId] });
+    await queryClient.invalidateQueries({ queryKey: ['storage', 'dataset', datasetId, 'playback'] });
   };
 
   const refetchCandidates = async () => {
@@ -274,6 +296,82 @@
   {/if}
   {#if actionError}
     <p class="mt-2 text-sm text-rose-600">{actionError}</p>
+  {/if}
+</section>
+
+<section class="card p-6">
+  <div class="flex items-center justify-between">
+    <h2 class="text-xl font-semibold text-slate-900">再生</h2>
+    <button class="btn-ghost" type="button" onclick={() => queryClient.invalidateQueries({ queryKey: ['storage', 'dataset', datasetId, 'playback'] })}>
+      再読み込み
+    </button>
+  </div>
+  <p class="mt-2 text-sm text-slate-600">収録済みエピソードをブラウザで確認できます。</p>
+  {#if !dataset?.is_local}
+    <p class="mt-4 text-sm text-slate-600">ローカル未配置のため再生できません。</p>
+  {:else if $playbackQuery.isLoading}
+    <p class="mt-4 text-sm text-slate-600">再生情報を読み込み中...</p>
+  {:else if $playbackQuery.error}
+    <p class="mt-4 text-sm text-rose-600">
+      {$playbackQuery.error instanceof Error ? $playbackQuery.error.message : '再生情報の取得に失敗しました。'}
+    </p>
+  {:else if $playbackQuery.data?.use_videos && ($playbackQuery.data?.cameras?.length ?? 0) > 0 && playbackEpisodes > 0}
+    <div class="mt-4 flex flex-wrap items-end gap-3">
+      <div>
+        <label class="label" for="episode-index">エピソード</label>
+        <input
+          id="episode-index"
+          class="input mt-2 w-36"
+          type="number"
+          min="0"
+          max={Math.max(playbackEpisodes - 1, 0)}
+          bind:value={selectedEpisode}
+        />
+      </div>
+      <button
+        class="btn-ghost"
+        type="button"
+        disabled={selectedEpisode <= 0}
+        onclick={() => (selectedEpisode = Math.max(0, selectedEpisode - 1))}
+      >
+        前へ
+      </button>
+      <button
+        class="btn-ghost"
+        type="button"
+        disabled={selectedEpisode >= playbackEpisodes - 1}
+        onclick={() => (selectedEpisode = Math.min(playbackEpisodes - 1, selectedEpisode + 1))}
+      >
+        次へ
+      </button>
+      <p class="text-xs text-slate-500">
+        {selectedEpisode + 1} / {playbackEpisodes} episodes
+      </p>
+    </div>
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      {#each $playbackQuery.data.cameras as camera}
+        <div class="rounded-2xl border border-slate-200/70 bg-white/70 p-3">
+          <div class="mb-2 flex items-center justify-between">
+            <p class="text-sm font-semibold text-slate-800">{camera.label}</p>
+            <p class="text-xs text-slate-500">
+              {camera.width ?? '-'}x{camera.height ?? '-'} / {camera.codec ?? '-'} / {camera.fps ?? '-'}fps
+            </p>
+          </div>
+          {#key `${camera.key}:${selectedEpisode}`}
+            <!-- svelte-ignore a11y_media_has_caption -->
+            <video
+              class="w-full rounded-xl bg-slate-900"
+              controls
+              preload="metadata"
+              crossorigin="use-credentials"
+              src={api.storage.datasetPlaybackVideoUrl(datasetId, camera.key, selectedEpisode)}
+            ></video>
+          {/key}
+        </div>
+      {/each}
+    </div>
+  {:else}
+    <p class="mt-4 text-sm text-slate-600">動画再生可能なエピソードが見つかりません。</p>
   {/if}
 </section>
 

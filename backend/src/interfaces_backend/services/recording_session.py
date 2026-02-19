@@ -44,6 +44,44 @@ class RecordingSessionManager(BaseSessionManager):
         # sessions by dataset_id directly.
         return generate_dataset_id()
 
+    @staticmethod
+    def _validate_recorder_resolution(
+        *,
+        profile_name: str,
+        profile_source: str,
+        cameras: list[dict[str, Any]],
+        arm_namespaces: list[str],
+        topic_suffixes: dict[str, str],
+    ) -> None:
+        errors: list[str] = []
+        if not cameras:
+            errors.append(
+                "no enabled cameras resolved (expected profile.lerobot.cameras[*].topic)"
+            )
+        if not arm_namespaces:
+            errors.append(
+                "no arm namespaces resolved (expected profile.lerobot.<arm>.namespace "
+                "or profile.teleop.follower_arms[*].namespace)"
+            )
+        if "state_topic_suffix" not in topic_suffixes:
+            errors.append(
+                "state_topic_suffix unresolved (expected profile.lerobot.<arm>.topic per target arm)"
+            )
+        if "action_topic_suffix" not in topic_suffixes:
+            errors.append(
+                "action_topic_suffix unresolved (expected profile.lerobot.<arm>.action_topic "
+                "or profile.teleop.topic_mappings[*].dst per target arm)"
+            )
+        if not errors:
+            return
+
+        detail = (
+            "Recorder profile resolution failed. "
+            f"profile={profile_name} source={profile_source}; "
+            + "; ".join(errors)
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
     async def create(
         self,
         *,
@@ -66,13 +104,17 @@ class RecordingSessionManager(BaseSessionManager):
         )
 
         cameras = self._recorder.build_cameras(state.profile.snapshot)
-        if not cameras:
-            raise HTTPException(status_code=400, detail="No enabled cameras in active profile")
-
         arm_namespaces = extract_arm_namespaces(state.profile.snapshot)
         topic_suffixes = extract_recorder_topic_suffixes(
             state.profile.snapshot,
             arm_namespaces=arm_namespaces,
+        )
+        self._validate_recorder_resolution(
+            profile_name=state.profile.name,
+            profile_source=getattr(state.profile, "source_path", "unknown"),
+            cameras=cameras,
+            arm_namespaces=arm_namespaces,
+            topic_suffixes=topic_suffixes,
         )
 
         recorder_payload: dict[str, Any] = {

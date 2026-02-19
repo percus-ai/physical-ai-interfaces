@@ -100,6 +100,25 @@ export type StartupOperationStatusResponse = {
   updated_at?: string | null;
 };
 
+export type DatasetPlaybackCameraInfo = {
+  key: string;
+  label: string;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  codec?: string | null;
+  pix_fmt?: string | null;
+};
+
+export type DatasetPlaybackResponse = {
+  dataset_id: string;
+  is_local: boolean;
+  total_episodes: number;
+  fps: number;
+  use_videos: boolean;
+  cameras: DatasetPlaybackCameraInfo[];
+};
+
 let refreshPromise: Promise<boolean> | null = null;
 
 async function baseFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -420,6 +439,10 @@ export const api = {
     models: (profileName?: string) =>
       fetchApi(`/api/storage/models${profileName ? `?profile_name=${profileName}` : ''}`),
     dataset: (datasetId: string) => fetchApi(`/api/storage/datasets/${datasetId}`),
+    datasetPlayback: (datasetId: string) =>
+      fetchApi<DatasetPlaybackResponse>(`/api/storage/datasets/${datasetId}/playback`),
+    datasetPlaybackVideoUrl: (datasetId: string, videoKey: string, episodeIndex: number) =>
+      `${getBackendUrl()}/api/storage/datasets/${encodeURIComponent(datasetId)}/playback/${encodeURIComponent(videoKey)}/${episodeIndex}`,
     model: (modelId: string) => fetchApi(`/api/storage/models/${modelId}`),
     usage: () => fetchApi('/api/storage/usage'),
     archive: () => fetchApi('/api/storage/archive'),

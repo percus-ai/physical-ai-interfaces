@@ -645,6 +645,45 @@ def extract_recorder_topic_suffixes(
     return result
 
 
+def build_inference_bridge_config(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Build inference bridge stream config from VLAbor profile snapshot.
+
+    This uses the same profile-derived source of truth as recording:
+    arm namespaces, recorder topic suffixes, and lerobot camera definitions.
+    """
+    arm_namespaces: list[str] = []
+    for namespace in extract_arm_namespaces(snapshot):
+        text = str(namespace or "").strip()
+        if text and text not in arm_namespaces:
+            arm_namespaces.append(text)
+
+    topic_suffixes = extract_recorder_topic_suffixes(
+        snapshot,
+        arm_namespaces=arm_namespaces,
+    )
+
+    camera_streams: list[dict[str, str]] = []
+    seen_camera_names: set[str] = set()
+    for spec in extract_camera_specs(snapshot):
+        if not _as_bool(spec.get("enabled", True)):
+            continue
+        topic = str(spec.get("topic") or "").strip()
+        # Inference worker alias mapping is based on "source" camera names.
+        # Prefer source and fallback to display name when source is not present.
+        name = str(spec.get("source") or spec.get("name") or "").strip()
+        if not name or not topic or name in seen_camera_names:
+            continue
+        seen_camera_names.add(name)
+        camera_streams.append({"name": name, "topic": topic})
+
+    return {
+        "arm_namespaces": arm_namespaces,
+        "state_topic_suffix": str(topic_suffixes.get("state_topic_suffix") or "").strip(),
+        "action_topic_suffix": str(topic_suffixes.get("action_topic_suffix") or "").strip(),
+        "camera_streams": camera_streams,
+    }
+
+
 def build_inference_joint_names(snapshot: dict[str, Any]) -> list[str]:
     profile = snapshot.get("profile")
     if not isinstance(profile, dict):

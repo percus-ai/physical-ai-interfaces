@@ -91,6 +91,29 @@ class DatasetReuploadResponse(BaseModel):
     message: str
 
 
+class DatasetPlaybackCameraInfo(BaseModel):
+    """Camera stream info for dataset playback."""
+
+    key: str = Field(..., description="Feature key, e.g. observation.images.cam_top")
+    label: str = Field(..., description="Camera label")
+    width: Optional[int] = Field(None, description="Video width")
+    height: Optional[int] = Field(None, description="Video height")
+    fps: Optional[int] = Field(None, description="Video FPS")
+    codec: Optional[str] = Field(None, description="Video codec")
+    pix_fmt: Optional[str] = Field(None, description="Pixel format")
+
+
+class DatasetPlaybackResponse(BaseModel):
+    """Playback metadata for a local dataset."""
+
+    dataset_id: str = Field(..., description="Dataset ID")
+    is_local: bool = Field(..., description="Whether dataset exists locally")
+    total_episodes: int = Field(0, description="Total episode count")
+    fps: int = Field(0, description="Dataset FPS")
+    use_videos: bool = Field(False, description="Whether dataset stores videos")
+    cameras: List[DatasetPlaybackCameraInfo] = Field(default_factory=list)
+
+
 class StorageUsageResponse(BaseModel):
     """Response for storage usage endpoint."""
 

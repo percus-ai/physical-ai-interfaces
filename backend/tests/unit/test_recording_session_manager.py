@@ -253,3 +253,103 @@ def test_create_includes_profile_topic_suffixes(monkeypatch):
     payload = state.extras["recorder_payload"]
     assert payload["state_topic_suffix"] == "joint_states_single"
     assert payload["action_topic_suffix"] == "joint_ctrl_single"
+
+
+def test_create_raises_when_action_suffix_unresolved(monkeypatch):
+    async def fake_resolve_profile(self, _profile):
+        return SimpleNamespace(
+            name="profile-a",
+            source_path="/tmp/profile-a.yaml",
+            snapshot={"profile": {}},
+        )
+
+    async def fake_save_session_profile_binding(**_kwargs):
+        return None
+
+    monkeypatch.setattr(RecordingSessionManager, "_resolve_profile", fake_resolve_profile)
+    monkeypatch.setattr(session_manager, "get_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(
+        session_manager,
+        "save_session_profile_binding",
+        fake_save_session_profile_binding,
+    )
+    monkeypatch.setattr(recording_session, "extract_arm_namespaces", lambda _snapshot: ["follower_arm"])
+    monkeypatch.setattr(
+        recording_session,
+        "extract_recorder_topic_suffixes",
+        lambda _snapshot, arm_namespaces: {
+            "state_topic_suffix": "joint_states_single",
+        },
+    )
+
+    recorder = _FakeRecorder()
+    dataset = _FakeDataset()
+    manager = RecordingSessionManager(recorder=recorder, dataset=dataset)
+
+    try:
+        asyncio.run(
+            manager.create(
+                session_id="session-1",
+                dataset_name="dataset-a",
+                task="pick-place",
+                num_episodes=5,
+                target_total_episodes=5,
+                episode_time_s=60.0,
+                reset_time_s=10.0,
+            )
+        )
+        assert False, "expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "action_topic_suffix unresolved" in str(exc.detail)
+
+
+def test_create_raises_when_cameras_unresolved(monkeypatch):
+    async def fake_resolve_profile(self, _profile):
+        return SimpleNamespace(
+            name="profile-a",
+            source_path="/tmp/profile-a.yaml",
+            snapshot={"profile": {}},
+        )
+
+    async def fake_save_session_profile_binding(**_kwargs):
+        return None
+
+    monkeypatch.setattr(RecordingSessionManager, "_resolve_profile", fake_resolve_profile)
+    monkeypatch.setattr(session_manager, "get_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(
+        session_manager,
+        "save_session_profile_binding",
+        fake_save_session_profile_binding,
+    )
+    monkeypatch.setattr(recording_session, "extract_arm_namespaces", lambda _snapshot: ["follower_arm"])
+    monkeypatch.setattr(
+        recording_session,
+        "extract_recorder_topic_suffixes",
+        lambda _snapshot, arm_namespaces: {
+            "state_topic_suffix": "joint_states_single",
+            "action_topic_suffix": "joint_ctrl_single",
+        },
+    )
+
+    recorder = _FakeRecorder()
+    recorder.build_cameras = lambda _snapshot: []
+    dataset = _FakeDataset()
+    manager = RecordingSessionManager(recorder=recorder, dataset=dataset)
+
+    try:
+        asyncio.run(
+            manager.create(
+                session_id="session-1",
+                dataset_name="dataset-a",
+                task="pick-place",
+                num_episodes=5,
+                target_total_episodes=5,
+                episode_time_s=60.0,
+                reset_time_s=10.0,
+            )
+        )
+        assert False, "expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "no enabled cameras resolved" in str(exc.detail)

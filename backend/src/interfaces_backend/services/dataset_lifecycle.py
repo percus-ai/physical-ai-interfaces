@@ -370,33 +370,75 @@ class DatasetLifecycle:
                 progress.get("bytes_done_total", progress.get("bytes_transferred"))
             )
             current_file = progress.get("current_file")
+            explicit_progress = self._to_float(progress.get("progress_percent"))
+            event_message = str(progress.get("message") or "").strip()
+            message = event_message or "モデルをクラウドから同期中です..."
+
+            if event_type == "checking":
+                snapshot = self._set_model_sync_status(
+                    active=True,
+                    status="checking",
+                    message=event_message or "モデルの同期状態を確認しています...",
+                    progress_percent=explicit_progress if explicit_progress is not None else 0.0,
+                    total_files=total_files,
+                    files_done=files_done,
+                    total_bytes=total_bytes,
+                    transferred_bytes=transferred_bytes,
+                    current_file=str(current_file) if current_file else None,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+                return
+
+            if event_type == "hashing":
+                snapshot = self._set_model_sync_status(
+                    active=True,
+                    status="syncing",
+                    message=event_message or "モデルの整合性を確認しています...",
+                    progress_percent=explicit_progress if explicit_progress is not None else 0.0,
+                    total_files=total_files,
+                    files_done=files_done,
+                    total_bytes=total_bytes,
+                    transferred_bytes=transferred_bytes,
+                    current_file=None,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
+                return
+
             if event_type == "start":
                 snapshot = self._set_model_sync_status(
                     active=True,
                     status="syncing",
-                    message="モデルをクラウドから同期中です...",
+                    message=message,
                     total_files=total_files,
                     files_done=0,
                     total_bytes=total_bytes,
                     transferred_bytes=0,
                     current_file=None,
-                    progress_percent=0.0,
+                    progress_percent=explicit_progress if explicit_progress is not None else 0.0,
                     error=None,
                 )
                 if sync_status_callback is not None:
                     sync_status_callback(snapshot)
                 return
             if event_type in {"downloading", "progress", "downloaded"}:
-                progress_percent = self._compute_progress_percent(
-                    total_files=total_files,
-                    files_done=files_done,
-                    total_bytes=total_bytes,
-                    transferred_bytes=transferred_bytes,
+                progress_percent = (
+                    explicit_progress
+                    if explicit_progress is not None
+                    else self._compute_progress_percent(
+                        total_files=total_files,
+                        files_done=files_done,
+                        total_bytes=total_bytes,
+                        transferred_bytes=transferred_bytes,
+                    )
                 )
                 snapshot = self._set_model_sync_status(
                     active=True,
                     status="syncing",
-                    message="モデルをクラウドから同期中です...",
+                    message=message,
                     total_files=total_files,
                     files_done=files_done,
                     total_bytes=total_bytes,
@@ -412,8 +454,8 @@ class DatasetLifecycle:
                 snapshot = self._set_model_sync_status(
                     active=False,
                     status="completed",
-                    message="モデル同期が完了しました。",
-                    progress_percent=100.0,
+                    message=event_message or "モデル同期が完了しました。",
+                    progress_percent=explicit_progress if explicit_progress is not None else 100.0,
                     files_done=total_files,
                     total_files=total_files,
                     transferred_bytes=total_bytes,
@@ -428,7 +470,7 @@ class DatasetLifecycle:
                 snapshot = self._set_model_sync_status(
                     active=False,
                     status="error",
-                    message="モデル同期に失敗しました。",
+                    message=event_message or "モデル同期に失敗しました。",
                     error=str(progress.get("error") or "unknown error"),
                 )
                 if sync_status_callback is not None:
@@ -500,6 +542,13 @@ class DatasetLifecycle:
             return max(int(value or 0), 0)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _compute_progress_percent(

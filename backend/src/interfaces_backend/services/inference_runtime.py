@@ -284,6 +284,7 @@ class InferenceRuntimeManager:
         task: Optional[str],
         joint_names: Optional[list[str]] = None,
         camera_key_aliases: Optional[dict[str, str]] = None,
+        bridge_stream_config: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[str, float, str, Optional[dict[str, Any]]], None]] = None,
     ) -> str:
         with self._lock:
@@ -422,6 +423,7 @@ class InferenceRuntimeManager:
                     for src, dst in (camera_key_aliases or {}).items()
                     if str(src).strip() and str(dst).strip()
                 },
+                "bridge_stream_config": dict(bridge_stream_config or {}),
             },
             "execution_hz": _ACTION_HZ,
             "protocol": {"name": _PROTOCOL_NAME, "version": _PROTOCOL_VERSION},
@@ -630,7 +632,7 @@ class InferenceRuntimeManager:
             with self._lock:
                 self._last_event = event
                 self._event_history.append(event)
-                if severity in {"warn", "error", "fatal"}:
+                if severity in {"error", "fatal"}:
                     suffix = f" ({code})" if code else ""
                     if detail:
                         self._last_error = f"{message}{suffix}: {detail}"

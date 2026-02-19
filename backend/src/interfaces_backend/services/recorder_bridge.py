@@ -197,6 +197,12 @@ class RecorderBridge:
             detail = exc.read().decode("utf-8") if exc.fp else str(exc)
             timer.error(detail, extra_tags={"status_code": exc.code})
             raise HTTPException(status_code=exc.code, detail=detail) from exc
+        except TimeoutError as exc:
+            timer.error(str(exc), extra_tags={"status_code": 503})
+            raise HTTPException(
+                status_code=503,
+                detail=f"Recorder request timed out: {path}",
+            ) from exc
         except urllib.error.URLError as exc:
             timer.error(str(exc), extra_tags={"status_code": 503})
             raise HTTPException(status_code=503, detail=f"Recorder unreachable: {exc}") from exc

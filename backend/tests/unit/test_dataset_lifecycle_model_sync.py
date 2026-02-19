@@ -41,6 +41,49 @@ class _FakeSyncFailure:
         return SimpleNamespace(success=False, message="not found", skipped=False)
 
 
+class _FakeSyncPhasedProgress:
+    async def ensure_model_local(self, _model_id, auto_download=True, progress_callback=None):
+        assert auto_download is True
+        assert progress_callback is not None
+        progress_callback({
+            "type": "checking",
+            "message": "リモート状態を確認中...",
+            "progress_percent": 6.0,
+        })
+        progress_callback({
+            "type": "start",
+            "total_files": 2,
+            "total_size": 1000,
+            "progress_percent": 30.0,
+            "message": "モデルをクラウドから同期中です...",
+        })
+        progress_callback({
+            "type": "progress",
+            "current_file": "weights.safetensors",
+            "files_done": 0,
+            "total_files": 2,
+            "bytes_done_total": 550,
+            "total_size": 1000,
+            "progress_percent": 60.5,
+        })
+        progress_callback({
+            "type": "hashing",
+            "message": "ハッシュを計算中です...",
+            "progress_percent": 92.0,
+            "total_files": 2,
+            "total_size": 1000,
+            "bytes_done_total": 1000,
+        })
+        progress_callback({
+            "type": "complete",
+            "message": "モデル同期が完了しました。",
+            "progress_percent": 100.0,
+            "total_files": 2,
+            "total_size": 1000,
+        })
+        return SimpleNamespace(success=True, message="Downloaded", skipped=False)
+
+
 class _FakeSyncUploadResult:
     def __init__(self, ok: bool, error: str = ""):
         self._ok = ok
@@ -107,6 +150,21 @@ def test_ensure_model_local_emits_sync_status_callback():
     assert updates[0] == "checking"
     assert "syncing" in updates
     assert updates[-1] == "completed"
+
+
+def test_ensure_model_local_applies_checking_and_hashing_progress_events():
+    lifecycle = DatasetLifecycle()
+    lifecycle._sync = _FakeSyncPhasedProgress()
+    updates: list[tuple[str, str, float]] = []
+
+    def _callback(status):
+        updates.append((status.status, status.message, status.progress_percent))
+
+    asyncio.run(lifecycle.ensure_model_local("model-phased", sync_status_callback=_callback))
+
+    assert ("checking", "リモート状態を確認中...", 6.0) in updates
+    assert ("syncing", "ハッシュを計算中です...", 92.0) in updates
+    assert updates[-1] == ("completed", "モデル同期が完了しました。", 100.0)
 
 
 def test_auto_upload_logs_error_when_sync_returns_failure(caplog):
