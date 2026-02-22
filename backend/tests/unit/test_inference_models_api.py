@@ -1,6 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("COMM_EXPORTER_MODE", "noop")
 
@@ -127,14 +128,106 @@ def test_list_db_models_marks_unsynced_models(monkeypatch, tmp_path: Path):
             ]
         )
 
+    async def _fake_task_candidates(_client, _rows):
+        return {
+            "model_remote": ["pick and place"],
+        }
+
     monkeypatch.setattr(inference_api, "get_supabase_async_client", _fake_db_client)
     monkeypatch.setattr(inference_api, "get_models_dir", lambda: models_dir)
+    monkeypatch.setattr(inference_api, "_load_task_candidates_by_model", _fake_task_candidates)
 
     models = asyncio.run(inference_api._list_db_models())
     mapped = {item.model_id: item for item in models}
 
     assert mapped["model_local"].is_local is True
     assert mapped["model_remote"].is_local is False
+    assert mapped["model_remote"].task_candidates == ["pick and place"]
+
+
+def test_load_task_candidates_by_model_uses_related_active_datasets():
+    class _FakeQuery:
+        def __init__(self, rows):
+            self._rows = rows
+            self._eq_filters: list[tuple[str, object]] = []
+            self._in_filters: list[tuple[str, set[object]]] = []
+            self._order_key: str | None = None
+            self._order_desc = False
+
+        def select(self, _fields):
+            return self
+
+        def eq(self, key, value):
+            self._eq_filters.append((key, value))
+            return self
+
+        def in_(self, key, values):
+            self._in_filters.append((key, set(values)))
+            return self
+
+        def order(self, key, desc=False):
+            self._order_key = key
+            self._order_desc = desc
+            return self
+
+        async def execute(self):
+            rows = list(self._rows)
+            for key, value in self._eq_filters:
+                rows = [row for row in rows if row.get(key) == value]
+            for key, values in self._in_filters:
+                rows = [row for row in rows if row.get(key) in values]
+            if self._order_key:
+                rows.sort(key=lambda row: row.get(self._order_key) or "", reverse=self._order_desc)
+            return type("Result", (), {"data": rows})()
+
+    class _FakeClient:
+        def __init__(self, rows_by_table):
+            self._rows_by_table = rows_by_table
+
+        def table(self, name):
+            return _FakeQuery(self._rows_by_table.get(name, []))
+
+    client = _FakeClient(
+        {
+            "training_jobs": [
+                {
+                    "model_id": "model-a",
+                    "dataset_id": "dataset-b",
+                    "updated_at": "2026-02-21T00:00:00Z",
+                    "deleted_at": None,
+                },
+                {
+                    "model_id": "model-a",
+                    "dataset_id": "dataset-c",
+                    "updated_at": "2026-02-20T00:00:00Z",
+                    "deleted_at": None,
+                },
+                {
+                    "model_id": "model-a",
+                    "dataset_id": "dataset-d",
+                    "updated_at": "2026-02-19T00:00:00Z",
+                    "deleted_at": "2026-02-19T00:00:00Z",
+                },
+            ],
+            "datasets": [
+                {"id": "dataset-a", "task_detail": "pick and place", "status": "active"},
+                {"id": "dataset-b", "task_detail": "stack blocks", "status": "active"},
+                {"id": "dataset-c", "task_detail": "archived task", "status": "archived"},
+                {"id": "dataset-d", "task_detail": "should not use", "status": "active"},
+            ],
+        }
+    )
+
+    candidates = asyncio.run(
+        inference_api._load_task_candidates_by_model(
+            client,
+            [
+                {"id": "model-a", "dataset_id": "dataset-a"},
+            ],
+        )
+    )
+
+    assert candidates["model-a"] == ["pick and place", "stack blocks"]
 
 
 def test_get_inference_runner_status_includes_model_sync(monkeypatch):
@@ -203,3 +296,40 @@ def test_start_inference_runner_returns_operation_id(monkeypatch):
         )
     )
     assert response.operation_id == "op-infer"
+
+
+def test_run_inference_start_operation_passes_policy_options(monkeypatch):
+    created_kwargs: dict[str, object] = {}
+    completed: dict[str, object] = {}
+
+    class _FakeManager:
+        async def create(self, **kwargs):
+            created_kwargs.update(kwargs)
+            return SimpleNamespace(extras={"worker_session_id": "worker-session-1"})
+
+    class _FakeOperations:
+        def build_progress_callback(self, _operation_id: str):
+            return lambda *_args, **_kwargs: None
+
+        def complete(self, **kwargs):
+            completed.update(kwargs)
+
+        def fail(self, **_kwargs):
+            raise AssertionError("fail should not be called")
+
+    monkeypatch.setattr(inference_api, "get_inference_session_manager", lambda: _FakeManager())
+    monkeypatch.setattr(inference_api, "get_startup_operations_service", lambda: _FakeOperations())
+
+    asyncio.run(
+        inference_api._run_inference_start_operation(
+            "op-1",
+            model_id="model-a",
+            device="cpu",
+            task="pick",
+            policy_options={"pi0": {"denoising_steps": 12}},
+        )
+    )
+
+    assert created_kwargs["model_id"] == "model-a"
+    assert created_kwargs["policy_options"] == {"pi0": {"denoising_steps": 12}}
+    assert completed["target_session_id"] == "worker-session-1"

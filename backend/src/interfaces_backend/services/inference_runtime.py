@@ -282,6 +282,7 @@ class InferenceRuntimeManager:
         model_id: str,
         device: Optional[str],
         task: Optional[str],
+        policy_options: Optional[dict[str, Any]] = None,
         joint_names: Optional[list[str]] = None,
         camera_key_aliases: Optional[dict[str, str]] = None,
         bridge_stream_config: Optional[dict[str, Any]] = None,
@@ -303,6 +304,43 @@ class InferenceRuntimeManager:
         policy_type = _read_policy_type(config_path)
         if not policy_type:
             raise RuntimeError(f"Policy type is missing in {config_path}")
+        policy_type_normalized = policy_type.lower()
+
+        raw_policy_options = policy_options or {}
+        if not isinstance(raw_policy_options, dict):
+            raise RuntimeError("policy_options must be an object")
+        policy_options_normalized: dict[str, dict[str, Any]] = {}
+        for policy_key, options in raw_policy_options.items():
+            normalized_policy_key = str(policy_key or "").strip().lower()
+            if not normalized_policy_key:
+                continue
+            if normalized_policy_key not in {"pi0", "pi05"}:
+                raise RuntimeError(f"Unsupported policy_options key: {normalized_policy_key}")
+            if options is None:
+                continue
+            if not isinstance(options, dict):
+                raise RuntimeError(f"policy_options.{normalized_policy_key} must be an object")
+            policy_options_normalized[normalized_policy_key] = dict(options)
+
+        if policy_options_normalized and set(policy_options_normalized.keys()) != {policy_type_normalized}:
+            raise RuntimeError(
+                f"policy_options must target active policy '{policy_type_normalized}'"
+            )
+        active_policy_options = policy_options_normalized.get(policy_type_normalized, {})
+
+        denoising_steps_value: Optional[int] = None
+        denoising_steps = active_policy_options.get("denoising_steps")
+        if denoising_steps is not None:
+            try:
+                denoising_steps_value = int(denoising_steps)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "policy_options.<policy>.denoising_steps must be an integer"
+                ) from exc
+            if denoising_steps_value < 1:
+                raise RuntimeError("policy_options.<policy>.denoising_steps must be >= 1")
+            if policy_type_normalized not in {"pi0", "pi05"}:
+                raise RuntimeError("denoising_steps is only supported for pi0/pi05")
 
         compatibility = self.get_device_compatibility()
         selected_device = (device or compatibility.recommended or "cpu").strip()
@@ -409,12 +447,17 @@ class InferenceRuntimeManager:
             self._cleanup_worker_resources()
             raise RuntimeError("Timed out waiting for worker control socket")
 
+        model_policy_options = dict(active_policy_options)
+        if denoising_steps_value is not None:
+            model_policy_options["denoising_steps"] = denoising_steps_value
+
         start_payload: dict[str, Any] = {
             "task": self._task or "",
             "model": {
                 "policy_type": policy_type,
                 "model_path": str(model_runtime_dir),
                 "device": selected_device,
+                "policy_options": model_policy_options,
             },
             "robot": {
                 "joint_names": [str(name) for name in (joint_names or []) if str(name).strip()],

@@ -41,12 +41,119 @@ def _to_size_mb(size_bytes: object) -> float:
     return round(max(value, 0.0) / (1024 * 1024), 2)
 
 
+def _normalize_task_detail(task_detail: object) -> str | None:
+    if not isinstance(task_detail, str):
+        return None
+    normalized = task_detail.strip()
+    return normalized if normalized else None
+
+
+def _merge_task_candidates(*candidate_groups: Sequence[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in candidate_groups:
+        for item in group:
+            normalized = _normalize_task_detail(item)
+            if normalized is None or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+    return merged
+
+
+async def _load_task_candidates_by_model(
+    client,
+    model_rows: Sequence[dict],
+) -> dict[str, list[str]]:
+    model_ids: list[str] = []
+    model_dataset_ids: dict[str, list[str]] = {}
+
+    for row in model_rows:
+        model_id = str(row.get("id") or "").strip()
+        if not model_id:
+            continue
+        if model_id not in model_dataset_ids:
+            model_ids.append(model_id)
+            model_dataset_ids[model_id] = []
+        dataset_id = str(row.get("dataset_id") or "").strip()
+        if dataset_id and dataset_id not in model_dataset_ids[model_id]:
+            model_dataset_ids[model_id].append(dataset_id)
+
+    if not model_ids:
+        return {}
+
+    try:
+        job_rows = (
+            await client.table("training_jobs")
+            .select("model_id,dataset_id,updated_at,deleted_at")
+            .in_("model_id", model_ids)
+            .order("updated_at", desc=True)
+            .execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("Failed to load training_jobs for task candidates: %s", exc)
+        return {model_id: [] for model_id in model_ids}
+
+    for row in job_rows:
+        if row.get("deleted_at"):
+            continue
+        model_id = str(row.get("model_id") or "").strip()
+        dataset_id = str(row.get("dataset_id") or "").strip()
+        if not model_id or not dataset_id:
+            continue
+        if model_id not in model_dataset_ids:
+            continue
+        if dataset_id not in model_dataset_ids[model_id]:
+            model_dataset_ids[model_id].append(dataset_id)
+
+    all_dataset_ids: list[str] = []
+    seen_dataset_ids: set[str] = set()
+    for model_id in model_ids:
+        for dataset_id in model_dataset_ids.get(model_id, []):
+            if dataset_id in seen_dataset_ids:
+                continue
+            seen_dataset_ids.add(dataset_id)
+            all_dataset_ids.append(dataset_id)
+
+    if not all_dataset_ids:
+        return {model_id: [] for model_id in model_ids}
+
+    try:
+        dataset_rows = (
+            await client.table("datasets")
+            .select("id,task_detail,status")
+            .in_("id", all_dataset_ids)
+            .eq("status", "active")
+            .execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("Failed to load datasets for task candidates: %s", exc)
+        return {model_id: [] for model_id in model_ids}
+
+    task_by_dataset_id: dict[str, str] = {}
+    for row in dataset_rows:
+        dataset_id = str(row.get("id") or "").strip()
+        task_detail = _normalize_task_detail(row.get("task_detail"))
+        if dataset_id and task_detail:
+            task_by_dataset_id[dataset_id] = task_detail
+
+    candidates_by_model: dict[str, list[str]] = {}
+    for model_id in model_ids:
+        ordered_tasks = [
+            task_by_dataset_id[dataset_id]
+            for dataset_id in model_dataset_ids.get(model_id, [])
+            if dataset_id in task_by_dataset_id
+        ]
+        candidates_by_model[model_id] = _merge_task_candidates(ordered_tasks)
+    return candidates_by_model
+
+
 async def _list_db_models() -> list[InferenceModelInfo]:
     try:
         client = await get_supabase_async_client()
         rows = (
             await client.table("models")
-            .select("id,name,policy_type,size_bytes,source,status")
+            .select("id,name,policy_type,size_bytes,source,status,dataset_id")
             .eq("status", "active")
             .execute()
         ).data or []
@@ -54,6 +161,7 @@ async def _list_db_models() -> list[InferenceModelInfo]:
         logger.warning("Failed to load models from DB: %s", exc)
         return []
 
+    task_candidates_by_model = await _load_task_candidates_by_model(client, rows)
     models_dir = get_models_dir()
     db_models: list[InferenceModelInfo] = []
     for row in rows:
@@ -73,6 +181,7 @@ async def _list_db_models() -> list[InferenceModelInfo]:
                 size_mb=_to_size_mb(row.get("size_bytes")),
                 is_loaded=False,
                 is_local=local_exists,
+                task_candidates=task_candidates_by_model.get(model_id, []),
             )
         )
     return db_models
@@ -96,6 +205,10 @@ def _merge_models(
             size_mb=local.size_mb if local.size_mb > 0 else existing.size_mb,
             is_loaded=bool(existing.is_loaded or local.is_loaded),
             is_local=bool(existing.is_local or local.is_local),
+            task_candidates=_merge_task_candidates(
+                existing.task_candidates,
+                local.task_candidates,
+            ),
         )
 
     return sorted(
@@ -143,6 +256,7 @@ async def _run_inference_start_operation(
     model_id: str,
     device: str | None,
     task: str | None,
+    policy_options: dict[str, object] | None,
 ) -> None:
     operations = get_startup_operations_service()
     progress_callback = operations.build_progress_callback(operation_id)
@@ -152,6 +266,7 @@ async def _run_inference_start_operation(
             model_id=model_id,
             device=device,
             task=task,
+            policy_options=policy_options,
             progress_callback=progress_callback,
         )
         operations.complete(
@@ -191,6 +306,11 @@ async def start_inference_runner(request: InferenceRunnerStartRequest):
             model_id=request.model_id,
             device=request.device,
             task=request.task,
+            policy_options=(
+                request.policy_options.model_dump(mode="python", exclude_none=True)
+                if request.policy_options
+                else None
+            ),
         )
     )
     return operation

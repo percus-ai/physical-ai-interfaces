@@ -205,6 +205,7 @@ class InferenceSessionManager(BaseSessionManager):
                 model_id=kwargs["model_id"],
                 device=kwargs.get("device"),
                 task=kwargs.get("task"),
+                policy_options=kwargs.get("policy_options"),
                 joint_names=joint_names,
                 camera_key_aliases=camera_key_aliases,
                 bridge_stream_config=bridge_stream_config,

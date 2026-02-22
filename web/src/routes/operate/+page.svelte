@@ -12,6 +12,7 @@
   import OperateStatusCards from '$lib/components/OperateStatusCards.svelte';
   import ActiveSessionSection from '$lib/components/ActiveSessionSection.svelte';
   import ActiveSessionCard from '$lib/components/ActiveSessionCard.svelte';
+  import TaskCandidateCombobox from '$lib/components/TaskCandidateCombobox.svelte';
 
   type InferenceModel = {
     model_id?: string;
@@ -21,7 +22,9 @@
     size_mb?: number;
     is_loaded?: boolean;
     is_local?: boolean;
+    task_candidates?: string[];
   };
+  const PI0_POLICY_TYPES = new Set(['pi0', 'pi05']);
 
   type InferenceModelsResponse = {
     models?: InferenceModel[];
@@ -125,7 +128,9 @@
 
   let selectedModelId = $state('');
   let selectedDevice = $state('');
-  let task = $state('');
+  let selectedTaskCandidate = $state('');
+  let taskInput = $state('');
+  let denoisingStepsInput = $state('10');
   let inferenceStartError = $state('');
   let inferenceStopError = $state('');
   let inferenceStartPending = $state(false);
@@ -205,11 +210,31 @@
     inferenceStartPending = true;
     inferenceStartError = '';
     inferenceStopError = '';
+    let denoisingSteps: number | undefined;
+    if (supportsDenoisingSteps) {
+      const raw = denoisingStepsInput.trim();
+      if (raw) {
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          inferenceStartError = 'denoising step は 1 以上の整数で入力してください。';
+          inferenceStartPending = false;
+          return;
+        }
+        denoisingSteps = parsed;
+      }
+    }
+    const policyOptions =
+      denoisingSteps === undefined
+        ? undefined
+        : selectedPolicyType === 'pi05'
+          ? { pi05: { denoising_steps: denoisingSteps } }
+          : { pi0: { denoising_steps: denoisingSteps } };
     try {
       const result = (await api.inference.runnerStart({
         model_id: selectedModelId,
         device: selectedDevice || $inferenceDeviceQuery.data?.recommended,
-        task: task.trim() || undefined
+        task: taskInput.trim() || undefined,
+        policy_options: policyOptions
       })) as StartupOperationAcceptedResponse;
       if (!result?.operation_id) {
         throw new Error('開始オペレーションIDを取得できませんでした。');
@@ -221,6 +246,16 @@
       inferenceStartError = err instanceof Error ? err.message : '推論の開始に失敗しました。';
       inferenceStartPending = false;
     }
+  };
+
+  const handleTaskCandidateSelect = (nextTask: string) => {
+    selectedTaskCandidate = nextTask;
+    taskInput = nextTask;
+  };
+
+  const handleTaskInput = (nextValue: string) => {
+    taskInput = nextValue;
+    selectedTaskCandidate = taskCandidates.includes(nextValue) ? nextValue : '';
   };
 
   const handleInferenceStop = async () => {
@@ -240,6 +275,12 @@
 
   const runnerStatus = $derived($inferenceRunnerStatusQuery.data?.runner_status ?? emptyRunnerStatus);
   const gpuStatus = $derived($inferenceRunnerStatusQuery.data?.gpu_host_status ?? emptyGpuStatus);
+  const selectedModel = $derived(
+    ($inferenceModelsQuery.data?.models ?? []).find((item) => resolveModelId(item) === selectedModelId)
+  );
+  const selectedPolicyType = $derived((selectedModel?.policy_type ?? '').toLowerCase());
+  const taskCandidates = $derived(selectedModel?.task_candidates ?? []);
+  const supportsDenoisingSteps = $derived(PI0_POLICY_TYPES.has(selectedPolicyType));
   const runnerActive = $derived(Boolean(runnerStatus.active));
   const startupProgressPercent = $derived(
     Math.min(100, Math.max(0, Number(startupStatus?.progress_percent ?? 0)))
@@ -249,6 +290,20 @@
   const showStartupBlock = $derived(Boolean(startupStatus) && (startupActive || startupState === 'failed'));
   const startupPhaseLabel = $derived(START_PHASE_LABELS[startupStatus?.phase ?? ''] ?? (startupStatus?.phase ?? '-'));
   const startupDetail = $derived(startupStatus?.detail ?? {});
+
+  $effect(() => {
+    selectedModelId;
+    if (!taskCandidates.length) {
+      selectedTaskCandidate = '';
+      return;
+    }
+    if (!selectedTaskCandidate || !taskCandidates.includes(selectedTaskCandidate)) {
+      selectedTaskCandidate = taskCandidates[0];
+    }
+    if (!taskInput.trim()) {
+      taskInput = selectedTaskCandidate;
+    }
+  });
 
   $effect(() => {
     const stopOperateStream = connectStream<OperateStatusStreamPayload>({
@@ -388,11 +443,43 @@
             <p class="mt-2 text-xs text-slate-500">推奨: {$inferenceDeviceQuery.data?.recommended ?? 'cpu'}</p>
           </label>
 
-          <label class="text-sm font-semibold text-slate-700">
+          <div class="text-sm font-semibold text-slate-700">
             <span class="label">タスク説明</span>
-            <input class="input mt-2" type="text" bind:value={task} placeholder="例: 物体を掴んで箱に置く" />
-          </label>
+            <div class="mt-2">
+              <TaskCandidateCombobox
+                items={taskCandidates}
+                value={selectedTaskCandidate}
+                inputValue={taskInput}
+                placeholder="候補からタスクを選択"
+                emptyMessage="このモデルで利用可能なタスク候補はありません。"
+                onSelect={handleTaskCandidateSelect}
+                onInput={handleTaskInput}
+              />
+            </div>
+            {#if taskCandidates.length}
+              <p class="mt-2 text-xs text-slate-500">
+                候補選択または直接入力のどちらでもタスクを指定できます。
+              </p>
+            {:else}
+              <p class="mt-2 text-xs text-slate-500">
+                このモデルに紐づく active データセットのタスク候補はありません。直接入力してください。
+              </p>
+            {/if}
+          </div>
         </div>
+        {#if supportsDenoisingSteps}
+          <label class="text-sm font-semibold text-slate-700">
+            <span class="label">Denoising Step</span>
+            <input
+              class="input mt-2"
+              type="text"
+              inputmode="numeric"
+              bind:value={denoisingStepsInput}
+              placeholder="例: 10"
+            />
+            <p class="mt-2 text-xs text-slate-500">空欄の場合はモデル既定値を使用します。</p>
+          </label>
+        {/if}
 
         <div class="flex flex-wrap gap-3">
           <Button.Root

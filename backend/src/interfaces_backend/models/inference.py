@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class InferenceModelInfo(BaseModel):
@@ -17,6 +17,10 @@ class InferenceModelInfo(BaseModel):
     size_mb: float = Field(0.0, description="Directory size in MB")
     is_loaded: bool = Field(False, description="Selected by active worker")
     is_local: bool = Field(True, description="Model exists on local disk")
+    task_candidates: list[str] = Field(
+        default_factory=list,
+        description="Task candidates derived from active related datasets",
+    )
 
 
 class InferenceModelsResponse(BaseModel):
@@ -71,10 +75,28 @@ class InferenceRunnerStatusResponse(BaseModel):
     model_sync: InferenceModelSyncStatus = Field(default_factory=InferenceModelSyncStatus)
 
 
+class PiInferenceOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    denoising_steps: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Number of denoising steps for pi0/pi05 inference",
+    )
+
+
+class InferencePolicyOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pi0: Optional[PiInferenceOptions] = None
+    pi05: Optional[PiInferenceOptions] = None
+
+
 class InferenceRunnerStartRequest(BaseModel):
     model_id: str
     device: Optional[str] = None
     task: Optional[str] = None
+    policy_options: Optional[InferencePolicyOptions] = None
 
 
 class InferenceRunnerStopRequest(BaseModel):

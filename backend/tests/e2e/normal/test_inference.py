@@ -58,7 +58,12 @@ def test_inference_runner_start_returns_operation_id(client, monkeypatch):
 
     start = client.post(
         "/api/inference/runner/start",
-        json={"model_id": "model_a", "device": "cpu", "task": "pick"},
+        json={
+            "model_id": "model_a",
+            "device": "cpu",
+            "task": "pick",
+            "policy_options": {"pi0": {"denoising_steps": 10}},
+        },
     )
     assert start.status_code == 202
     assert start.json()["operation_id"] == "op-inference"

@@ -25,6 +25,8 @@
   let open = $state(false);
   let query = $state('');
 
+  const selectedLabel = $derived(items.find((item) => item.id === value)?.name ?? '');
+  const displayInputValue = $derived(query || selectedLabel);
   const normalizedQuery = $derived(query.trim().toLowerCase());
   const filteredItems = $derived.by(() => {
     if (!normalizedQuery) return items;
@@ -46,6 +48,9 @@
 
   const handleOpenChange = (nextOpen: boolean) => {
     open = nextOpen;
+    if (!nextOpen) {
+      query = '';
+    }
   };
 
   $effect(() => {
@@ -57,6 +62,7 @@
 <Combobox.Root
   type="single"
   value={value}
+  inputValue={displayInputValue}
   onValueChange={handleValueChange}
   items={lookupItems}
   open={open}

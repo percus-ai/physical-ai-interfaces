@@ -100,6 +100,20 @@ export type StartupOperationStatusResponse = {
   updated_at?: string | null;
 };
 
+export type InferenceRunnerStartPayload = {
+  model_id: string;
+  device?: string;
+  task?: string;
+  policy_options?: {
+    pi0?: {
+      denoising_steps?: number;
+    };
+    pi05?: {
+      denoising_steps?: number;
+    };
+  };
+};
+
 export type DatasetPlaybackCameraInfo = {
   key: string;
   label: string;
@@ -744,7 +758,7 @@ export const api = {
     models: () => fetchApi('/api/inference/models'),
     deviceCompatibility: () => fetchApi('/api/inference/device-compatibility'),
     runnerStatus: () => fetchApi('/api/inference/runner/status'),
-    runnerStart: (payload: Record<string, unknown>) =>
+    runnerStart: (payload: InferenceRunnerStartPayload) =>
       fetchApi<StartupOperationAcceptedResponse>('/api/inference/runner/start', {
         method: 'POST',
         body: JSON.stringify(payload)

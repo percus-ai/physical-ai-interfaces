@@ -1329,8 +1329,39 @@ async def _resolve_profile_info(
     return None, None
 
 
+async def _load_existing_model_name(model_id: str) -> Optional[str]:
+    async def _fetch_with(client: AsyncClient) -> list[dict]:
+        return (
+            await client.table("models").select("name").eq("id", model_id).limit(1).execute()
+        ).data or []
+
+    client = await get_supabase_async_client()
+    try:
+        rows = await _fetch_with(client)
+    except Exception as exc:
+        if not _is_jwt_expired_error(exc):
+            raise
+        service_client = await _get_service_db_client()
+        if service_client is None:
+            raise
+        logger.warning(
+            "JWT expired while loading model name %s; retrying with service key",
+            model_id,
+        )
+        rows = await _fetch_with(service_client)
+
+    if not rows:
+        return None
+    name = rows[0].get("name")
+    if not isinstance(name, str):
+        return None
+    normalized = name.strip()
+    return normalized or None
+
+
 async def _upsert_model_for_job(job_data: dict) -> None:
-    model_id = job_data.get("model_id") or job_data.get("job_id")
+    model_id_raw = job_data.get("model_id") or job_data.get("job_id")
+    model_id = str(model_id_raw or "").strip()
     profile_instance_id = job_data.get("profile_instance_id")
     profile_snapshot = job_data.get("profile_snapshot")
     if not profile_instance_id:
@@ -1369,6 +1400,14 @@ async def _upsert_model_for_job(job_data: dict) -> None:
         logger.debug("Failed to resolve checkpoint entry for model upsert %s: %s", model_id, exc)
 
     now = datetime.now().isoformat()
+    job_name = str(job_data.get("job_name") or "").strip()
+    default_model_name = job_name or model_id
+    existing_model_name = await _load_existing_model_name(model_id)
+    if existing_model_name and existing_model_name != model_id:
+        resolved_model_name = existing_model_name
+    else:
+        resolved_model_name = default_model_name
+
     training_steps = training_params.get("steps")
     if checkpoint_entry is not None:
         latest_step = int(getattr(checkpoint_entry, "latest_step", 0) or 0)
@@ -1376,7 +1415,7 @@ async def _upsert_model_for_job(job_data: dict) -> None:
             training_steps = latest_step
     payload = {
         "id": model_id,
-        "name": model_id,
+        "name": resolved_model_name,
         "dataset_id": job_data.get("dataset_id"),
         "profile_instance_id": profile_instance_id,
         "profile_snapshot": profile_snapshot,

@@ -362,11 +362,16 @@ def test_upsert_model_for_job_includes_checkpoint_size_and_latest_step(monkeypat
     async def fake_upsert_with_owner(_table: str, _key: str, payload: dict):
         captured.update(payload)
 
+    async def fake_load_existing_model_name(_model_id: str):
+        return None
+
     monkeypatch.setattr(training, "_get_checkpoint_index_manager", lambda: _CheckpointMgr())
+    monkeypatch.setattr(training, "_load_existing_model_name", fake_load_existing_model_name)
     monkeypatch.setattr(training, "upsert_with_owner", fake_upsert_with_owner)
 
     job_data = {
         "job_id": "job-1",
+        "job_name": "pick_place_train_20260222",
         "dataset_id": "dataset-1",
         "policy_type": "pi0",
         "training_config": {"training": {"steps": 9999, "batch_size": 4}},
@@ -376,6 +381,7 @@ def test_upsert_model_for_job_includes_checkpoint_size_and_latest_step(monkeypat
     asyncio.run(training._upsert_model_for_job(job_data))
 
     assert captured["id"] == "job-1"
+    assert captured["name"] == "pick_place_train_20260222"
     assert captured["training_steps"] == 1000
     assert captured["size_bytes"] == int(18.5 * 1024 * 1024)
 
@@ -391,7 +397,11 @@ def test_upsert_model_for_job_skips_size_when_checkpoint_missing(monkeypatch):
     async def fake_upsert_with_owner(_table: str, _key: str, payload: dict):
         captured.update(payload)
 
+    async def fake_load_existing_model_name(_model_id: str):
+        return None
+
     monkeypatch.setattr(training, "_get_checkpoint_index_manager", lambda: _CheckpointMgr())
+    monkeypatch.setattr(training, "_load_existing_model_name", fake_load_existing_model_name)
     monkeypatch.setattr(training, "upsert_with_owner", fake_upsert_with_owner)
 
     job_data = {
@@ -405,8 +415,42 @@ def test_upsert_model_for_job_skips_size_when_checkpoint_missing(monkeypatch):
     asyncio.run(training._upsert_model_for_job(job_data))
 
     assert captured["id"] == "job-2"
+    assert captured["name"] == "job-2"
     assert captured["training_steps"] == 3000
     assert "size_bytes" not in captured
+
+
+def test_upsert_model_for_job_preserves_custom_existing_name(monkeypatch):
+    captured: dict = {}
+
+    class _CheckpointMgr:
+        @staticmethod
+        def get_job_info(_job_name: str):
+            return None
+
+    async def fake_upsert_with_owner(_table: str, _key: str, payload: dict):
+        captured.update(payload)
+
+    async def fake_load_existing_model_name(_model_id: str):
+        return "custom_name"
+
+    monkeypatch.setattr(training, "_get_checkpoint_index_manager", lambda: _CheckpointMgr())
+    monkeypatch.setattr(training, "_load_existing_model_name", fake_load_existing_model_name)
+    monkeypatch.setattr(training, "upsert_with_owner", fake_upsert_with_owner)
+
+    job_data = {
+        "job_id": "job-3",
+        "job_name": "train_job_name_should_not_overwrite",
+        "dataset_id": "dataset-3",
+        "profile_instance_id": "profile-3",
+        "profile_snapshot": {"name": "so101_dual_teleop"},
+        "policy_type": "pi0",
+        "training_config": {"training": {"steps": 100, "batch_size": 2}},
+    }
+    asyncio.run(training._upsert_model_for_job(job_data))
+
+    assert captured["id"] == "job-3"
+    assert captured["name"] == "custom_name"
 
 
 def test_ensure_model_artifact_in_r2_from_checkpoint_skips_when_model_exists():
