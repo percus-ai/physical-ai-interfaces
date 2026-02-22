@@ -393,6 +393,32 @@ class JobReviveResponse(BaseModel):
     message: str
 
 
+class RemoteCheckpointListResponse(BaseModel):
+    """Response for remote checkpoint directory listing."""
+
+    job_id: str
+    checkpoint_names: list[str] = Field(default_factory=list)
+    checkpoint_root: str
+
+
+class RemoteCheckpointUploadRequest(BaseModel):
+    """Request for uploading a selected remote checkpoint to R2."""
+
+    checkpoint_name: str = Field(..., description="Checkpoint directory name (numeric)")
+
+
+class RemoteCheckpointUploadResponse(BaseModel):
+    """Response for uploading selected remote checkpoint to R2."""
+
+    job_id: str
+    checkpoint_name: str
+    step: int
+    r2_step_path: str
+    model_id: str
+    db_registered: bool
+    message: str
+
+
 class DatasetCompatibilityCheckRequest(BaseModel):
     """Request for dataset compatibility check."""
 

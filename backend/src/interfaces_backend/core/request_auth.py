@@ -253,3 +253,11 @@ def refresh_session_from_request(request: Request) -> Optional[dict[str, Any]]:
     if not refresh_token:
         return None
     return _refresh_session(refresh_token)
+
+
+def refresh_session_from_refresh_token(
+    refresh_token: Optional[str],
+) -> Optional[dict[str, Any]]:
+    if not refresh_token:
+        return None
+    return _refresh_session(refresh_token)

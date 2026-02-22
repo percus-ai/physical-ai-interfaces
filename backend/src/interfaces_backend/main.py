@@ -79,7 +79,12 @@ from interfaces_backend.api import (
     webui_blueprints_router,
 )
 from interfaces_backend.services.lerobot_runtime import start_lerobot
-from interfaces_backend.core.request_auth import build_session_from_request, is_session_expired
+from interfaces_backend.core.request_auth import (
+    build_session_from_request,
+    is_session_expired,
+    refresh_session_from_request,
+    set_session_cookies,
+)
 from interfaces_backend.services.vlabor_runtime import start_vlabor_on_backend_startup
 from interfaces_backend.services.vlabor_profiles import get_active_profile_spec
 from percus_ai.observability import (
@@ -223,13 +228,21 @@ async def log_slow_requests(request, call_next):
 @app.middleware("http")
 async def attach_supabase_session(request, call_next):
     session = build_session_from_request(request)
+    session_refreshed = False
     if session and is_session_expired(session):
-        session = None
+        refreshed_session = refresh_session_from_request(request)
+        if refreshed_session:
+            session = refreshed_session
+            session_refreshed = True
+        else:
+            session = None
     token = set_request_session(session)
     try:
         response = await call_next(request)
     finally:
         reset_request_session(token)
+    if session_refreshed and session:
+        set_session_cookies(response, session)
     return response
 
 # Include API routers

@@ -5,6 +5,8 @@ import inspect
 import json
 import logging
 import os
+import shlex
+import tempfile
 import time
 import threading
 import uuid
@@ -24,11 +26,15 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import PlainTextResponse
+from supabase import create_async_client
+from supabase._async.client import AsyncClient
 
 from interfaces_backend.core.request_auth import (
     ACCESS_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
     build_session_from_tokens,
+    is_session_expired,
+    refresh_session_from_refresh_token,
 )
 from interfaces_backend.models.training import (
     JobInfo,
@@ -65,6 +71,9 @@ from interfaces_backend.models.training import (
     VerdaStorageItem,
     VerdaStorageListResponse,
     JobReviveResponse,
+    RemoteCheckpointListResponse,
+    RemoteCheckpointUploadRequest,
+    RemoteCheckpointUploadResponse,
 )
 from percus_ai.storage import get_project_root, get_models_dir
 from percus_ai.db import (
@@ -79,6 +88,30 @@ from percus_ai.training.ssh.client import SSHConnection
 from percus_ai.training.ssh.executor import RemoteExecutor, run_remote_command
 
 logger = logging.getLogger(__name__)
+
+_service_client: Optional[AsyncClient] = None
+_service_client_lock = asyncio.Lock()
+
+
+def _is_jwt_expired_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "JWT expired" in text or "PGRST303" in text
+
+
+async def _get_service_db_client() -> Optional[AsyncClient]:
+    supabase_url = os.environ.get("SUPABASE_URL")
+    service_key = os.environ.get("SUPABASE_SECRET_KEY")
+    if not supabase_url or not service_key:
+        return None
+
+    global _service_client
+    if _service_client is not None:
+        return _service_client
+
+    async with _service_client_lock:
+        if _service_client is None:
+            _service_client = await create_async_client(supabase_url, service_key)
+        return _service_client
 
 
 def _default_author_user_id() -> str:
@@ -377,16 +410,109 @@ def _build_ssh_user_candidates(primary_user: str) -> list[str]:
     return candidates or ["root", "ubuntu"]
 
 
-def _resolve_ssh_private_key_path(private_key_path: str) -> str:
-    key_path = Path(private_key_path).expanduser()
-    if not key_path.exists():
-        raise RuntimeError(
-            f"SSH鍵が見つかりません: {key_path} "
-            "(バックエンド実行環境に鍵ファイルを配置してください)"
+def _resolve_private_key_candidate_paths(raw_path: Optional[str]) -> list[Path]:
+    normalized = str(raw_path or "").strip()
+    if not normalized:
+        return []
+
+    base = Path(normalized).expanduser()
+    candidates: list[Path] = [base]
+    if not base.is_absolute():
+        candidates.append(get_project_root() / base)
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+    return resolved
+
+
+def _discover_common_private_keys() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = str(path.resolve(strict=False))
+        if key in seen:
+            return
+        seen.add(key)
+        if path.exists() and path.is_file():
+            candidates.append(path)
+
+    for path in Path.home().glob(".ssh/id_*"):
+        if path.name.endswith(".pub"):
+            continue
+        add(path)
+
+    data_dir_raw = str(os.environ.get("PHYSICAL_AI_DATA_DIR") or "").strip()
+    if data_dir_raw:
+        for data_dir in _resolve_private_key_candidate_paths(data_dir_raw):
+            if not data_dir.exists() or not data_dir.is_dir():
+                continue
+            for path in data_dir.glob("id_*"):
+                if path.name.endswith(".pub"):
+                    continue
+                add(path)
+
+    return candidates
+
+
+def _build_ssh_private_key_candidates(primary_path: Optional[str]) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    explicit_paths: list[str] = [
+        os.environ.get("VERDA_SSH_PRIVATE_KEY"),
+        primary_path,
+        str(Path.home() / ".ssh" / "id_rsa"),
+        str(Path.home() / ".ssh" / "id_ed25519"),
+    ]
+    explicit_extra = str(os.environ.get("VERDA_SSH_PRIVATE_KEYS") or "").strip()
+    if explicit_extra:
+        explicit_paths.extend(
+            [item.strip() for item in explicit_extra.split(",") if item.strip()]
         )
-    if not key_path.is_file():
-        raise RuntimeError(f"SSH鍵パスが不正です: {key_path}")
-    return str(key_path)
+
+    for raw in explicit_paths:
+        for expanded in _resolve_private_key_candidate_paths(raw):
+            key = str(expanded.resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            if expanded.exists() and expanded.is_file():
+                candidates.append(expanded)
+
+    for expanded in _discover_common_private_keys():
+        key = str(expanded.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(expanded)
+    return candidates
+
+
+def _select_preferred_ssh_private_key(primary_path: Optional[str]) -> str:
+    candidates = _build_ssh_private_key_candidates(primary_path)
+    if candidates:
+        return str(candidates[0])
+    fallback = str(primary_path or "").strip() or str(Path.home() / ".ssh" / "id_rsa")
+    return str(Path(fallback).expanduser())
+
+
+def _resolve_ssh_private_key_path(private_key_path: str) -> str:
+    candidates = _resolve_private_key_candidate_paths(private_key_path)
+    for key_path in candidates:
+        if key_path.exists() and key_path.is_file():
+            return str(key_path)
+    display = ", ".join(str(p) for p in candidates) or private_key_path
+    raise RuntimeError(
+        f"SSH鍵が見つかりません: {display} "
+        "(バックエンド実行環境に鍵ファイルを配置してください)"
+    )
 
 
 def _build_pipeline_config(request: "JobCreateRequest", job_id: str) -> dict:
@@ -940,11 +1066,108 @@ async def _refresh_job_status_from_instance(job_data: dict) -> Optional[str]:
     return instance_status
 
 
+def _find_latest_running_revive_instance(client: VerdaClient, job_id: str):
+    """Find latest running revive instance for a job."""
+    target_hostname = f"revive-{job_id[:8]}"
+    try:
+        instances = client.instances.get()
+    except Exception:
+        return None
+
+    candidates = []
+    for inst in instances:
+        hostname = str(getattr(inst, "hostname", "") or "").strip()
+        status = str(getattr(inst, "status", "") or "").strip().lower()
+        ip = str(getattr(inst, "ip", "") or "").strip()
+        if hostname != target_hostname:
+            continue
+        if status != "running":
+            continue
+        if not ip:
+            continue
+        candidates.append(inst)
+
+    if not candidates:
+        return None
+
+    def _created_at_key(inst) -> str:
+        return str(getattr(inst, "created_at", "") or "")
+
+    return max(candidates, key=_created_at_key)
+
+
+async def _refresh_job_ssh_target_if_needed(job_data: dict) -> dict:
+    """Refresh job SSH target to running revived instance when stale."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    if not job_id:
+        return job_data
+
+    instance_id = str(job_data.get("instance_id") or "").strip()
+    ip = str(job_data.get("ip") or "").strip()
+    if instance_id:
+        current_status = _check_instance_via_api(instance_id)
+    else:
+        current_status = None
+
+    stale_statuses = {"offline", "error", "discontinued", "deleted"}
+    needs_refresh = (not ip) or (current_status in stale_statuses)
+    if not needs_refresh:
+        return job_data
+
+    client = _get_verda_client()
+    if not client:
+        return job_data
+    revive_instance = _find_latest_running_revive_instance(client, job_id)
+    if not revive_instance:
+        return job_data
+
+    revive_id = str(getattr(revive_instance, "id", "") or "").strip()
+    revive_ip = str(getattr(revive_instance, "ip", "") or "").strip()
+    if not revive_id or not revive_ip:
+        return job_data
+
+    old_instance_id = instance_id or "none"
+    old_ip = ip or "none"
+    ssh_private_key = _select_preferred_ssh_private_key(job_data.get("ssh_private_key"))
+    ssh_user = str(job_data.get("ssh_user") or "").strip() or _get_default_ssh_user()
+
+    job_data["instance_id"] = revive_id
+    job_data["ip"] = revive_ip
+    job_data["ssh_user"] = ssh_user
+    job_data["ssh_private_key"] = ssh_private_key
+    await _save_job(job_data)
+    logger.info(
+        "Rebound job SSH target to revived instance: job_id=%s old_instance_id=%s old_ip=%s new_instance_id=%s new_ip=%s",
+        job_id,
+        old_instance_id,
+        old_ip,
+        revive_id,
+        revive_ip,
+    )
+    return job_data
+
+
 async def _load_job(job_id: str, include_deleted: bool = False) -> Optional[dict]:
     """Load job from DB."""
+    async def _fetch_with(client: AsyncClient) -> list[dict]:
+        response = await client.table(DB_TABLE).select("*").eq("job_id", job_id).execute()
+        return response.data or []
+
     client = await get_supabase_async_client()
-    response = await client.table(DB_TABLE).select("*").eq("job_id", job_id).execute()
-    records = response.data or []
+    try:
+        records = await _fetch_with(client)
+    except Exception as exc:
+        if not _is_jwt_expired_error(exc):
+            raise
+        service_client = await _get_service_db_client()
+        if service_client is None:
+            raise
+        logger.warning(
+            "JWT expired while loading training job %s; retrying with service key",
+            job_id,
+        )
+        records = await _fetch_with(service_client)
+
     if not records:
         return None
     record = records[0]
@@ -992,8 +1215,50 @@ async def _save_job(job_data: dict) -> None:
         "early_stopping",
     }
     record = {k: job_data.get(k) for k in fixed_fields if k in job_data}
+    job_id = record.get("job_id")
+    if not job_id:
+        raise ValueError("Missing job_id in record")
 
-    await upsert_with_owner(DB_TABLE, "job_id", record)
+    owner_user_id = (
+        str(job_data.get("owner_user_id") or "").strip()
+        or str((get_supabase_session() or {}).get("user_id") or "").strip()
+    )
+
+    async def _upsert_with(client: AsyncClient) -> None:
+        existing = (
+            await client.table(DB_TABLE).select("job_id").eq("job_id", job_id).execute()
+        ).data or []
+        if existing:
+            update_record = {
+                k: v
+                for k, v in record.items()
+                if k not in {"job_id", "owner_user_id"}
+            }
+            if update_record:
+                await client.table(DB_TABLE).update(update_record).eq("job_id", job_id).execute()
+            return
+
+        insert_record = dict(record)
+        if "owner_user_id" not in insert_record or not insert_record.get("owner_user_id"):
+            if not owner_user_id:
+                raise ValueError("owner_user_id is required for new training job insert")
+            insert_record["owner_user_id"] = owner_user_id
+        await client.table(DB_TABLE).insert(insert_record).execute()
+
+    client = await get_supabase_async_client()
+    try:
+        await _upsert_with(client)
+    except Exception as exc:
+        if not _is_jwt_expired_error(exc):
+            raise
+        service_client = await _get_service_db_client()
+        if service_client is None:
+            raise
+        logger.warning(
+            "JWT expired while saving training job %s; retrying with service key",
+            job_id,
+        )
+        await _upsert_with(service_client)
 
 
 def _run_async(coro):
@@ -1035,13 +1300,30 @@ async def _resolve_profile_info(
 ) -> tuple[Optional[str], Optional[dict]]:
     if not dataset_id:
         return None, None
+
+    async def _fetch_with(client: AsyncClient) -> list[dict]:
+        return (
+            await client.table("datasets")
+            .select("profile_instance_id,profile_snapshot")
+            .eq("id", dataset_id)
+            .execute()
+        ).data or []
+
     client = await get_supabase_async_client()
-    rows = (
-        await client.table("datasets")
-        .select("profile_instance_id,profile_snapshot")
-        .eq("id", dataset_id)
-        .execute()
-    ).data or []
+    try:
+        rows = await _fetch_with(client)
+    except Exception as exc:
+        if not _is_jwt_expired_error(exc):
+            raise
+        service_client = await _get_service_db_client()
+        if service_client is None:
+            raise
+        logger.warning(
+            "JWT expired while resolving dataset profile info %s; retrying with service key",
+            dataset_id,
+        )
+        rows = await _fetch_with(service_client)
+
     if rows:
         return rows[0].get("profile_instance_id"), rows[0].get("profile_snapshot")
     return None, None
@@ -1068,7 +1350,30 @@ async def _upsert_model_for_job(job_data: dict) -> None:
         policy = training_cfg.get("policy") or {}
         policy_type = policy.get("type")
 
+    checkpoint_entry = None
+    try:
+        checkpoint_mgr = _get_checkpoint_index_manager()
+        lookup_names: list[str] = []
+        for candidate in (
+            str(job_data.get("job_id") or "").strip(),
+            str(job_data.get("model_id") or "").strip(),
+            str(model_id or "").strip(),
+        ):
+            if candidate and candidate not in lookup_names:
+                lookup_names.append(candidate)
+        for lookup_name in lookup_names:
+            checkpoint_entry = checkpoint_mgr.get_job_info(lookup_name)
+            if checkpoint_entry is not None:
+                break
+    except Exception as exc:
+        logger.debug("Failed to resolve checkpoint entry for model upsert %s: %s", model_id, exc)
+
     now = datetime.now().isoformat()
+    training_steps = training_params.get("steps")
+    if checkpoint_entry is not None:
+        latest_step = int(getattr(checkpoint_entry, "latest_step", 0) or 0)
+        if latest_step > 0:
+            training_steps = latest_step
     payload = {
         "id": model_id,
         "name": model_id,
@@ -1076,13 +1381,26 @@ async def _upsert_model_for_job(job_data: dict) -> None:
         "profile_instance_id": profile_instance_id,
         "profile_snapshot": profile_snapshot,
         "policy_type": policy_type,
-        "training_steps": training_params.get("steps"),
+        "training_steps": training_steps,
         "batch_size": training_params.get("batch_size"),
         "source": "r2",
         "status": "active",
         "created_at": job_data.get("created_at") or now,
         "updated_at": now,
     }
+    explicit_size = job_data.get("model_size_bytes")
+    if explicit_size is not None:
+        try:
+            payload["size_bytes"] = max(int(explicit_size), 0)
+        except (TypeError, ValueError):
+            pass
+    elif checkpoint_entry is not None:
+        size_mb = float(getattr(checkpoint_entry, "size_mb", 0.0) or 0.0)
+        if size_mb >= 0:
+            payload["size_bytes"] = int(size_mb * 1024 * 1024)
+    content_hash = str(job_data.get("model_content_hash") or "").strip()
+    if content_hash:
+        payload["content_hash"] = content_hash
     await upsert_with_owner("models", "id", payload)
 
 
@@ -1253,6 +1571,327 @@ def _get_training_log_file_path(job_data: dict) -> str:
     return f"{remote_base_dir}/run/training_{mode}.log"
 
 
+def _get_remote_checkpoint_root(job_data: dict) -> str:
+    """Get remote checkpoints directory for a training job."""
+    remote_base_dir = str(job_data.get("remote_base_dir") or "/root/.physical-ai").strip()
+    job_id = str(job_data.get("job_id") or job_data.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError("job_id is missing")
+
+    training_config = job_data.get("training_config")
+    if isinstance(training_config, dict):
+        output_cfg = training_config.get("output")
+        if isinstance(output_cfg, dict):
+            output_dir = str(output_cfg.get("output_dir") or "").strip()
+            if output_dir:
+                if output_dir.startswith("/"):
+                    return f"{output_dir.rstrip('/')}/checkpoints"
+                normalized = output_dir.lstrip("./")
+                return f"{remote_base_dir.rstrip('/')}/{normalized.rstrip('/')}/checkpoints"
+
+    return f"{remote_base_dir.rstrip('/')}/outputs/train/{job_id}/checkpoints"
+
+
+def _list_remote_checkpoint_dirs(job_data: dict) -> tuple[list[str], str]:
+    """List numeric checkpoint directory names on remote instance."""
+    checkpoint_root = _get_remote_checkpoint_root(job_data)
+    conn = _get_ssh_connection_for_job(job_data, timeout=30)
+    if not conn:
+        raise RuntimeError("SSH接続に失敗しました。インスタンス状態を確認してください。")
+
+    try:
+        root_quoted = shlex.quote(checkpoint_root)
+        command = (
+            f"if [ ! -d {root_quoted} ]; then exit 3; fi; "
+            f"find {root_quoted} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' "
+            "| grep -E '^[0-9]+$' | sort -n"
+        )
+        exit_code, stdout, stderr = conn.exec_command(command, timeout=30)
+        if exit_code == 3:
+            raise RuntimeError(f"チェックポイントディレクトリが見つかりません: {checkpoint_root}")
+        if exit_code != 0:
+            msg = (stderr or stdout or "unknown error").strip()
+            raise RuntimeError(f"チェックポイント一覧の取得に失敗しました: {msg}")
+        names = [line.strip() for line in stdout.splitlines() if line.strip().isdigit()]
+        return names, checkpoint_root
+    finally:
+        conn.disconnect()
+
+
+def _register_job_for_checkpoint_if_needed(
+    checkpoint_mgr: "CheckpointIndexManager", job_data: dict
+) -> None:
+    job_id = str(job_data.get("job_id") or job_data.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError("job_id is missing")
+
+    existing = checkpoint_mgr.get_job_info(job_id)
+    if existing:
+        return
+
+    training_config = job_data.get("training_config")
+    config = training_config if isinstance(training_config, dict) else {}
+    policy_cfg = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    dataset_cfg = config.get("dataset") if isinstance(config.get("dataset"), dict) else {}
+
+    policy_type = str(job_data.get("policy_type") or policy_cfg.get("type") or "").strip()
+    dataset_id = str(job_data.get("dataset_id") or dataset_cfg.get("id") or "").strip()
+    if not policy_type or not dataset_id:
+        raise RuntimeError(
+            "ジョブメタデータ不足のためcheckpointを登録できません。"
+            "policy_type/dataset_id を確認してください。"
+        )
+
+    pretrained_path = policy_cfg.get("pretrained_path")
+    author = str(job_data.get("author") or _default_author_user_id()).strip() or "unknown"
+    dataset_info = _get_dataset_info_from_manifest(dataset_id)
+
+    ok = checkpoint_mgr.register_job(
+        job_name=job_id,
+        policy_type=policy_type,
+        dataset_id=dataset_id,
+        pretrained_path=pretrained_path,
+        dataset_info=dataset_info,
+        author=author,
+        training_config=config,
+    )
+    if not ok:
+        raise RuntimeError("checkpoint index へのジョブ登録に失敗しました")
+
+
+def _list_r2_file_objects(s3_manager: object, s3_path: str) -> list[dict]:
+    objects = s3_manager.list_objects(s3_path)
+    files: list[dict] = []
+    for obj in objects:
+        key = str(obj.get("Key") or "").strip()
+        if not key or key.endswith("/"):
+            continue
+        files.append(obj)
+    return files
+
+
+def _ensure_model_artifact_in_r2_from_checkpoint(
+    checkpoint_mgr: "CheckpointIndexManager",
+    *,
+    job_id: str,
+    model_id: str,
+    step: int,
+) -> tuple[str, int, bool]:
+    """Ensure models/{model_id} exists by copying from checkpoint pretrained_model."""
+    sync = checkpoint_mgr.sync
+    bucket = sync.bucket
+    prefix = sync._get_prefix()
+    source_prefix = f"{prefix}checkpoints/{job_id}/step_{step:06d}/pretrained_model/"
+    target_prefix = f"{prefix}models/{model_id}/"
+    source_path = f"s3://{bucket}/{source_prefix}"
+    target_path = f"s3://{bucket}/{target_prefix}"
+
+    existing_target_files = _list_r2_file_objects(sync.s3, target_path)
+    if existing_target_files:
+        size_bytes = sum(max(int(obj.get("Size") or 0), 0) for obj in existing_target_files)
+        return target_path.rstrip("/"), size_bytes, False
+
+    source_files = _list_r2_file_objects(sync.s3, source_path)
+    if not source_files:
+        raise RuntimeError(
+            f"モデル生成元が見つかりません: {source_path} (pretrained_model が必要です)"
+        )
+
+    for obj in source_files:
+        source_key = str(obj.get("Key") or "").strip()
+        if not source_key.startswith(source_prefix):
+            continue
+        relative = source_key[len(source_prefix):].lstrip("/")
+        if not relative:
+            continue
+        target_key = f"{target_prefix}{relative}"
+        sync.s3.client.copy(
+            {"Bucket": bucket, "Key": source_key},
+            bucket,
+            target_key,
+        )
+
+    size_bytes = sum(max(int(obj.get("Size") or 0), 0) for obj in source_files)
+    return target_path.rstrip("/"), size_bytes, True
+
+
+async def _upload_selected_remote_checkpoint_with_progress(
+    job_id: str,
+    checkpoint_name: str,
+    emit_progress: Callable[[dict], None],
+) -> dict:
+    emit_progress({"type": "start", "message": "チェックポイント登録を開始しました"})
+
+    job_data = await _load_job(job_id, include_deleted=True)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    job_data = await _refresh_job_ssh_target_if_needed(job_data)
+
+    checkpoint_name = str(checkpoint_name or "").strip()
+    if not checkpoint_name.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkpoint_name must be numeric: {checkpoint_name}",
+        )
+
+    step = int(checkpoint_name)
+    model_id = str(job_data.get("model_id") or job_id).strip()
+    if not model_id:
+        raise HTTPException(
+            status_code=500,
+            detail="model_id を生成できないためDB登録できませんでした。",
+        )
+    checkpoint_mgr = _get_checkpoint_index_manager()
+    existing_steps = checkpoint_mgr.get_job_steps(job_id)
+
+    if step not in existing_steps:
+        checkpoint_root = _get_remote_checkpoint_root(job_data)
+        remote_checkpoint_path = f"{checkpoint_root.rstrip('/')}/{checkpoint_name}"
+
+        emit_progress({"type": "connecting_ssh", "message": "インスタンスへ接続中..."})
+        conn = _get_ssh_connection_for_job(job_data, timeout=30)
+        if not conn:
+            raise HTTPException(
+                status_code=503,
+                detail="SSH接続に失敗しました。インスタンスが起動中か確認してください。",
+            )
+
+        local_checkpoint_path: Optional[Path] = None
+        temp_dir_obj: Optional[tempfile.TemporaryDirectory] = None
+        try:
+            emit_progress({"type": "validating", "message": "checkpoint存在を確認中..."})
+            check_cmd = f"test -d {shlex.quote(remote_checkpoint_path)}"
+            exit_code, _, _ = conn.exec_command(check_cmd, timeout=15)
+            if exit_code != 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Remote checkpoint not found: {remote_checkpoint_path}",
+                )
+
+            emit_progress(
+                {
+                    "type": "downloading",
+                    "message": "checkpointをバックエンドへ転送中...",
+                    "checkpoint_name": checkpoint_name,
+                }
+            )
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"checkpoint_upload_{job_id}_")
+            local_checkpoint_path = Path(temp_dir_obj.name) / checkpoint_name
+            conn.download_directory(remote_checkpoint_path, local_checkpoint_path)
+
+            emit_progress({"type": "registering", "message": "checkpoint index登録中..."})
+            _register_job_for_checkpoint_if_needed(checkpoint_mgr, job_data)
+
+            emit_progress({"type": "uploading", "message": "R2へアップロード中..."})
+            ok, msg = checkpoint_mgr.upload_step_checkpoint(
+                job_name=job_id,
+                step=step,
+                local_checkpoint_path=local_checkpoint_path,
+                update_last=True,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Checkpoint upload failed: {msg}",
+                )
+        finally:
+            conn.disconnect()
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
+    else:
+        emit_progress(
+            {
+                "type": "uploaded",
+                "message": "R2には既に登録済みのためアップロードをスキップしました",
+                "checkpoint_name": checkpoint_name,
+                "step": step,
+            }
+        )
+
+    prefix = checkpoint_mgr.sync._get_prefix()
+    r2_step_path = (
+        f"s3://{checkpoint_mgr.sync.bucket}/{prefix}checkpoints/{job_id}/step_{step:06d}"
+    )
+    emit_progress(
+        {
+            "type": "uploaded",
+            "message": "R2登録が完了しました",
+            "checkpoint_name": checkpoint_name,
+            "step": step,
+        }
+    )
+    emit_progress(
+        {
+            "type": "uploading_model",
+            "message": "推論モデルをR2へ反映中...",
+        }
+    )
+    try:
+        model_r2_path, model_size_bytes, copied_model = _ensure_model_artifact_in_r2_from_checkpoint(
+            checkpoint_mgr,
+            job_id=job_id,
+            model_id=model_id,
+            step=step,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"モデルアーティファクトのR2反映に失敗しました: {exc}",
+        ) from exc
+    emit_progress(
+        {
+            "type": "model_uploaded",
+            "message": (
+                "推論モデルをR2へ反映しました"
+                if copied_model
+                else "推論モデルは既にR2に存在します"
+            ),
+            "model_id": model_id,
+            "model_r2_path": model_r2_path,
+        }
+    )
+    emit_progress(
+        {
+            "type": "registering_model",
+            "message": "モデルをDBへ登録中...",
+        }
+    )
+    job_data["model_id"] = model_id
+    job_data["model_size_bytes"] = model_size_bytes
+    await _save_job(job_data)
+    try:
+        await _upsert_model_for_job(job_data)
+    except Exception as exc:
+        logger.exception(
+            "Remote checkpoint upload succeeded but model DB upsert failed: job_id=%s step=%s",
+            job_id,
+            step,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "R2登録は完了しましたが、モデルのDB登録に失敗しました: "
+                f"{exc}. 同じチェックポイントで再実行してください。"
+            ),
+        ) from exc
+    emit_progress(
+        {
+            "type": "model_registered",
+            "message": "モデルDB登録が完了しました",
+            "model_id": model_id,
+        }
+    )
+    return RemoteCheckpointUploadResponse(
+        job_id=job_id,
+        checkpoint_name=checkpoint_name,
+        step=step,
+        r2_step_path=r2_step_path,
+        model_id=model_id,
+        db_registered=True,
+        message="チェックポイントをR2/DBに登録し、推論モデルも反映しました",
+    ).model_dump()
+
+
 def _get_ssh_connection_for_job(
     job_data: dict, timeout: int = 30
 ) -> Optional[SSHConnection]:
@@ -1269,20 +1908,48 @@ def _get_ssh_connection_for_job(
     if not ip:
         return None
 
-    try:
-        default_key = str(Path.home() / ".ssh" / "id_rsa")
-        key_path = Path(job_data.get("ssh_private_key", default_key)).expanduser()
-        conn = SSHConnection(
-            host=ip,
-            user=job_data.get("ssh_user", _get_default_ssh_user()),
-            private_key_path=key_path,
+    users = _build_ssh_user_candidates(job_data.get("ssh_user", _get_default_ssh_user()))
+    key_candidates = _build_ssh_private_key_candidates(job_data.get("ssh_private_key"))
+    if not key_candidates:
+        logger.warning(
+            "No usable SSH private key found for job %s (saved=%s, env=%s)",
+            job_data.get("job_id"),
+            job_data.get("ssh_private_key"),
+            os.environ.get("VERDA_SSH_PRIVATE_KEY"),
         )
-        conn.connect(timeout_sec=timeout)
-        return conn
-    except SystemExit:
         return None
-    except Exception:
-        return None
+
+    last_error: Optional[Exception] = None
+    for user in users:
+        for key_path in key_candidates:
+            try:
+                conn = SSHConnection(
+                    host=ip,
+                    user=user,
+                    private_key_path=key_path,
+                )
+                conn.connect(timeout_sec=timeout)
+                return conn
+            except SystemExit as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = exc
+
+    if last_error:
+        logger.warning(
+            "SSH connection failed for job %s (ip=%s, users=%s, keys=%s): %s",
+            job_data.get("job_id"),
+            ip,
+            ",".join(users),
+            ",".join(str(p) for p in key_candidates),
+            last_error,
+        )
+        logger.debug(
+            "Failed to connect SSH for job %s with all key/user candidates: %s",
+            job_data.get("job_id"),
+            last_error,
+        )
+    return None
 
 
 def _check_remote_status(job_data: dict) -> str:
@@ -2367,6 +3034,9 @@ async def get_job(job_id: str):
     if not job_data:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
+    if job_data.get("status") in ("running", "starting", "deploying"):
+        await _refresh_job_status_from_instance(job_data)
+
     job = JobInfo(**job_data)
     remote_status = None
     progress = None
@@ -2376,7 +3046,7 @@ async def get_job(job_id: str):
     training_config = job_data.get("training_config")
 
     # Progress is derived from Supabase metrics
-    if job.status in ("running", "starting"):
+    if job.status in ("running", "starting", "deploying"):
         progress = await _get_remote_progress(job_id)
 
     return JobDetailResponse(
@@ -2588,6 +3258,33 @@ async def get_instance_status(job_id: str):
     )
 
 
+@router.get(
+    "/jobs/{job_id}/checkpoints/remote",
+    response_model=RemoteCheckpointListResponse,
+)
+async def list_remote_job_checkpoints(job_id: str):
+    """List checkpoint directories available on the remote instance."""
+    job_data = await _load_job(job_id, include_deleted=True)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    job_data = await _refresh_job_ssh_target_if_needed(job_data)
+
+    try:
+        checkpoint_names, checkpoint_root = await asyncio.to_thread(
+            _list_remote_checkpoint_dirs, job_data
+        )
+    except RuntimeError as exc:
+        detail = str(exc)
+        status_code = 404 if "見つかりません" in detail else 503
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    return RemoteCheckpointListResponse(
+        job_id=job_id,
+        checkpoint_names=checkpoint_names,
+        checkpoint_root=checkpoint_root,
+    )
+
+
 @router.post("/jobs/{job_id}/revive", response_model=JobReviveResponse)
 async def revive_job_instance(job_id: str):
     """Revive a terminated instance by restoring its OS volume and starting a CPU instance."""
@@ -2749,11 +3446,7 @@ async def _revive_job_with_progress(
     if not ip:
         raise HTTPException(status_code=504, detail="IP取得タイムアウト (15分)")
 
-    ssh_private_key = job_data.get("ssh_private_key") or os.environ.get(
-        "VERDA_SSH_PRIVATE_KEY"
-    )
-    if not ssh_private_key:
-        ssh_private_key = str(Path.home() / ".ssh" / "id_rsa")
+    ssh_private_key = _select_preferred_ssh_private_key(job_data.get("ssh_private_key"))
     ssh_user = job_data.get("ssh_user") or _get_default_ssh_user()
 
     result = JobReviveResponse(
@@ -2768,12 +3461,65 @@ async def _revive_job_with_progress(
         location=location,
         message="CPUインスタンスを起動しました。SSH接続できます。",
     )
+    job_data["instance_id"] = new_instance_id
+    job_data["ip"] = ip
+    job_data["ssh_user"] = ssh_user
+    job_data["ssh_private_key"] = ssh_private_key
+    await _save_job(job_data)
     return result.model_dump()
 
 
-@router.websocket("/ws/jobs/{job_id}/revive")
-async def websocket_revive_job(websocket: WebSocket, job_id: str):
+@router.websocket("/ws/jobs/{job_id}/checkpoints/upload")
+async def websocket_upload_remote_checkpoint(websocket: WebSocket, job_id: str):
     await websocket.accept()
+    access_token = websocket.query_params.get("access_token")
+    auth_header = websocket.headers.get("authorization")
+    if auth_header:
+        parts = auth_header.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            access_token = parts[1]
+    if not access_token:
+        access_token = websocket.cookies.get(ACCESS_COOKIE_NAME)
+    refresh_token = websocket.cookies.get(REFRESH_COOKIE_NAME)
+    supabase_session = build_session_from_tokens(access_token, refresh_token)
+    if not supabase_session or is_session_expired(supabase_session):
+        refreshed_session = refresh_session_from_refresh_token(refresh_token)
+        if refreshed_session:
+            supabase_session = refreshed_session
+    if not supabase_session or not supabase_session.get("user_id"):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": "認証情報がありません。ログインし直してください。",
+            }
+        )
+        await websocket.close()
+        return
+
+    try:
+        payload = await websocket.receive_json()
+    except Exception:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": "リクエスト形式が不正です。",
+            }
+        )
+        await websocket.close()
+        return
+
+    try:
+        request = RemoteCheckpointUploadRequest(**payload)
+    except Exception as exc:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": f"パラメータエラー: {exc}",
+            }
+        )
+        await websocket.close()
+        return
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict] = asyncio.Queue()
 
@@ -2781,6 +3527,70 @@ async def websocket_revive_job(websocket: WebSocket, job_id: str):
         loop.call_soon_threadsafe(queue.put_nowait, msg)
 
     def worker() -> None:
+        token = set_request_session(supabase_session)
+        try:
+            result = asyncio.run(
+                _upload_selected_remote_checkpoint_with_progress(
+                    job_id,
+                    request.checkpoint_name,
+                    emit,
+                )
+            )
+            emit({"type": "complete", "result": result})
+        except HTTPException as exc:
+            emit({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            emit({"type": "error", "error": str(exc)})
+        finally:
+            reset_request_session(token)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    try:
+        while True:
+            message = await queue.get()
+            await websocket.send_json(message)
+            if message.get("type") in ("complete", "error"):
+                break
+    except WebSocketDisconnect:
+        return
+
+
+@router.websocket("/ws/jobs/{job_id}/revive")
+async def websocket_revive_job(websocket: WebSocket, job_id: str):
+    await websocket.accept()
+    access_token = websocket.query_params.get("access_token")
+    auth_header = websocket.headers.get("authorization")
+    if auth_header:
+        parts = auth_header.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            access_token = parts[1]
+    if not access_token:
+        access_token = websocket.cookies.get(ACCESS_COOKIE_NAME)
+    refresh_token = websocket.cookies.get(REFRESH_COOKIE_NAME)
+    supabase_session = build_session_from_tokens(access_token, refresh_token)
+    if not supabase_session or is_session_expired(supabase_session):
+        refreshed_session = refresh_session_from_refresh_token(refresh_token)
+        if refreshed_session:
+            supabase_session = refreshed_session
+    if not supabase_session or not supabase_session.get("user_id"):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": "認証情報がありません。ログインし直してください。",
+            }
+        )
+        await websocket.close()
+        return
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def emit(msg: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, msg)
+
+    def worker() -> None:
+        token = set_request_session(supabase_session)
         try:
             result = asyncio.run(_revive_job_with_progress(job_id, emit))
             emit({"type": "complete", "result": result})
@@ -2788,6 +3598,8 @@ async def websocket_revive_job(websocket: WebSocket, job_id: str):
             emit({"type": "error", "error": str(exc.detail)})
         except Exception as exc:
             emit({"type": "error", "error": str(exc)})
+        finally:
+            reset_request_session(token)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -4068,6 +4880,10 @@ async def websocket_create_job(websocket: WebSocket):
             access_token = websocket.cookies.get(ACCESS_COOKIE_NAME)
         refresh_token = websocket.cookies.get(REFRESH_COOKIE_NAME)
         supabase_session = build_session_from_tokens(access_token, refresh_token)
+        if not supabase_session or is_session_expired(supabase_session):
+            refreshed_session = refresh_session_from_refresh_token(refresh_token)
+            if refreshed_session:
+                supabase_session = refreshed_session
         if not supabase_session or not supabase_session.get("user_id"):
             await websocket.send_json(
                 {

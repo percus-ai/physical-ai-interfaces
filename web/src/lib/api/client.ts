@@ -119,6 +119,54 @@ export type DatasetPlaybackResponse = {
   cameras: DatasetPlaybackCameraInfo[];
 };
 
+export type TrainingReviveResult = {
+  job_id: string;
+  old_instance_id: string;
+  volume_id: string;
+  instance_id: string;
+  instance_type: string;
+  ip: string;
+  ssh_user: string;
+  ssh_private_key: string;
+  location: string;
+  message: string;
+};
+
+export type TrainingReviveProgressMessage = {
+  type?: string;
+  message?: string;
+  error?: string;
+  elapsed?: number;
+  timeout?: number;
+  result?: TrainingReviveResult;
+};
+
+export type RemoteCheckpointListResponse = {
+  job_id: string;
+  checkpoint_names: string[];
+  checkpoint_root: string;
+};
+
+export type RemoteCheckpointUploadResult = {
+  job_id: string;
+  checkpoint_name: string;
+  step: number;
+  r2_step_path: string;
+  model_id: string;
+  db_registered: boolean;
+  message: string;
+};
+
+export type RemoteCheckpointUploadProgressMessage = {
+  type?: string;
+  message?: string;
+  error?: string;
+  checkpoint_name?: string;
+  step?: number;
+  model_id?: string;
+  result?: RemoteCheckpointUploadResult;
+};
+
 let refreshPromise: Promise<boolean> | null = null;
 
 async function baseFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -551,6 +599,138 @@ export const api = {
     metrics: (jobId: string, limit: number = 2000) =>
       fetchApi(`/api/training/jobs/${jobId}/metrics?limit=${limit}`),
     progress: (jobId: string) => fetchApi(`/api/training/jobs/${jobId}/progress`),
+    remoteCheckpoints: (jobId: string) =>
+      fetchApi<RemoteCheckpointListResponse>(`/api/training/jobs/${jobId}/checkpoints/remote`),
+    uploadCheckpointWs: (
+      jobId: string,
+      checkpointName: string,
+      progressCallback?: (message: RemoteCheckpointUploadProgressMessage) => void
+    ): Promise<RemoteCheckpointUploadResult> =>
+      new Promise((resolve, reject) => {
+        const ws = new WebSocket(
+          `${getBackendUrl().replace(/^http/, 'ws')}/api/training/ws/jobs/${encodeURIComponent(jobId)}/checkpoints/upload`
+        );
+        let settled = false;
+        let requestSent = false;
+
+        const fail = (message: string) => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(message));
+        };
+
+        ws.onopen = () => {
+          try {
+            ws.send(JSON.stringify({ checkpoint_name: checkpointName }));
+            requestSent = true;
+          } catch {
+            ws.close();
+            fail('チェックポイントアップロード要求の送信に失敗しました。');
+          }
+        };
+
+        ws.onmessage = (event) => {
+          let payload: RemoteCheckpointUploadProgressMessage;
+          try {
+            payload = JSON.parse(event.data as string) as RemoteCheckpointUploadProgressMessage;
+          } catch {
+            ws.close();
+            fail('チェックポイントアップロード応答の解析に失敗しました。');
+            return;
+          }
+
+          if (progressCallback) {
+            progressCallback(payload);
+          }
+
+          if (payload.type === 'complete') {
+            const result = payload.result;
+            ws.close();
+            if (!result) {
+              fail('チェックポイントアップロード結果が取得できませんでした。');
+              return;
+            }
+            settled = true;
+            resolve(result);
+            return;
+          }
+
+          if (payload.type === 'error') {
+            ws.close();
+            fail(payload.error || payload.message || 'チェックポイントアップロードに失敗しました。');
+          }
+        };
+
+        ws.onerror = () => {
+          ws.close();
+          fail('チェックポイントアップロードWebSocket接続に失敗しました。');
+        };
+
+        ws.onclose = () => {
+          if (!settled && requestSent) {
+            fail('チェックポイントアップロードストリームが切断されました。');
+          }
+        };
+      }),
+    reviveJobWs: (
+      jobId: string,
+      progressCallback?: (message: TrainingReviveProgressMessage) => void
+    ): Promise<TrainingReviveResult> =>
+      new Promise((resolve, reject) => {
+        const ws = new WebSocket(
+          `${getBackendUrl().replace(/^http/, 'ws')}/api/training/ws/jobs/${encodeURIComponent(jobId)}/revive`
+        );
+        let settled = false;
+
+        const fail = (message: string) => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(message));
+        };
+
+        ws.onmessage = (event) => {
+          let payload: TrainingReviveProgressMessage;
+          try {
+            payload = JSON.parse(event.data as string) as TrainingReviveProgressMessage;
+          } catch {
+            ws.close();
+            fail('インスタンス蘇生レスポンスの解析に失敗しました。');
+            return;
+          }
+
+          if (progressCallback) {
+            progressCallback(payload);
+          }
+
+          if (payload.type === 'complete') {
+            const result = payload.result;
+            ws.close();
+            if (!result) {
+              fail('インスタンス蘇生結果が取得できませんでした。');
+              return;
+            }
+            settled = true;
+            resolve(result);
+            return;
+          }
+
+          if (payload.type === 'error') {
+            ws.close();
+            fail(payload.error || payload.message || 'インスタンス蘇生に失敗しました。');
+          }
+        };
+
+        ws.onerror = () => {
+          ws.close();
+          fail('インスタンス蘇生WebSocket接続に失敗しました。');
+        };
+
+        ws.onclose = () => {
+          if (!settled) {
+            fail('インスタンス蘇生ストリームが切断されました。');
+          }
+        };
+      }),
     gpuAvailability: () => fetchApi('/api/training/gpu-availability')
   },
   operate: {

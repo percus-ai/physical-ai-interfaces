@@ -6,7 +6,13 @@
   import { Button } from 'bits-ui';
   import { createQuery } from '@tanstack/svelte-query';
   import { AxisX, AxisY, GridY, Line, Plot } from 'svelteplot';
-  import { api } from '$lib/api/client';
+  import {
+    api,
+    type RemoteCheckpointUploadProgressMessage,
+    type RemoteCheckpointUploadResult,
+    type TrainingReviveProgressMessage,
+    type TrainingReviveResult
+  } from '$lib/api/client';
   import { getBackendUrl } from '$lib/config';
   import { formatDate } from '$lib/format';
   import { connectStream } from '$lib/realtime/stream';
@@ -81,6 +87,26 @@
   let streamError = $state('');
   let streamLines: string[] = $state([]);
   let streamWs = $state.raw<WebSocket | null>(null);
+  let reviveInProgress = $state(false);
+  let reviveStage = $state('');
+  let reviveMessage = $state('');
+  let reviveError = $state('');
+  let reviveElapsed: number | null = $state(null);
+  let reviveTimeout: number | null = $state(null);
+  let reviveEvents: string[] = $state([]);
+  let reviveResult: TrainingReviveResult | null = $state(null);
+  let reviveCopied = $state(false);
+  let remoteCheckpointRoot = $state('');
+  let remoteCheckpointNames: string[] = $state([]);
+  let selectedRemoteCheckpoint = $state('');
+  let remoteCheckpointLoading = $state(false);
+  let remoteCheckpointError = $state('');
+  let checkpointUploadInProgress = $state(false);
+  let checkpointUploadStage = $state('');
+  let checkpointUploadMessage = $state('');
+  let checkpointUploadError = $state('');
+  let checkpointUploadEvents: string[] = $state([]);
+  let checkpointUploadResult: RemoteCheckpointUploadResult | null = $state(null);
 
   type MetricPoint = { step?: number; loss?: number; ts?: string };
 
@@ -103,10 +129,16 @@
 
   const isRunning = $derived(['running', 'starting', 'deploying'].includes(status));
   const canDelete = $derived(['completed', 'failed', 'stopped', 'terminated'].includes(status));
+  const canRevive = $derived(['completed', 'failed', 'stopped', 'terminated'].includes(status));
 
   const sshCommand = $derived(
     jobInfo?.ip
       ? `ssh -i ${jobInfo?.ssh_private_key ?? '~/.ssh/id_rsa'} ${jobInfo?.ssh_user ?? 'root'}@${jobInfo.ip}`
+      : ''
+  );
+  const reviveSshCommand = $derived(
+    reviveResult?.ip
+      ? `ssh -i ${reviveResult?.ssh_private_key ?? '~/.ssh/id_rsa'} ${reviveResult?.ssh_user ?? 'root'}@${reviveResult.ip}`
       : ''
   );
 
@@ -131,6 +163,105 @@
     if (!confirm('このジョブを削除しますか？（リモートインスタンスも終了します）')) return;
     await api.training.deleteJob(jobId);
     await goto('/train');
+  };
+
+  const reviveJob = async () => {
+    if (!jobId || !canRevive || reviveInProgress) return;
+    if (!confirm('このジョブのインスタンスをCPUで蘇生しますか？')) return;
+
+    reviveInProgress = true;
+    reviveStage = '';
+    reviveMessage = '';
+    reviveError = '';
+    reviveElapsed = null;
+    reviveTimeout = null;
+    reviveEvents = [];
+    reviveResult = null;
+    reviveCopied = false;
+
+    try {
+      const result = await api.training.reviveJobWs(
+        jobId,
+        (payload: TrainingReviveProgressMessage) => {
+          if (payload.type) reviveStage = payload.type;
+          if (payload.message) reviveMessage = payload.message;
+          if (payload.error) reviveError = payload.error;
+          if (typeof payload.elapsed === 'number') reviveElapsed = payload.elapsed;
+          if (typeof payload.timeout === 'number') reviveTimeout = payload.timeout;
+
+          const eventLabel = payload.type ?? 'event';
+          const eventMessage = payload.error || payload.message || '';
+          const line = eventMessage ? `${eventLabel}: ${eventMessage}` : eventLabel;
+          reviveEvents = [...reviveEvents, line].slice(-30);
+        }
+      );
+      reviveResult = result;
+      reviveMessage = result.message;
+      await refresh();
+      await fetchRemoteCheckpoints();
+    } catch (error) {
+      reviveError = error instanceof Error ? error.message : 'インスタンス蘇生に失敗しました。';
+    } finally {
+      reviveInProgress = false;
+    }
+  };
+
+  const fetchRemoteCheckpoints = async () => {
+    if (!jobId) return;
+    remoteCheckpointLoading = true;
+    remoteCheckpointError = '';
+    try {
+      const result = await api.training.remoteCheckpoints(jobId);
+      remoteCheckpointRoot = result.checkpoint_root || '';
+      remoteCheckpointNames = result.checkpoint_names ?? [];
+      if (remoteCheckpointNames.length === 0) {
+        selectedRemoteCheckpoint = '';
+      } else if (!remoteCheckpointNames.includes(selectedRemoteCheckpoint)) {
+        selectedRemoteCheckpoint = remoteCheckpointNames[0];
+      }
+    } catch (error) {
+      remoteCheckpointError =
+        error instanceof Error ? error.message : 'リモートcheckpoint一覧の取得に失敗しました。';
+      remoteCheckpointNames = [];
+      selectedRemoteCheckpoint = '';
+    } finally {
+      remoteCheckpointLoading = false;
+    }
+  };
+
+  const uploadSelectedCheckpoint = async () => {
+    if (!jobId || !selectedRemoteCheckpoint || checkpointUploadInProgress) return;
+    if (!confirm(`checkpoint ${selectedRemoteCheckpoint} をR2へ登録しますか？`)) return;
+
+    checkpointUploadInProgress = true;
+    checkpointUploadStage = '';
+    checkpointUploadMessage = '';
+    checkpointUploadError = '';
+    checkpointUploadEvents = [];
+    checkpointUploadResult = null;
+
+    try {
+      const result = await api.training.uploadCheckpointWs(
+        jobId,
+        selectedRemoteCheckpoint,
+        (payload: RemoteCheckpointUploadProgressMessage) => {
+          if (payload.type) checkpointUploadStage = payload.type;
+          if (payload.message) checkpointUploadMessage = payload.message;
+          if (payload.error) checkpointUploadError = payload.error;
+          const eventType = payload.type ?? 'event';
+          const eventMessage = payload.error || payload.message || '';
+          const line = eventMessage ? `${eventType}: ${eventMessage}` : eventType;
+          checkpointUploadEvents = [...checkpointUploadEvents, line].slice(-30);
+        }
+      );
+      checkpointUploadResult = result;
+      checkpointUploadMessage = result.message;
+    } catch (error) {
+      checkpointUploadError =
+        error instanceof Error ? error.message : 'チェックポイントのR2登録に失敗しました。';
+    } finally {
+      checkpointUploadInProgress = false;
+    }
   };
 
   const fetchLogs = async () => {
@@ -176,6 +307,17 @@
       setTimeout(() => (copied = false), 1500);
     } catch {
       copied = false;
+    }
+  };
+
+  const copyReviveSshCommand = async () => {
+    if (!reviveSshCommand) return;
+    try {
+      await navigator.clipboard.writeText(reviveSshCommand);
+      reviveCopied = true;
+      setTimeout(() => (reviveCopied = false), 1500);
+    } catch {
+      reviveCopied = false;
     }
   };
 
@@ -267,6 +409,26 @@
       logsError = '';
       metrics = null;
       metricsError = '';
+      reviveInProgress = false;
+      reviveStage = '';
+      reviveMessage = '';
+      reviveError = '';
+      reviveElapsed = null;
+      reviveTimeout = null;
+      reviveEvents = [];
+      reviveResult = null;
+      reviveCopied = false;
+      remoteCheckpointRoot = '';
+      remoteCheckpointNames = [];
+      selectedRemoteCheckpoint = '';
+      remoteCheckpointLoading = false;
+      remoteCheckpointError = '';
+      checkpointUploadInProgress = false;
+      checkpointUploadStage = '';
+      checkpointUploadMessage = '';
+      checkpointUploadError = '';
+      checkpointUploadEvents = [];
+      checkpointUploadResult = null;
     }
   });
 
@@ -506,9 +668,14 @@
         <Button.Root class="btn-primary" type="button" onclick={stopJob} disabled={!isRunning}>
           {isRunning ? 'ジョブを停止' : '停止不可'}
         </Button.Root>
+        {#if canRevive}
+          <Button.Root class="btn-ghost" type="button" onclick={reviveJob} disabled={reviveInProgress}>
+            {reviveInProgress ? 'インスタンス蘇生中...' : 'インスタンスを蘇生'}
+          </Button.Root>
+        {/if}
       </div>
       <p class="mt-3 text-xs text-slate-500">
-        停止・削除は実行中ステータスに応じて有効化されます。
+        停止・蘇生はジョブステータスに応じて有効化されます。
       </p>
       {#if isRunning}
         <div class="mt-3 flex items-center gap-2 text-xs text-slate-500">
@@ -517,6 +684,131 @@
         </div>
       {/if}
     </section>
+
+    {#if canRevive || reviveInProgress || reviveResult || reviveError || reviveEvents.length}
+      <section class="card p-6">
+        <h2 class="text-xl font-semibold text-slate-900">インスタンス蘇生</h2>
+        <p class="mt-2 text-sm text-slate-600">
+          終了済みジョブに対して、OSストレージからCPUインスタンスを再作成します。
+        </p>
+        <div class="mt-4 space-y-3 text-sm text-slate-600">
+          <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
+            <p class="label">救済チェックポイント登録</p>
+            <p class="mt-2 text-xs text-slate-500">
+              リモート上の checkpoint ディレクトリから保存対象を選択して R2 に登録します。
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <Button.Root class="btn-ghost" type="button" onclick={fetchRemoteCheckpoints} disabled={remoteCheckpointLoading || checkpointUploadInProgress}>
+                {remoteCheckpointLoading ? '候補取得中...' : '候補を取得'}
+              </Button.Root>
+            </div>
+            {#if remoteCheckpointRoot}
+              <p class="mt-3 text-xs text-slate-500 break-all">root: {remoteCheckpointRoot}</p>
+            {/if}
+            {#if remoteCheckpointError}
+              <p class="mt-3 text-sm text-rose-600">{remoteCheckpointError}</p>
+            {/if}
+            {#if remoteCheckpointNames.length}
+              <label class="mt-3 block text-sm font-semibold text-slate-700">
+                <span class="label">保存するcheckpoint</span>
+                <select class="input mt-2" bind:value={selectedRemoteCheckpoint} disabled={checkpointUploadInProgress}>
+                  {#each remoteCheckpointNames as checkpointName}
+                    <option value={checkpointName}>{checkpointName}</option>
+                  {/each}
+                </select>
+              </label>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <Button.Root class="btn-primary" type="button" onclick={uploadSelectedCheckpoint} disabled={!selectedRemoteCheckpoint || checkpointUploadInProgress}>
+                  {checkpointUploadInProgress ? 'R2登録中...' : '選択したcheckpointをR2登録'}
+                </Button.Root>
+              </div>
+            {:else if !remoteCheckpointLoading}
+              <p class="mt-3 text-xs text-slate-500">候補はまだ取得されていません。</p>
+            {/if}
+          </div>
+
+          {#if reviveStage}
+            <span class="chip">フェーズ: {reviveStage}</span>
+          {/if}
+          {#if reviveElapsed !== null}
+            <p class="text-xs text-slate-500">
+              経過: {reviveElapsed}s{#if reviveTimeout !== null} / {reviveTimeout}s{/if}
+            </p>
+          {/if}
+          {#if reviveMessage}
+            <p class="text-sm text-slate-700">{reviveMessage}</p>
+          {/if}
+          {#if reviveError}
+            <p class="text-sm text-rose-600">{reviveError}</p>
+          {/if}
+          {#if checkpointUploadStage}
+            <span class="chip">登録フェーズ: {checkpointUploadStage}</span>
+          {/if}
+          {#if checkpointUploadMessage}
+            <p class="text-sm text-slate-700">{checkpointUploadMessage}</p>
+          {/if}
+          {#if checkpointUploadError}
+            <p class="text-sm text-rose-600">{checkpointUploadError}</p>
+          {/if}
+          {#if reviveEvents.length}
+            <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
+              <p class="label">進捗ログ</p>
+              <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{reviveEvents.join('\n')}</pre>
+            </div>
+          {/if}
+          {#if checkpointUploadEvents.length}
+            <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
+              <p class="label">checkpoint登録ログ</p>
+              <pre class="mt-2 whitespace-pre-wrap text-xs text-slate-700">{checkpointUploadEvents.join('\n')}</pre>
+            </div>
+          {/if}
+          {#if checkpointUploadResult}
+            <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
+              <p class="label">checkpoint登録結果</p>
+              <div class="mt-2 space-y-1 text-xs text-slate-600">
+                <p>checkpoint: <span class="font-semibold text-slate-800">{checkpointUploadResult.checkpoint_name}</span></p>
+                <p>step: <span class="font-semibold text-slate-800">{checkpointUploadResult.step}</span></p>
+                <p>R2 path: <span class="font-semibold text-slate-800 break-all">{checkpointUploadResult.r2_step_path}</span></p>
+                <p>model_id: <span class="font-semibold text-slate-800 break-all">{checkpointUploadResult.model_id}</span></p>
+                <p>
+                  DB登録:
+                  <span class="font-semibold text-slate-800">
+                    {checkpointUploadResult.db_registered ? '完了' : '未完了'}
+                  </span>
+                </p>
+              </div>
+            </div>
+          {/if}
+          {#if reviveResult}
+            <div class="rounded-xl border border-slate-200/60 bg-white/70 p-4">
+              <p class="label">蘇生結果</p>
+              <div class="mt-2 space-y-1 text-xs text-slate-600">
+                <p>旧インスタンスID: <span class="font-semibold text-slate-800 break-all">{reviveResult.old_instance_id}</span></p>
+                <p>新インスタンスID: <span class="font-semibold text-slate-800 break-all">{reviveResult.instance_id}</span></p>
+                <p>ストレージID: <span class="font-semibold text-slate-800 break-all">{reviveResult.volume_id}</span></p>
+                <p>インスタンスタイプ: <span class="font-semibold text-slate-800">{reviveResult.instance_type}</span></p>
+                <p>ロケーション: <span class="font-semibold text-slate-800">{reviveResult.location}</span></p>
+                <p>IP: <span class="font-semibold text-slate-800">{reviveResult.ip}</span></p>
+                <p>SSHユーザー: <span class="font-semibold text-slate-800">{reviveResult.ssh_user}</span></p>
+                <p>SSH鍵: <span class="font-semibold text-slate-800 break-all">{reviveResult.ssh_private_key}</span></p>
+              </div>
+              <div class="mt-3 rounded-xl border border-slate-200/60 bg-slate-50/80 p-3 text-xs text-slate-600">
+                <p class="label">SSHコマンド</p>
+                <p class="mt-2 font-semibold text-slate-800 break-all">{reviveSshCommand || '-'}</p>
+              </div>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <Button.Root class="btn-ghost" type="button" onclick={copyReviveSshCommand} disabled={!reviveSshCommand}>
+                  SSHコマンドをコピー
+                </Button.Root>
+                {#if reviveCopied}
+                  <span class="chip">コピーしました</span>
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </section>
+    {/if}
 
     <section class="card p-6">
       <h2 class="text-xl font-semibold text-slate-900">ログ</h2>
