@@ -32,7 +32,7 @@
   });
 
   const gpuModelOrder = $derived(GPU_MODELS.map((gpu) => gpu.name));
-  let activeTab = $state<'availability' | 'jobs'>('availability');
+  let activeTab = $state<'availability' | 'jobs'>('jobs');
 </script>
 
 <section class="card-strong p-8">
@@ -58,16 +58,16 @@
     <div class="flex flex-wrap items-center justify-between gap-3">
       <Tabs.List class="inline-grid grid-cols-2 gap-1 rounded-full border border-slate-200/70 bg-slate-100/80 p-1">
         <Tabs.Trigger
-          value="availability"
-          class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
-        >
-          GPU空き状況
-        </Tabs.Trigger>
-        <Tabs.Trigger
           value="jobs"
           class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
         >
           学習ジョブ一覧
+        </Tabs.Trigger>
+        <Tabs.Trigger
+          value="availability"
+          class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm"
+        >
+          GPU空き状況
         </Tabs.Trigger>
       </Tabs.List>
 
