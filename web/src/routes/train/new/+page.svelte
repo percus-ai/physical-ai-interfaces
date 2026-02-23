@@ -4,6 +4,7 @@
   import { createQuery } from '@tanstack/svelte-query';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api/client';
+  import HelpLabel from '$lib/components/HelpLabel.svelte';
   import GpuAvailabilityBoard from '$lib/components/training/GpuAvailabilityBoard.svelte';
   import { getBackendUrl } from '$lib/config';
   import { formatBytes, formatDate } from '$lib/format';
@@ -83,6 +84,35 @@
   let createWs = $state<WebSocket | null>(null);
 
   let selectedDataset = $state('');
+
+  const PARAMETER_HELP = {
+    video_backend:
+      'auto:\n自動選択です。まず torchcodec を試し、使えない場合は pyav を使います。\n\ntorchcodec:\nPyTorch系の動画デコード実装です。環境が合えば高速で安定しやすい選択です。\n\npyav:\nFFmpegベースの実装です。互換性が広く、torchcodec で問題が出る場合の代替になります。',
+    steps: '学習を何回更新するかです。大きいほど学習は進みますが、時間も増えます。',
+    batch_size: '1回の更新で使うデータ量です。大きいほどメモリ使用量が増えます。',
+    save_freq: '何ステップごとにチェックポイントを保存するかです。',
+    log_freq: '何ステップごとに学習ログを記録するかです。',
+    num_workers: 'データ読み込みを並列処理する数です。増やすと前処理が速くなる場合があります。',
+    save_checkpoint: '有効にすると途中状態を保存します。再開やEarly Stopping運用には有効化が推奨です。',
+    validation_enable:
+      '有効にすると train/val 分割を作って検証を実行します。Early Stopping を使う場合は有効化が必要です。',
+    validation_train_ratio:
+      '残り割合（100 - 学習データ割合）が検証に使われます。\n（例: 70% なら train:val = 7:3）',
+    validation_split_seed:
+      'train/val の振り分けを決める乱数の種です。\n同じseedなら同じ分割、seedを変えると分割内容が変わります。',
+    validation_eval_freq: '検証が走る間隔です（ステップ単位）。',
+    validation_batch_size: '検証時だけ使うバッチサイズです。\n（例: 0 なら学習バッチサイズを使用）',
+    validation_max_batches: '1回の検証で見る最大バッチ数です。\n（例: 0 なら全件）',
+    early_stopping_enable: '有効にすると、改善しない状態が続いたとき学習を途中で停止します。',
+    early_stopping_mode:
+      'min は小さいほど良い（通常は val_loss）、max は大きいほど良い指標向けです。',
+    early_stopping_patience: '改善しない検証が何回続いたら止めるかの回数です。',
+    early_stopping_min_delta: '改善とみなす最小変化量です。差がこれ未満なら「改善なし」と判定します。',
+    dtype: '重みや計算の精度です。auto はモデル既定値を使います。',
+    amp: '混合精度で学習を高速化します。dtype=bfloat16 選択時は無効化されます。',
+    gradient_checkpointing: 'メモリ使用量を下げる代わりに計算時間が増える設定です。',
+    torch_compile: 'モデル実行を最適化して高速化を狙う設定です。環境によって効果は変わります。'
+  } as const;
 
   const applyPolicyDefaults = (policyId: string) => {
     const info = POLICY_TYPES.find((policy) => policy.id === policyId);
@@ -489,30 +519,13 @@
       </div>
       <div class="mt-4 grid gap-4 sm:grid-cols-2">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">Video backend</span>
-          <select class="input mt-2" bind:value={datasetVideoBackend}>
+          <HelpLabel text="Video backend" help={PARAMETER_HELP.video_backend} />
+          <select class="input mt-2" bind:value={datasetVideoBackend} title={PARAMETER_HELP.video_backend}>
             <option value="auto">自動 (torchcodec優先)</option>
             <option value="torchcodec">torchcodec</option>
             <option value="pyav">pyav</option>
           </select>
         </label>
-      </div>
-      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">Video backend の説明</p>
-        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
-          <li>
-            <span class="font-semibold text-slate-700">auto:</span>
-            <br />自動選択です。まず <code>torchcodec</code> を試し、使えない場合は <code>pyav</code> を使います。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">torchcodec:</span>
-            <br />PyTorch系の動画デコード実装です。環境が合えば高速で安定しやすい選択です。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">pyav:</span>
-            <br />FFmpegベースの実装です。互換性が広く、<code>torchcodec</code> で問題が出る場合の代替になります。
-          </li>
-        </ul>
       </div>
     </section>
 
@@ -520,78 +533,49 @@
       <h2 class="text-xl font-semibold text-slate-900">学習パラメータ</h2>
       <div class="mt-4 grid gap-4 sm:grid-cols-3">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">ステップ数</span>
-          <input class="input mt-2" type="number" min="100" bind:value={steps} />
+          <HelpLabel text="ステップ数" help={PARAMETER_HELP.steps} />
+          <input class="input mt-2" type="number" min="100" bind:value={steps} title={PARAMETER_HELP.steps} />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">バッチサイズ</span>
-          <input class="input mt-2" type="number" min="1" bind:value={batchSize} />
+          <HelpLabel text="バッチサイズ" help={PARAMETER_HELP.batch_size} />
+          <input class="input mt-2" type="number" min="1" bind:value={batchSize} title={PARAMETER_HELP.batch_size} />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">保存頻度</span>
-          <input class="input mt-2" type="number" min="50" bind:value={saveFreq} />
+          <HelpLabel text="保存頻度" help={PARAMETER_HELP.save_freq} />
+          <input class="input mt-2" type="number" min="50" bind:value={saveFreq} title={PARAMETER_HELP.save_freq} />
         </label>
       </div>
       <div class="mt-4 grid gap-4 sm:grid-cols-3">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">ログ頻度</span>
-          <input class="input mt-2" type="number" min="1" bind:value={logFreq} />
+          <HelpLabel text="ログ頻度" help={PARAMETER_HELP.log_freq} />
+          <input class="input mt-2" type="number" min="1" bind:value={logFreq} title={PARAMETER_HELP.log_freq} />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">DataLoader workers</span>
-          <input class="input mt-2" type="number" min="0" bind:value={numWorkers} />
+          <HelpLabel text="DataLoader workers" help={PARAMETER_HELP.num_workers} />
+          <input class="input mt-2" type="number" min="0" bind:value={numWorkers} title={PARAMETER_HELP.num_workers} />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">チェックポイント保存</span>
+          <HelpLabel text="チェックポイント保存" help={PARAMETER_HELP.save_checkpoint} />
           <div class="mt-3 flex items-center gap-2 text-sm text-slate-600">
-            <input type="checkbox" bind:checked={saveCheckpoint} />
+            <input type="checkbox" bind:checked={saveCheckpoint} title={PARAMETER_HELP.save_checkpoint} />
             <span>{saveCheckpoint ? '有効' : '無効'}</span>
           </div>
         </label>
-      </div>
-      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">学習パラメータの説明</p>
-        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
-          <li>
-            <span class="font-semibold text-slate-700">ステップ数:</span>
-            <br />学習を何回更新するかです。大きいほど学習は進みますが、時間も増えます。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">バッチサイズ:</span>
-            <br />1回の更新で使うデータ量です。大きいほどメモリ使用量が増えます。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">保存頻度:</span>
-            <br />何ステップごとにチェックポイントを保存するかです。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">ログ頻度:</span>
-            <br />何ステップごとに学習ログを記録するかです。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">DataLoader workers:</span>
-            <br />データ読み込みを並列処理する数です。増やすと前処理が速くなる場合があります。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">チェックポイント保存:</span>
-            <br />有効にすると途中状態を保存します。再開やEarly Stopping運用には有効化が推奨です。
-          </li>
-        </ul>
       </div>
     </section>
 
     <section class="card p-6">
       <h2 class="text-xl font-semibold text-slate-900">検証 / Early Stopping</h2>
       <div class="mt-4 text-sm font-semibold text-slate-700">
-        <span class="label">検証を有効</span>
+        <HelpLabel text="検証を有効" help={PARAMETER_HELP.validation_enable} />
         <div class="mt-3 flex items-center gap-2 text-sm text-slate-600">
-          <input type="checkbox" bind:checked={validationEnable} />
+          <input type="checkbox" bind:checked={validationEnable} title={PARAMETER_HELP.validation_enable} />
           <span>{validationEnable ? '有効' : '無効'}</span>
         </div>
       </div>
       <div class="mt-4 grid gap-4 sm:grid-cols-3">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">学習データ割合 (%)</span>
+          <HelpLabel text="学習データ割合 (%)" help={PARAMETER_HELP.validation_train_ratio} />
           <input
             class="input mt-2"
             type="number"
@@ -599,130 +583,104 @@
             max="100"
             bind:value={validationTrainRatioPercent}
             disabled={!validationEnable}
+            title={PARAMETER_HELP.validation_train_ratio}
           />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">分割seed</span>
+          <HelpLabel text="分割seed" help={PARAMETER_HELP.validation_split_seed} />
           <input
             class="input mt-2"
             type="number"
             min="0"
             bind:value={validationSplitSeed}
             disabled={!validationEnable}
+            title={PARAMETER_HELP.validation_split_seed}
           />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">検証頻度</span>
+          <HelpLabel text="検証頻度" help={PARAMETER_HELP.validation_eval_freq} />
           <input
             class="input mt-2"
             type="number"
             min="1"
             bind:value={validationEvalFreq}
             disabled={!validationEnable}
+            title={PARAMETER_HELP.validation_eval_freq}
           />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">検証バッチサイズ</span>
+          <HelpLabel text="検証バッチサイズ" help={PARAMETER_HELP.validation_batch_size} />
           <input
             class="input mt-2"
             type="number"
             min="0"
             bind:value={validationBatchSize}
             disabled={!validationEnable}
+            title={PARAMETER_HELP.validation_batch_size}
           />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">検証バッチ数上限</span>
+          <HelpLabel text="検証バッチ数上限" help={PARAMETER_HELP.validation_max_batches} />
           <input
             class="input mt-2"
             type="number"
             min="0"
             bind:value={validationMaxBatches}
             disabled={!validationEnable}
+            title={PARAMETER_HELP.validation_max_batches}
           />
         </label>
-      </div>
-
-      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">検証の設定について</p>
-        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
-          <li>
-            <span class="font-semibold text-slate-700">学習データ割合:</span>
-            <br />残り割合（100 - 学習データ割合）が検証に使われます。<br />（例: 70% なら train:val = 7:3）
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">分割seed:</span>
-            <br />train/val の振り分けを決める乱数の種です。<br />同じseedなら同じ分割、seedを変えると分割内容が変わります。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">検証バッチサイズ:</span>
-            <br />検証時だけ使うバッチサイズです。<br />（例: 0 なら学習バッチサイズを使用）
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">検証バッチ数上限:</span>
-            <br />1回の検証で見る最大バッチ数です。<br />（例: 0 なら全件）
-          </li>
-        </ul>
       </div>
 
       <div class="divider my-6"></div>
 
       <div class="text-sm font-semibold text-slate-700">
-        <span class="label">Early Stopping</span>
+        <HelpLabel text="Early Stopping" help={PARAMETER_HELP.early_stopping_enable} />
         <div class="mt-3 flex items-center gap-2 text-sm text-slate-600">
-          <input type="checkbox" bind:checked={earlyStoppingEnable} disabled={!validationEnable} />
+          <input
+            type="checkbox"
+            bind:checked={earlyStoppingEnable}
+            disabled={!validationEnable}
+            title={PARAMETER_HELP.early_stopping_enable}
+          />
           <span>{earlyStoppingEnable ? '有効' : '無効'}</span>
         </div>
       </div>
       <div class="mt-4 grid gap-4 sm:grid-cols-3">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">モード</span>
-          <select class="input mt-2" bind:value={earlyStoppingMode} disabled={!earlyStoppingEnable}>
+          <HelpLabel text="モード" help={PARAMETER_HELP.early_stopping_mode} />
+          <select
+            class="input mt-2"
+            bind:value={earlyStoppingMode}
+            disabled={!earlyStoppingEnable}
+            title={PARAMETER_HELP.early_stopping_mode}
+          >
             <option value="min">min</option>
             <option value="max">max</option>
           </select>
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">Patience</span>
+          <HelpLabel text="Patience" help={PARAMETER_HELP.early_stopping_patience} />
           <input
             class="input mt-2"
             type="number"
             min="1"
             bind:value={earlyStoppingPatience}
             disabled={!earlyStoppingEnable}
+            title={PARAMETER_HELP.early_stopping_patience}
           />
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">min_delta</span>
+          <HelpLabel text="min_delta" help={PARAMETER_HELP.early_stopping_min_delta} />
           <input
             class="input mt-2"
             type="number"
             step="0.0001"
             bind:value={earlyStoppingMinDelta}
             disabled={!earlyStoppingEnable}
+            title={PARAMETER_HELP.early_stopping_min_delta}
           />
         </label>
-      </div>
-      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">Early Stopping の設定について</p>
-        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
-          <li>
-            <span class="font-semibold text-slate-700">動作タイミング:</span>
-            <br />検証が走るたび（検証頻度ごと）に、検証指標を見て停止判定します。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">モード:</span>
-            <br /><code>min</code> は小さいほど良い（通常は val_loss）、<code>max</code> は大きいほど良い指標向けです。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">Patience:</span>
-            <br />改善しない検証が何回続いたら止めるかの回数です。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">min_delta:</span>
-            <br />改善とみなす最小変化量です。差がこれ未満なら「改善なし」と判定します。
-          </li>
-        </ul>
       </div>
     </section>
 
@@ -730,8 +688,8 @@
       <h2 class="text-xl font-semibold text-slate-900">モデル設定</h2>
       <div class="mt-4 grid gap-4 sm:grid-cols-2">
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">dtype</span>
-          <select class="input mt-2" bind:value={policyDtype}>
+          <HelpLabel text="dtype" help={PARAMETER_HELP.dtype} />
+          <select class="input mt-2" bind:value={policyDtype} title={PARAMETER_HELP.dtype}>
             <option value="auto">指定しない</option>
             <option value="float32">float32</option>
             <option value="bfloat16">bfloat16</option>
@@ -739,8 +697,8 @@
           </select>
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">AMP</span>
-          <select class="input mt-2" bind:value={policyUseAmp} disabled={useAmpDisabled}>
+          <HelpLabel text="AMP" help={PARAMETER_HELP.amp} />
+          <select class="input mt-2" bind:value={policyUseAmp} disabled={useAmpDisabled} title={PARAMETER_HELP.amp}>
             <option value="auto">指定しない</option>
             <option value="true">有効</option>
             <option value="false">無効</option>
@@ -750,42 +708,25 @@
           {/if}
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">Gradient checkpointing</span>
-          <select class="input mt-2" bind:value={policyGradientCheckpointing}>
+          <HelpLabel text="Gradient checkpointing" help={PARAMETER_HELP.gradient_checkpointing} />
+          <select
+            class="input mt-2"
+            bind:value={policyGradientCheckpointing}
+            title={PARAMETER_HELP.gradient_checkpointing}
+          >
             <option value="auto">指定しない</option>
             <option value="true">有効</option>
             <option value="false">無効</option>
           </select>
         </label>
         <label class="text-sm font-semibold text-slate-700">
-          <span class="label">torch.compile</span>
-          <select class="input mt-2" bind:value={policyCompileModel}>
+          <HelpLabel text="torch.compile" help={PARAMETER_HELP.torch_compile} />
+          <select class="input mt-2" bind:value={policyCompileModel} title={PARAMETER_HELP.torch_compile}>
             <option value="auto">指定しない</option>
             <option value="true">有効</option>
             <option value="false">無効</option>
           </select>
         </label>
-      </div>
-      <div class="mt-4 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-slate-600">モデル設定の説明</p>
-        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-500">
-          <li>
-            <span class="font-semibold text-slate-700">dtype:</span>
-            <br />重みや計算の精度です。<code>auto</code> はモデル既定値を使います。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">AMP:</span>
-            <br />混合精度で学習を高速化します。<code>dtype=bfloat16</code> 選択時は無効化されます。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">Gradient checkpointing:</span>
-            <br />メモリ使用量を下げる代わりに計算時間が増える設定です。
-          </li>
-          <li>
-            <span class="font-semibold text-slate-700">torch.compile:</span>
-            <br />モデル実行を最適化して高速化を狙う設定です。環境によって効果は変わります。
-          </li>
-        </ul>
       </div>
     </section>
   </div>
