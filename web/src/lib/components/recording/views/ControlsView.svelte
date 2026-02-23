@@ -127,14 +127,8 @@
     });
   };
   const handleNext = async () => {
-    openConfirm({
-      title: '現在のエピソードを保存して次へ進みますか？',
-      description: '現在エピソードを保存して、次エピソードのリセットへ進みます。',
-      actionLabel: '保存して次へ',
-      action: () =>
-        runAction('次へ', () => api.recording.nextEpisode(), {
-          successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
-        })
+    await runAction('次へ', () => api.recording.nextEpisode(), {
+      successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
     });
   };
   const handleStop = async () => {
