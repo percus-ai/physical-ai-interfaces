@@ -7,6 +7,7 @@ import ControlsView from '$lib/components/recording/views/ControlsView.svelte';
 import ProgressView from '$lib/components/recording/views/ProgressView.svelte';
 import TimelineView from '$lib/components/recording/views/TimelineView.svelte';
 import DevicesView from '$lib/components/recording/views/DevicesView.svelte';
+import SettingsView from '$lib/components/recording/views/SettingsView.svelte';
 import PlaceholderView from '$lib/components/recording/views/PlaceholderView.svelte';
 
 export type ConfigField = {
@@ -130,6 +131,12 @@ export const viewRegistry: ViewTypeDefinition[] = [
     label: 'Devices',
     description: 'Camera/arm status',
     component: DevicesView
+  },
+  {
+    type: 'settings',
+    label: 'Settings',
+    description: 'Inference/recording runtime settings',
+    component: SettingsView
   }
 ];
 

@@ -432,6 +432,7 @@
             node={blueprint}
             selectedId={selectedId}
             sessionId={sessionId}
+            sessionKind={BLUEPRINT_KIND}
             mode="recording"
             editMode={editMode}
             viewScale={editorViewScale}
@@ -605,6 +606,7 @@
         node={blueprint}
         selectedId={selectedId}
         sessionId={sessionId}
+        sessionKind={BLUEPRINT_KIND}
         mode="recording"
         editMode={editMode}
         viewScale={1}

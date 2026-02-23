@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -13,6 +14,9 @@ from pydantic import BaseModel, Field
 from interfaces_backend.services.recorder_bridge import get_recorder_bridge
 from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
 from interfaces_backend.services.recording_session import get_recording_session_manager
+from interfaces_backend.services.session_control_events import (
+    publish_session_control_event_safely,
+)
 from interfaces_backend.services.session_manager import require_user_id
 from interfaces_backend.services.startup_operations import get_startup_operations_service
 from interfaces_backend.models.startup import StartupOperationAcceptedResponse
@@ -23,6 +27,28 @@ from percus_ai.storage.paths import get_datasets_dir
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
+
+
+async def _emit_recording_control_event(
+    *,
+    action: str,
+    phase: str,
+    session_id: str | None = None,
+    operation_id: str | None = None,
+    success: bool | None = None,
+    message: str | None = None,
+    details: dict[str, object] | None = None,
+) -> None:
+    await publish_session_control_event_safely(
+        session_kind="recording",
+        action=action,
+        phase=phase,
+        session_id=session_id,
+        operation_id=operation_id,
+        success=success,
+        message=message,
+        details=details,
+    )
 
 
 # -- Request / Response models ------------------------------------------------
@@ -60,6 +86,13 @@ class RecordingSessionActionResponse(BaseModel):
 class RecordingSessionStatusResponse(BaseModel):
     dataset_id: Optional[str] = None
     status: Dict[str, Any]
+
+
+class RecordingSessionUpdateRequest(BaseModel):
+    task: Optional[str] = None
+    episode_time_s: Optional[float] = Field(None, gt=0)
+    reset_time_s: Optional[float] = Field(None, ge=0)
+    num_episodes: Optional[int] = Field(None, ge=1)
 
 
 class RecordingUploadStatusResponse(BaseModel):
@@ -313,6 +346,18 @@ async def create_session(request: RecordingSessionCreateRequest):
         kind="recording_create",
     )
     asyncio.create_task(_run_recording_create_operation(operation.operation_id, request))
+    await _emit_recording_control_event(
+        action="session_create",
+        phase="accepted",
+        session_id=request.continue_from_dataset_id or "global",
+        operation_id=operation.operation_id,
+        success=True,
+        message="Recording session create operation accepted.",
+        details={
+            "dataset_name": request.dataset_name,
+            "continue_from_dataset_id": request.continue_from_dataset_id,
+        },
+    )
     return operation
 
 
@@ -329,12 +374,21 @@ async def start_session(request: RecordingSessionStartRequest):
         resumed = True
 
     state = await mgr.start(request.dataset_id)
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message="Recording session resumed" if resumed else "Recording session started",
         dataset_id=state.id,
         status=state.extras.get("recorder_result"),
     )
+    await _emit_recording_control_event(
+        action="session_start",
+        phase="completed",
+        session_id=state.id,
+        success=True,
+        message=response.message,
+        details={"resumed": resumed},
+    )
+    return response
 
 
 @router.post("/session/stop", response_model=RecordingSessionActionResponse)
@@ -350,23 +404,41 @@ async def stop_session(request: RecordingSessionStopRequest):
 
     if dataset_id:
         state = await mgr.stop(dataset_id, save_current=request.save_current)
-        return RecordingSessionActionResponse(
+        response = RecordingSessionActionResponse(
             success=True,
             message="Recording session stopped",
             dataset_id=state.id,
             status=state.extras.get("recorder_result"),
         )
+        await _emit_recording_control_event(
+            action="session_stop",
+            phase="completed",
+            session_id=state.id,
+            success=True,
+            message=response.message,
+            details={"save_current": request.save_current},
+        )
+        return response
 
     # No tracked session — stop recorder directly (best-effort)
     recorder = get_recorder_bridge()
     result = recorder.stop(save_current=request.save_current)
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder stop failed")
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message="Recording session stopped",
         status=result,
     )
+    await _emit_recording_control_event(
+        action="session_stop",
+        phase="completed",
+        session_id="global",
+        success=True,
+        message=response.message,
+        details={"save_current": request.save_current, "mode": "recorder_fallback"},
+    )
+    return response
 
 
 @router.post("/session/pause", response_model=RecordingSessionActionResponse)
@@ -376,7 +448,16 @@ async def pause_session():
     result = recorder.pause()
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder pause failed")
-    return RecordingSessionActionResponse(success=True, message="Recording paused", status=result)
+    dataset_id = str(result.get("dataset_id") or "").strip() or "global"
+    response = RecordingSessionActionResponse(success=True, message="Recording paused", status=result)
+    await _emit_recording_control_event(
+        action="session_pause",
+        phase="completed",
+        session_id=dataset_id,
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.post("/session/resume", response_model=RecordingSessionActionResponse)
@@ -386,7 +467,76 @@ async def resume_session():
     result = recorder.resume()
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder resume failed")
-    return RecordingSessionActionResponse(success=True, message="Recording resumed", status=result)
+    dataset_id = str(result.get("dataset_id") or "").strip() or "global"
+    response = RecordingSessionActionResponse(success=True, message="Recording resumed", status=result)
+    await _emit_recording_control_event(
+        action="session_resume",
+        phase="completed",
+        session_id=dataset_id,
+        success=True,
+        message=response.message,
+    )
+    return response
+
+
+@router.post("/session/update", response_model=RecordingSessionActionResponse)
+async def update_session(request: RecordingSessionUpdateRequest):
+    require_user_id()
+    payload: dict[str, Any] = {}
+    if request.task is not None:
+        task = request.task.strip()
+        if not task:
+            raise HTTPException(status_code=400, detail="task must not be empty")
+        payload["task"] = task
+    if request.episode_time_s is not None:
+        payload["episode_time_s"] = float(request.episode_time_s)
+    if request.reset_time_s is not None:
+        payload["reset_time_s"] = float(request.reset_time_s)
+    if request.num_episodes is not None:
+        payload["num_episodes"] = int(request.num_episodes)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No update fields provided")
+
+    recorder = get_recorder_bridge()
+    result = recorder.update(payload)
+    if not result.get("success", False):
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error") or result.get("message") or "Recorder update failed",
+        )
+
+    dataset_id = str(result.get("dataset_id") or "").strip() or None
+    if dataset_id:
+        db_updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+        if "task" in payload:
+            db_updates["task_detail"] = payload["task"]
+        if "episode_time_s" in payload:
+            db_updates["episode_time_s"] = payload["episode_time_s"]
+        if "reset_time_s" in payload:
+            db_updates["reset_time_s"] = payload["reset_time_s"]
+        if "num_episodes" in payload:
+            db_updates["target_total_episodes"] = payload["num_episodes"]
+        try:
+            client = await get_supabase_async_client()
+            await client.table("datasets").update(db_updates).eq("id", dataset_id).execute()
+        except Exception as exc:
+            logger.warning("Failed to persist recording settings update: %s", exc)
+
+    response = RecordingSessionActionResponse(
+        success=True,
+        message=str(result.get("message") or "Recording session updated"),
+        dataset_id=dataset_id,
+        status=result.get("status") if isinstance(result.get("status"), dict) else result,
+    )
+    await _emit_recording_control_event(
+        action="session_update",
+        phase="completed",
+        session_id=dataset_id or "global",
+        success=True,
+        message=response.message,
+        details=payload,
+    )
+    return response
 
 
 @router.post("/episode/redo", response_model=RecordingSessionActionResponse)
@@ -396,12 +546,20 @@ async def redo_episode():
     result = recorder.redo_episode()
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder redo failed")
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message="Episode redo requested",
         dataset_id=result.get("dataset_id"),
         status=result,
     )
+    await _emit_recording_control_event(
+        action="episode_redo",
+        phase="completed",
+        session_id=str(result.get("dataset_id") or "").strip() or "global",
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.post("/episode/redo-previous", response_model=RecordingSessionActionResponse)
@@ -434,12 +592,20 @@ async def redo_previous_episode():
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder redo failed")
 
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message="Previous episode will be re-recorded",
         dataset_id=dataset_id,
         status=result,
     )
+    await _emit_recording_control_event(
+        action="episode_redo_previous",
+        phase="completed",
+        session_id=str(dataset_id or "").strip() or "global",
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.post("/episode/cancel", response_model=RecordingSessionActionResponse)
@@ -449,7 +615,16 @@ async def cancel_episode():
     result = recorder.cancel_episode()
     if not result.get("success", False):
         raise HTTPException(status_code=500, detail=result.get("error") or "Recorder episode cancel failed")
-    return RecordingSessionActionResponse(success=True, message="Episode cancelled", status=result)
+    dataset_id = str(result.get("dataset_id") or "").strip() or "global"
+    response = RecordingSessionActionResponse(success=True, message="Episode cancelled", status=result)
+    await _emit_recording_control_event(
+        action="episode_cancel",
+        phase="completed",
+        session_id=dataset_id,
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.post(
@@ -466,12 +641,20 @@ async def next_episode():
             status_code=500,
             detail=result.get("error") or "Recorder next episode failed",
         )
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message=str(result.get("message") or "Episode transition accepted"),
         dataset_id=result.get("dataset_id"),
         status=result,
     )
+    await _emit_recording_control_event(
+        action="episode_next",
+        phase="completed",
+        session_id=str(result.get("dataset_id") or "").strip() or "global",
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.post("/session/cancel", response_model=RecordingSessionActionResponse)
@@ -508,12 +691,20 @@ async def cancel_session(dataset_id: Optional[str] = None):
         if not result.get("success", False):
             raise HTTPException(status_code=500, detail=result.get("error") or "Recorder cancel failed")
 
-    return RecordingSessionActionResponse(
+    response = RecordingSessionActionResponse(
         success=True,
         message="Recording cancelled",
         dataset_id=dataset_id,
         status=result,
     )
+    await _emit_recording_control_event(
+        action="session_cancel",
+        phase="completed",
+        session_id=(dataset_id or "").strip() or "global",
+        success=True,
+        message=response.message,
+    )
+    return response
 
 
 @router.get("/sessions/{session_id}/status", response_model=RecordingSessionStatusResponse)

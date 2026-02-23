@@ -7,6 +7,7 @@ recording.py and inference.py.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -25,6 +26,10 @@ from percus_ai.observability import ArmId, CommOverheadReporter, PointId, resolv
 _RECORDER_URL = os.environ.get("LEROBOT_RECORDER_URL", "http://127.0.0.1:8082")
 _COMM_REPORTER = CommOverheadReporter("backend")
 _ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_UPDATE_TIMEOUT_S = 20.0
+_UPDATE_MAX_ATTEMPTS = 3
+_UPDATE_RETRY_BASE_DELAY_S = 0.4
+logger = logging.getLogger(__name__)
 
 
 class RecorderBridge:
@@ -46,6 +51,15 @@ class RecorderBridge:
 
     def resume(self) -> dict:
         return self._call("/api/session/resume", {})
+
+    def update(self, payload: dict) -> dict:
+        return self._call_with_retry(
+            "/api/session/update",
+            payload,
+            timeout_s=_UPDATE_TIMEOUT_S,
+            max_attempts=_UPDATE_MAX_ATTEMPTS,
+            retry_base_delay_s=_UPDATE_RETRY_BASE_DELAY_S,
+        )
 
     def status(self) -> dict:
         return self._call("/api/session/status")
@@ -160,7 +174,37 @@ class RecorderBridge:
 
     # -- internal HTTP --------------------------------------------------------
 
-    def _call(self, path: str, payload: dict | None = None) -> dict:
+    def _call_with_retry(
+        self,
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout_s: float = 10.0,
+        max_attempts: int = 1,
+        retry_base_delay_s: float = 0.4,
+    ) -> dict:
+        attempts = max(int(max_attempts), 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._call(path, payload, timeout_s=timeout_s)
+            except HTTPException as exc:
+                detail = str(exc.detail or "").lower()
+                is_timeout = exc.status_code == 503 and "timed out" in detail
+                if not is_timeout or attempt >= attempts:
+                    raise
+                sleep_s = max(float(retry_base_delay_s), 0.05) * attempt
+                logger.warning(
+                    "Recorder request timed out. retrying path=%s attempt=%s/%s sleep=%.2fs",
+                    path,
+                    attempt + 1,
+                    attempts,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
+
+        raise HTTPException(status_code=503, detail=f"Recorder request timed out: {path}")
+
+    def _call(self, path: str, payload: dict | None = None, *, timeout_s: float = 10.0) -> dict:
         url = f"{self._base_url}{path}"
         data = None
         headers: dict[str, str] = {}
@@ -188,7 +232,7 @@ class RecorderBridge:
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=max(float(timeout_s), 0.1)) as resp:
                 body_bytes = resp.read()
                 timer.success(
                     extra_tags={"status_code": resp.status, "response_bytes": len(body_bytes)}

@@ -10,6 +10,7 @@
     node,
     selectedId = '',
     sessionId = '',
+    sessionKind = '',
     mode = 'recording',
     editMode = true,
     viewScale = 1,
@@ -20,6 +21,7 @@
     node: BlueprintNode;
     selectedId?: string;
     sessionId?: string;
+    sessionKind?: '' | 'recording' | 'inference' | 'teleop';
     mode?: 'recording' | 'operate';
     editMode?: boolean;
     viewScale?: number;
@@ -53,6 +55,13 @@
     if (viewType === 'controls' || viewType === 'progress' || viewType === 'timeline') {
       baseProps.sessionId = sessionId;
     }
+    if (viewType === 'controls') {
+      baseProps.sessionKind = sessionKind;
+    }
+    if (viewType === 'settings') {
+      baseProps.sessionId = sessionId;
+      baseProps.sessionKind = sessionKind;
+    }
     return baseProps;
   };
 
@@ -82,6 +91,7 @@
             node={node.children[0]}
             {selectedId}
             {sessionId}
+            {sessionKind}
             {mode}
             {editMode}
             {viewScale}
@@ -97,6 +107,7 @@
             node={node.children[1]}
             {selectedId}
             {sessionId}
+            {sessionKind}
             {mode}
             {editMode}
             {viewScale}
@@ -115,6 +126,7 @@
             node={tab.child}
             {selectedId}
             {sessionId}
+            {sessionKind}
             {mode}
             {editMode}
             {viewScale}

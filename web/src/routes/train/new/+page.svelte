@@ -574,7 +574,7 @@
           </li>
           <li>
             <span class="font-semibold text-slate-700">チェックポイント保存:</span>
-            <br />有効にすると途中状態を保存します。再開やEarly Stopping運用には有効化が推奨です。
+            <br />有効にすると途中状態を保存します。最終チェックポイントはこの設定に関係なく常に保存されます。
           </li>
         </ul>
       </div>

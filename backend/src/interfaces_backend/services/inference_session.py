@@ -11,6 +11,9 @@ from fastapi import HTTPException
 
 from interfaces_backend.models.inference import InferenceModelSyncStatus
 from interfaces_backend.services.dataset_lifecycle import DatasetLifecycle, get_dataset_lifecycle
+from interfaces_backend.services.inference_recording_controller import (
+    InferenceRecordingController,
+)
 from interfaces_backend.services.inference_runtime import (
     InferenceRuntimeManager,
     get_inference_runtime_manager,
@@ -25,11 +28,7 @@ from interfaces_backend.services.vlabor_profiles import (
     build_inference_bridge_config,
     build_inference_camera_aliases,
     build_inference_joint_names,
-    extract_arm_namespaces,
-    extract_recorder_topic_suffixes,
-    save_session_profile_binding,
 )
-from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
 _ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
@@ -48,6 +47,11 @@ class InferenceSessionManager(BaseSessionManager):
         self._runtime = runtime or get_inference_runtime_manager()
         self._recorder = recorder or get_recorder_bridge()
         self._dataset = dataset or get_dataset_lifecycle()
+        self._recording_controller = InferenceRecordingController(
+            recorder=self._recorder,
+            dataset=self._dataset,
+            runtime=self._runtime,
+        )
 
     @staticmethod
     def _validate_inference_bridge_resolution(
@@ -234,7 +238,27 @@ class InferenceSessionManager(BaseSessionManager):
             progress_percent=96.0,
             message="推論セッション情報を保存しています...",
         )
-        self._start_simultaneous_recording(state, kwargs.get("task"))
+        policy_options = kwargs.get("policy_options")
+        denoising_steps = None
+        if isinstance(policy_options, dict):
+            for options in policy_options.values():
+                if isinstance(options, dict) and options.get("denoising_steps") is not None:
+                    try:
+                        denoising_steps = int(options.get("denoising_steps"))
+                    except (TypeError, ValueError):
+                        denoising_steps = None
+                    break
+        try:
+            await self._recording_controller.start(
+                session=state,
+                task=kwargs.get("task"),
+                denoising_steps=denoising_steps,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to start simultaneous recording (non-critical)",
+                exc_info=True,
+            )
 
         state.status = "running"
         return state
@@ -321,86 +345,65 @@ class InferenceSessionManager(BaseSessionManager):
                         exc_info=True,
                     )
             await self._dataset.auto_upload(dataset_id)
-
+        self._recording_controller.unregister(session_id)
         return await super().stop(session_id, **kwargs)
 
-    def _start_simultaneous_recording(
-        self, state: SessionState, task: str | None
-    ) -> None:
-        """Start recording during inference (best-effort)."""
-        try:
-            dataset_id = generate_dataset_id()
-            cameras = self._recorder.build_cameras(state.profile.snapshot)
-            arm_namespaces = extract_arm_namespaces(state.profile.snapshot)
-            topic_suffixes = extract_recorder_topic_suffixes(
-                state.profile.snapshot,
-                arm_namespaces=arm_namespaces,
-            )
-            if not cameras:
-                logger.warning("Skip inference recording: no recorder cameras resolved")
-                return
-            if not arm_namespaces:
-                logger.warning("Skip inference recording: no recorder arm namespaces resolved")
-                return
-            if "state_topic_suffix" not in topic_suffixes:
-                logger.warning("Skip inference recording: state_topic_suffix unresolved")
-                return
-            if "action_topic_suffix" not in topic_suffixes:
-                logger.warning("Skip inference recording: action_topic_suffix unresolved")
-                return
+    def get_active_recording_status(self) -> dict:
+        active = self.any_active()
+        if active is None:
+            return self._recording_controller.get_status("")
+        return self._recording_controller.get_status(active.id)
 
-            payload: dict[str, Any] = {
-                "dataset_id": dataset_id,
-                "dataset_name": f"eval-{state.id[:8]}",
-                "task": task or "",
-                "num_episodes": 1,
-                "episode_time_s": 86400,
-                "reset_time_s": 0,
-                "cameras": cameras,
-                "metadata": {
-                    "profile_name": state.profile.name,
-                    "profile_snapshot": state.profile.snapshot,
-                    "session_kind": "inference",
-                    "inference_session_id": state.id,
-                },
-                "arm_namespaces": arm_namespaces,
-            }
-            payload.update(topic_suffixes)
-
-            result = self._recorder.start(payload)
-            if result.get("success"):
-                state.extras["dataset_id"] = dataset_id
-                logger.info("Started inference recording: dataset_id=%s", dataset_id)
-                try:
-                    import asyncio
-
-                    loop = asyncio.get_event_loop()
-                    loop.create_task(self._persist_recording_metadata(state, dataset_id, task))
-                except Exception:
-                    logger.warning(
-                        "Failed to persist inference dataset metadata", exc_info=True
-                    )
-            else:
-                logger.warning("Recorder start returned failure (non-critical): %s", result)
-        except Exception:
-            logger.warning("Failed to start simultaneous recording (non-critical)", exc_info=True)
-
-    async def _persist_recording_metadata(
-        self, state: SessionState, dataset_id: str, task: str | None
-    ) -> None:
-        """Persist dataset record and profile binding for the recording."""
-        await self._dataset.upsert_record(
-            dataset_id=dataset_id,
-            dataset_name=f"eval-{state.id[:8]}",
-            task=task or "",
-            profile_snapshot=state.profile.snapshot,
-            status="recording",
-            dataset_type="eval",
+    async def apply_active_settings(
+        self,
+        *,
+        task: str | None,
+        episode_time_s: float | None,
+        reset_time_s: float | None,
+        denoising_steps: int | None,
+    ) -> dict:
+        active = self.any_active()
+        if active is None:
+            raise HTTPException(status_code=404, detail="Active inference session not found")
+        worker_session_id = str(active.extras.get("worker_session_id") or "").strip()
+        if not worker_session_id:
+            raise HTTPException(status_code=400, detail="Active worker session not found")
+        return await self._recording_controller.apply_settings(
+            inference_session_id=active.id,
+            worker_session_id=worker_session_id,
+            task=task,
+            episode_time_s=episode_time_s,
+            reset_time_s=reset_time_s,
+            denoising_steps=denoising_steps,
         )
-        await save_session_profile_binding(
-            session_kind="recording",
-            session_id=dataset_id,
-            profile=state.profile,
+
+    async def decide_active_recording_continue(
+        self, *, continue_recording: bool
+    ) -> dict:
+        active = self.any_active()
+        if active is None:
+            raise HTTPException(status_code=404, detail="Active inference session not found")
+        return await self._recording_controller.decide_continue(
+            inference_session_id=active.id,
+            continue_recording=continue_recording,
+        )
+
+    async def pause_active_recording_and_inference(self) -> dict:
+        active = self.any_active()
+        if active is None:
+            raise HTTPException(status_code=404, detail="Active inference session not found")
+        return await self._recording_controller.set_manual_pause(
+            inference_session_id=active.id,
+            paused=True,
+        )
+
+    async def resume_active_recording_and_inference(self) -> dict:
+        active = self.any_active()
+        if active is None:
+            raise HTTPException(status_code=404, detail="Active inference session not found")
+        return await self._recording_controller.set_manual_pause(
+            inference_session_id=active.id,
+            paused=False,
         )
 
 

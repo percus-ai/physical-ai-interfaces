@@ -45,6 +45,15 @@ class InferenceRunnerStatus(BaseModel):
     task: Optional[str] = None
     queue_length: int = 0
     last_error: Optional[str] = None
+    recording_dataset_id: Optional[str] = None
+    recording_active: bool = False
+    awaiting_continue_confirmation: bool = False
+    batch_size: int = 20
+    episode_count: int = 0
+    num_episodes: int = 0
+    episode_time_s: float = 0.0
+    reset_time_s: float = 0.0
+    denoising_steps: Optional[int] = None
 
 
 class InferenceModelSyncStatus(BaseModel):
@@ -107,6 +116,41 @@ class InferenceRunnerStopResponse(BaseModel):
     success: bool
     session_id: Optional[str] = None
     message: str = ""
+
+
+class InferenceRunnerSettingsApplyRequest(BaseModel):
+    task: Optional[str] = None
+    episode_time_s: Optional[float] = Field(None, gt=0)
+    reset_time_s: Optional[float] = Field(None, ge=0)
+    denoising_steps: Optional[int] = Field(None, ge=1)
+
+
+class InferenceRunnerSettingsApplyResponse(BaseModel):
+    success: bool
+    message: str = ""
+    task: Optional[str] = None
+    episode_time_s: Optional[float] = None
+    reset_time_s: Optional[float] = None
+    denoising_steps: Optional[int] = None
+
+
+class InferenceRecordingDecisionRequest(BaseModel):
+    continue_recording: bool
+
+
+class InferenceRecordingDecisionResponse(BaseModel):
+    success: bool
+    message: str = ""
+    recording_dataset_id: Optional[str] = None
+    awaiting_continue_confirmation: bool = False
+
+
+class InferenceRunnerControlResponse(BaseModel):
+    success: bool
+    message: str = ""
+    paused: bool = False
+    teleop_enabled: bool = False
+    recorder_state: Optional[str] = None
 
 
 class InferenceSetTaskRequest(BaseModel):

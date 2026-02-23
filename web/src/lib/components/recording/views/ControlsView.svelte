@@ -12,11 +12,13 @@
   let {
     sessionId = '',
     title = 'Controls',
-    mode = 'recording'
+    mode = 'recording',
+    sessionKind = ''
   }: {
     sessionId?: string;
     title?: string;
     mode?: 'recording' | 'operate';
+    sessionKind?: '' | 'recording' | 'inference' | 'teleop';
   } = $props();
 
   let recorderStatus = $state<RecorderStatus | null>(null);
@@ -66,13 +68,27 @@
   };
 
   const handlePause = async () =>
-    runAction('中断', () => api.recording.pauseSession(), {
-      successToast: '一時停止リクエストを受け付けました。'
-    });
+    runAction(
+      '中断',
+      () => (sessionKind === 'inference' ? api.inference.pauseRunner() : api.recording.pauseSession()),
+      {
+        successToast:
+          sessionKind === 'inference'
+            ? '推論と録画の一時停止リクエストを受け付けました。'
+            : '一時停止リクエストを受け付けました。'
+      }
+    );
   const handleResume = async () =>
-    runAction('再開', () => api.recording.resumeSession(), {
-      successToast: '再開リクエストを受け付けました。'
-    });
+    runAction(
+      '再開',
+      () => (sessionKind === 'inference' ? api.inference.resumeRunner() : api.recording.resumeSession()),
+      {
+        successToast:
+          sessionKind === 'inference'
+            ? '推論と録画の再開リクエストを受け付けました。'
+            : '再開リクエストを受け付けました。'
+      }
+    );
   const openConfirm = (options: {
     title: string;
     description: string;
@@ -435,7 +451,7 @@
           disabled={(!canResume && !canPause) || Boolean(actionBusy)}
         >
           {#if canResume}
-            {actionBusy === '再開' ? '再生中...' : '再生'}
+            {actionBusy === '再開' ? '再開中...' : '再開'}
           {:else}
             {actionBusy === '中断' ? '一時停止中...' : '一時停止'}
           {/if}

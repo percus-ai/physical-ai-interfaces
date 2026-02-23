@@ -18,6 +18,11 @@ from interfaces_backend.services.recorder_status_stream import (
     RECORDING_STATUS_TOPIC,
     get_recorder_status_stream,
 )
+from interfaces_backend.services.session_control_events import (
+    SESSION_CONTROL_TOPIC,
+    normalize_session_kind,
+    session_control_channel_key,
+)
 from interfaces_backend.services.startup_operations import (
     STARTUP_OPERATION_TOPIC,
     get_startup_operations_service,
@@ -169,6 +174,30 @@ async def stream_startup_operation(request: Request, operation_id: str):
     bus = get_realtime_event_bus()
     subscription = bus.subscribe(STARTUP_OPERATION_TOPIC, operation_id)
     await bus.publish(STARTUP_OPERATION_TOPIC, operation_id, snapshot.model_dump(mode="json"))
+    return sse_queue_response(
+        request,
+        subscription.queue,
+        on_close=subscription.close,
+    )
+
+
+@router.get("/sessions/{session_kind}/{session_id}/events")
+async def stream_session_control_events(request: Request, session_kind: str, session_id: str):
+    _require_user_id()
+    try:
+        normalized_kind = normalize_session_kind(session_kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    normalized_session_id = session_id.strip() or "global"
+
+    bus = get_realtime_event_bus()
+    subscription = bus.subscribe(
+        SESSION_CONTROL_TOPIC,
+        session_control_channel_key(
+            session_kind=normalized_kind,
+            session_id=normalized_session_id,
+        ),
+    )
     return sse_queue_response(
         request,
         subscription.queue,

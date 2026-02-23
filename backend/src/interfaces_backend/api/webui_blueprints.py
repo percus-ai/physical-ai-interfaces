@@ -78,8 +78,22 @@ def _default_blueprint() -> dict[str, Any]:
         "viewType": "controls",
         "config": {},
     }
+    progress_view = {
+        "id": _new_node_id(),
+        "type": "view",
+        "viewType": "progress",
+        "config": {},
+    }
+    settings_view = {
+        "id": _new_node_id(),
+        "type": "view",
+        "viewType": "settings",
+        "config": {},
+    }
     status_tab_id = _new_node_id()
     controls_tab_id = _new_node_id()
+    progress_tab_id = _new_node_id()
+    settings_tab_id = _new_node_id()
     tabs = {
         "id": _new_node_id(),
         "type": "tabs",
@@ -87,6 +101,8 @@ def _default_blueprint() -> dict[str, Any]:
         "tabs": [
             {"id": status_tab_id, "title": "Status", "child": status_view},
             {"id": controls_tab_id, "title": "Controls", "child": controls_view},
+            {"id": progress_tab_id, "title": "Progress", "child": progress_view},
+            {"id": settings_tab_id, "title": "Settings", "child": settings_view},
         ],
     }
     upper = {

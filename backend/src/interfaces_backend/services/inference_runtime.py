@@ -98,6 +98,7 @@ class InferenceRuntimeManager:
         self._model_id: Optional[str] = None
         self._model_path: Optional[Path] = None
         self._policy_type: Optional[str] = None
+        self._denoising_steps: Optional[int] = None
 
         self._runner_state = "idle"
         self._queue_length = 0
@@ -116,7 +117,7 @@ class InferenceRuntimeManager:
     # --------------------------------------------------------------------- #
     def is_active(self) -> bool:
         with self._lock:
-            return self._runner_state in {"starting", "handshaking", "ready", "running"}
+            return self._runner_state in {"starting", "handshaking", "ready", "running", "paused"}
 
     def list_models(self) -> list[InferenceModelInfo]:
         with self._lock:
@@ -177,13 +178,14 @@ class InferenceRuntimeManager:
             pid = proc.pid if proc else None
             proc_alive = proc is not None and proc.poll() is None
 
-            runner_active = self._runner_state in {"starting", "handshaking", "ready", "running"}
+            runner_active = self._runner_state in {"starting", "handshaking", "ready", "running", "paused"}
             runner = InferenceRunnerStatus(
                 active=runner_active,
                 session_id=self._session_id,
                 task=self._task,
                 queue_length=self._queue_length,
                 last_error=self._last_error,
+                denoising_steps=self._denoising_steps,
             )
 
             if proc_alive and runner_active:
@@ -410,6 +412,7 @@ class InferenceRuntimeManager:
             self._model_id = model_id
             self._model_path = model_runtime_dir
             self._policy_type = policy_type
+            self._denoising_steps = denoising_steps_value
             self._ctrl_endpoint = ctrl_endpoint
             self._event_endpoint = event_endpoint
             self._ipc_dir = ipc_dir
@@ -518,6 +521,60 @@ class InferenceRuntimeManager:
         applied_from_step = int(response.get("applied_from_step", 0))
         with self._lock:
             self._task = task
+        return applied_from_step
+
+    def set_policy_options(
+        self,
+        session_id: str,
+        *,
+        denoising_steps: Optional[int] = None,
+    ) -> int:
+        with self._lock:
+            if not self._session_id or session_id != self._session_id:
+                raise RuntimeError("Active session not found")
+            if not self._worker_proc or self._worker_proc.poll() is not None:
+                raise RuntimeError("Worker process is not running")
+            policy_type = str(self._policy_type or "").strip().lower()
+        if policy_type not in {"pi0", "pi05"}:
+            raise RuntimeError("denoising_steps is only supported for pi0/pi05")
+        if denoising_steps is not None:
+            if not isinstance(denoising_steps, int):
+                raise RuntimeError("denoising_steps must be an integer")
+            if denoising_steps < 1:
+                raise RuntimeError("denoising_steps must be >= 1")
+
+        payload = {
+            "policy_options": {
+                "denoising_steps": denoising_steps,
+            }
+        }
+        response = self._send_ctrl_command(
+            "set_policy_options",
+            payload,
+            timeout_ms=1000,
+        )
+        applied_from_step = int(response.get("applied_from_step", 0))
+        with self._lock:
+            self._denoising_steps = denoising_steps
+        return applied_from_step
+
+    def set_paused(self, session_id: str, *, paused: bool) -> int:
+        with self._lock:
+            if not self._session_id or session_id != self._session_id:
+                raise RuntimeError("Active session not found")
+            if not self._worker_proc or self._worker_proc.poll() is not None:
+                raise RuntimeError("Worker process is not running")
+            current_state = str(self._runner_state or "").strip().lower()
+        if current_state not in {"running", "paused", "ready"}:
+            raise RuntimeError(f"Cannot set paused while runner state is {current_state or 'unknown'}")
+        response = self._send_ctrl_command(
+            "set_paused",
+            {"paused": bool(paused)},
+            timeout_ms=1000,
+        )
+        applied_from_step = int(response.get("applied_from_step", 0))
+        with self._lock:
+            self._runner_state = "paused" if paused else "running"
         return applied_from_step
 
     def shutdown(self) -> None:
@@ -780,6 +837,7 @@ class InferenceRuntimeManager:
             self._model_id = None
             self._model_path = None
             self._policy_type = None
+            self._denoising_steps = None
             self._ctrl_endpoint = None
             self._event_endpoint = None
             self._ipc_dir = None

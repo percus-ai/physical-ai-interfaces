@@ -114,6 +114,41 @@ export type InferenceRunnerStartPayload = {
   };
 };
 
+export type InferenceRunnerSettingsApplyPayload = {
+  task?: string;
+  episode_time_s?: number;
+  reset_time_s?: number;
+  denoising_steps?: number;
+};
+
+export type InferenceRunnerSettingsApplyResponse = {
+  success: boolean;
+  message?: string;
+  task?: string;
+  episode_time_s?: number;
+  reset_time_s?: number;
+  denoising_steps?: number | null;
+};
+
+export type InferenceRecordingDecisionPayload = {
+  continue_recording: boolean;
+};
+
+export type InferenceRecordingDecisionResponse = {
+  success: boolean;
+  message?: string;
+  recording_dataset_id?: string | null;
+  awaiting_continue_confirmation?: boolean;
+};
+
+export type InferenceRunnerControlResponse = {
+  success: boolean;
+  message?: string;
+  paused?: boolean;
+  teleop_enabled?: boolean;
+  recorder_state?: string | null;
+};
+
 export type DatasetPlaybackCameraInfo = {
   key: string;
   label: string;
@@ -470,6 +505,16 @@ export const api = {
       fetchApi('/api/recording/session/resume', {
         method: 'POST'
       }),
+    updateSession: (payload: {
+      task?: string;
+      episode_time_s?: number;
+      reset_time_s?: number;
+      num_episodes?: number;
+    }) =>
+      fetchApi('/api/recording/session/update', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
     redoEpisode: () =>
       fetchApi('/api/recording/episode/redo', {
         method: 'POST'
@@ -765,6 +810,24 @@ export const api = {
       }),
     runnerStop: (payload: Record<string, unknown>) =>
       fetchApi('/api/inference/runner/stop', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    pauseRunner: () =>
+      fetchApi<InferenceRunnerControlResponse>('/api/inference/runner/pause', {
+        method: 'POST'
+      }),
+    resumeRunner: () =>
+      fetchApi<InferenceRunnerControlResponse>('/api/inference/runner/resume', {
+        method: 'POST'
+      }),
+    applySettings: (payload: InferenceRunnerSettingsApplyPayload) =>
+      fetchApi<InferenceRunnerSettingsApplyResponse>('/api/inference/runner/settings/apply', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    decideRecording: (payload: InferenceRecordingDecisionPayload) =>
+      fetchApi<InferenceRecordingDecisionResponse>('/api/inference/runner/recording/decision', {
         method: 'POST',
         body: JSON.stringify(payload)
       })

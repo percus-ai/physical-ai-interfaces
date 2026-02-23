@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { page } from '$app/state';
-  import { Button, Tabs } from 'bits-ui';
+  import { AlertDialog, Button, Tabs } from 'bits-ui';
   import toast from 'svelte-french-toast';
   import { createQuery } from '@tanstack/svelte-query';
   import { api } from '$lib/api/client';
@@ -50,6 +50,13 @@
     session_id?: string;
     task?: string;
     last_error?: string;
+    recording_dataset_id?: string | null;
+    recording_active?: boolean;
+    awaiting_continue_confirmation?: boolean;
+    batch_size?: number;
+    episode_count?: number;
+    num_episodes?: number;
+    denoising_steps?: number | null;
   };
 
   type InferenceRunnerStatusResponse = {
@@ -114,6 +121,9 @@
   let savedBlueprints = $state<WebuiBlueprintSummary[]>([]);
   let blueprintBusy = $state(false);
   let blueprintActionPending = $state(false);
+  let continueModalOpen = $state(false);
+  let continueDecisionPending = $state(false);
+  let continueDecisionError = $state('');
 
   const notifyBlueprintError = (message: string) => {
     if (!message || typeof window === 'undefined') return;
@@ -254,6 +264,20 @@
   const blueprintKind = $derived(
     resolvedKind === 'inference' ? 'inference' : resolvedKind === 'teleop' ? 'teleop' : ''
   );
+  const inferenceRecordingSessionId = $derived(
+    typeof runnerStatus.recording_dataset_id === 'string' ? runnerStatus.recording_dataset_id : ''
+  );
+  const layoutSessionId = $derived(
+    resolvedKind === 'inference' ? inferenceRecordingSessionId || '' : sessionId
+  );
+  const layoutMode = $derived(resolvedKind === 'inference' ? 'recording' : 'operate');
+  const continueBatchSize = $derived.by(() => {
+    const raw = runnerStatus.batch_size;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      return Math.floor(raw);
+    }
+    return 20;
+  });
 
   $effect(() => {
     if (
@@ -442,6 +466,34 @@
     }
     return '';
   });
+
+  const handleContinueDecision = async (continueRecording: boolean) => {
+    if (continueDecisionPending) return;
+    continueDecisionPending = true;
+    continueDecisionError = '';
+    try {
+      await api.inference.decideRecording({ continue_recording: continueRecording });
+      await $inferenceRunnerStatusQuery.refetch?.();
+      if (!continueRecording) {
+        continueModalOpen = false;
+        return;
+      }
+      continueModalOpen = false;
+    } catch (error) {
+      continueDecisionError =
+        error instanceof Error ? error.message : '継続判定の適用に失敗しました。';
+    } finally {
+      continueDecisionPending = false;
+    }
+  };
+
+  $effect(() => {
+    if (resolvedKind !== 'inference') {
+      continueModalOpen = false;
+      return;
+    }
+    continueModalOpen = Boolean(runnerStatus.awaiting_continue_confirmation);
+  });
 </script>
 
 <section class="card-strong p-6">
@@ -469,6 +521,51 @@
     </div>
   </div>
 </section>
+
+<AlertDialog.Root bind:open={continueModalOpen}>
+  <AlertDialog.Portal>
+    <AlertDialog.Overlay class="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[1px]" />
+    <AlertDialog.Content
+      class="fixed left-1/2 top-1/2 z-50 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
+    >
+      <AlertDialog.Title class="text-base font-semibold text-slate-900">
+        追加収録を開始しますか？
+      </AlertDialog.Title>
+      <AlertDialog.Description class="mt-2 text-sm text-slate-600">
+        {continueBatchSize} エピソードの収録が完了しました。同じデータセットに追加で
+        {continueBatchSize} エピソードを収録しますか？
+      </AlertDialog.Description>
+      {#if inferenceRecordingSessionId}
+        <p class="mt-2 text-[11px] text-slate-500">dataset: {inferenceRecordingSessionId}</p>
+      {/if}
+      {#if continueDecisionError}
+        <p class="mt-2 text-xs text-rose-600">{continueDecisionError}</p>
+      {/if}
+      <div class="mt-5 flex items-center justify-end gap-2">
+        <Button.Root
+          class="btn-ghost"
+          type="button"
+          disabled={continueDecisionPending}
+          onclick={() => {
+            void handleContinueDecision(false);
+          }}
+        >
+          {continueDecisionPending ? '処理中...' : 'NO（終了）'}
+        </Button.Root>
+        <Button.Root
+          class="btn-primary"
+          type="button"
+          disabled={continueDecisionPending}
+          onclick={() => {
+            void handleContinueDecision(true);
+          }}
+        >
+          {continueDecisionPending ? '処理中...' : `YES（+${continueBatchSize}）`}
+        </Button.Root>
+      </div>
+    </AlertDialog.Content>
+  </AlertDialog.Portal>
+</AlertDialog.Root>
 
 <section class="grid gap-6">
   {#if editMode}
@@ -551,8 +648,9 @@
           <LayoutNode
             node={blueprint}
             selectedId={selectedId}
-            sessionId={sessionId}
-            mode="operate"
+            sessionId={layoutSessionId}
+            sessionKind={blueprintKind}
+            mode={layoutMode}
             editMode={editMode}
             viewScale={editorViewScale}
             onSelect={updateSelection}
@@ -724,8 +822,9 @@
       <LayoutNode
         node={blueprint}
         selectedId={selectedId}
-        sessionId={sessionId}
-        mode="operate"
+        sessionId={layoutSessionId}
+        sessionKind={blueprintKind}
+        mode={layoutMode}
         editMode={editMode}
         viewScale={1}
         onSelect={updateSelection}
