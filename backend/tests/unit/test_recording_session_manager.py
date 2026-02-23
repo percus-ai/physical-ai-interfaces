@@ -304,6 +304,28 @@ def test_create_raises_when_action_suffix_unresolved(monkeypatch):
         assert "action_topic_suffix unresolved" in str(exc.detail)
 
 
+def test_register_external_session_tracks_inference_recording():
+    recorder = _FakeRecorder()
+    dataset = _FakeDataset()
+    manager = RecordingSessionManager(recorder=recorder, dataset=dataset)
+
+    profile = SimpleNamespace(name="profile-a", snapshot={"raw": {}})
+    state = manager.register_external_session(
+        session_id="dataset-ext-1",
+        profile=profile,
+        status="running",
+        extras={"recording_started": True, "external_owner": "inference"},
+    )
+
+    assert state.id == "dataset-ext-1"
+    assert state.status == "running"
+    assert state.extras["external_owner"] == "inference"
+    assert manager.status("dataset-ext-1") is not None
+
+    manager.unregister_external_session("dataset-ext-1")
+    assert manager.status("dataset-ext-1") is None
+
+
 def test_create_raises_when_cameras_unresolved(monkeypatch):
     async def fake_resolve_profile(self, _profile):
         return SimpleNamespace(

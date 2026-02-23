@@ -149,6 +149,7 @@ def test_start_registers_inference_recording_state(monkeypatch) -> None:
     assert recorder.started_payloads[0]["dataset_id"] == "dataset-fixed"
     assert recorder.started_payloads[0]["num_episodes"] == 20
     assert dataset.upsert_calls[0]["target_total_episodes"] == 20
+    assert dashboard.teleop_calls == [False]
     status = controller.get_status("inf-1")
     assert status["recording_dataset_id"] == "dataset-fixed"
     assert status["recording_active"] is True
@@ -345,7 +346,7 @@ def test_manual_pause_is_cleared_when_recorder_progresses_after_redo(monkeypatch
     assert paused["teleop_enabled"] is False
     assert recorder.pause_calls == 1
     assert runtime.pause_calls[-1] == ("worker-1", True)
-    assert dashboard.teleop_calls == []
+    assert dashboard.teleop_calls == [False]
 
     state = controller._get_state_or_raise("inf-1")
     recorder._status = {"state": "resetting", "dataset_id": "dataset-fixed"}

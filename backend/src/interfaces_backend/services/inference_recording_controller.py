@@ -278,6 +278,9 @@ class InferenceRecordingController:
             topic_suffixes=topic_suffixes,
         )
 
+        await self._dashboard.set_teleop_enabled(enabled=False)
+        next_state.teleop_enabled = False
+
         result = self._recorder.start(self._build_start_payload(next_state))
         if not result.get("success", False):
             logger.warning("Recorder start returned failure (non-critical): %s", result)

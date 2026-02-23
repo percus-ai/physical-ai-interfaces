@@ -219,3 +219,43 @@ def test_start_session_rejects_non_continuable_recording(monkeypatch, tmp_path: 
     except HTTPException as exc:
         assert exc.status_code == 400
         assert "残りエピソードがありません" in str(exc.detail)
+
+
+def test_stop_session_returns_404_when_session_not_tracked(monkeypatch):
+    class _FakeManager:
+        def any_active(self):
+            return None
+
+        async def stop(self, _dataset_id: str, **_kwargs):
+            raise HTTPException(status_code=404, detail="Session not found: dataset-1")
+
+    monkeypatch.setattr(recording_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(recording_api, "get_recording_session_manager", lambda: _FakeManager())
+    try:
+        asyncio.run(
+            recording_api.stop_session(
+                recording_api.RecordingSessionStopRequest(dataset_id="dataset-1", save_current=True)
+            )
+        )
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert str(exc.detail) == "Session not found: dataset-1"
+
+
+def test_stop_session_returns_404_when_no_dataset_id_and_no_active_session(monkeypatch):
+    class _FakeManager:
+        def any_active(self):
+            return None
+
+    monkeypatch.setattr(recording_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(recording_api, "get_recording_session_manager", lambda: _FakeManager())
+
+    try:
+        asyncio.run(
+            recording_api.stop_session(recording_api.RecordingSessionStopRequest(save_current=True))
+        )
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert str(exc.detail) == "Session not found"

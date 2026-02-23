@@ -168,3 +168,26 @@ def test_resume_inference_runner_calls_manager(monkeypatch) -> None:
     assert response.paused is False
     assert response.teleop_enabled is False
     assert response.recorder_state == "recording"
+
+
+def test_resume_inference_runner_returns_started_message_when_cold_started(monkeypatch) -> None:
+    class _FakeManager:
+        def any_active(self):
+            return type("Active", (), {"id": "session-1"})()
+
+        async def resume_active_recording_and_inference(self):
+            return {
+                "started": True,
+                "paused": False,
+                "teleop_enabled": False,
+                "recorder_state": "warming",
+            }
+
+    monkeypatch.setattr(inference_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(inference_api, "get_inference_session_manager", lambda: _FakeManager())
+
+    response = asyncio.run(inference_api.resume_inference_runner())
+
+    assert response.success is True
+    assert response.message == "Inference and recording started."
+    assert response.recorder_state == "warming"

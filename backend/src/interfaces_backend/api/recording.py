@@ -401,42 +401,23 @@ async def stop_session(request: RecordingSessionStopRequest):
         active = mgr.any_active()
         if active:
             dataset_id = active.id
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    if dataset_id:
-        state = await mgr.stop(dataset_id, save_current=request.save_current)
-        response = RecordingSessionActionResponse(
-            success=True,
-            message="Recording session stopped",
-            dataset_id=state.id,
-            status=state.extras.get("recorder_result"),
-        )
-        await _emit_recording_control_event(
-            action="session_stop",
-            phase="completed",
-            session_id=state.id,
-            success=True,
-            message=response.message,
-            details={"save_current": request.save_current},
-        )
-        return response
-
-    # No tracked session — stop recorder directly (best-effort)
-    recorder = get_recorder_bridge()
-    result = recorder.stop(save_current=request.save_current)
-    if not result.get("success", False):
-        raise HTTPException(status_code=500, detail=result.get("error") or "Recorder stop failed")
+    state = await mgr.stop(dataset_id, save_current=request.save_current)
     response = RecordingSessionActionResponse(
         success=True,
         message="Recording session stopped",
-        status=result,
+        dataset_id=state.id,
+        status=state.extras.get("recorder_result"),
     )
     await _emit_recording_control_event(
         action="session_stop",
         phase="completed",
-        session_id="global",
+        session_id=state.id,
         success=True,
         message=response.message,
-        details={"save_current": request.save_current, "mode": "recorder_fallback"},
+        details={"save_current": request.save_current},
     )
     return response
 

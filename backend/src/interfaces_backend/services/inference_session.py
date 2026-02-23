@@ -18,6 +18,10 @@ from interfaces_backend.services.inference_runtime import (
     InferenceRuntimeManager,
     get_inference_runtime_manager,
 )
+from interfaces_backend.services.recording_session import (
+    RecordingSessionManager,
+    get_recording_session_manager,
+)
 from interfaces_backend.services.recorder_bridge import RecorderBridge, get_recorder_bridge
 from interfaces_backend.services.session_manager import (
     BaseSessionManager,
@@ -28,10 +32,14 @@ from interfaces_backend.services.vlabor_profiles import (
     build_inference_bridge_config,
     build_inference_camera_aliases,
     build_inference_joint_names,
+    extract_arm_namespaces,
+    extract_recorder_topic_suffixes,
 )
 
 logger = logging.getLogger(__name__)
 _ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_DEFAULT_EPISODE_TIME_S = 60.0
+_DEFAULT_RESET_TIME_S = 10.0
 
 
 class InferenceSessionManager(BaseSessionManager):
@@ -42,16 +50,53 @@ class InferenceSessionManager(BaseSessionManager):
         runtime: InferenceRuntimeManager | None = None,
         recorder: RecorderBridge | None = None,
         dataset: DatasetLifecycle | None = None,
+        recording_sessions: RecordingSessionManager | None = None,
     ) -> None:
         super().__init__()
         self._runtime = runtime or get_inference_runtime_manager()
         self._recorder = recorder or get_recorder_bridge()
         self._dataset = dataset or get_dataset_lifecycle()
+        self._recording_sessions = recording_sessions or get_recording_session_manager()
         self._recording_controller = InferenceRecordingController(
             recorder=self._recorder,
             dataset=self._dataset,
             runtime=self._runtime,
         )
+
+    def _build_inference_recording_payload(
+        self,
+        *,
+        dataset_id: str,
+        state: SessionState,
+        task: str,
+        num_episodes: int,
+        episode_time_s: float,
+        reset_time_s: float,
+    ) -> dict[str, Any]:
+        profile_snapshot = state.profile.snapshot if state.profile else {}
+        cameras = self._recorder.build_cameras(profile_snapshot)
+        arm_namespaces = extract_arm_namespaces(profile_snapshot)
+        topic_suffixes = extract_recorder_topic_suffixes(
+            profile_snapshot,
+            arm_namespaces=arm_namespaces,
+        )
+        payload: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "dataset_name": f"eval-{state.id[:8]}",
+            "task": task,
+            "num_episodes": max(int(num_episodes), 1),
+            "episode_time_s": float(episode_time_s),
+            "reset_time_s": float(reset_time_s),
+            "cameras": cameras,
+            "metadata": {
+                "session_kind": "inference",
+                "inference_session_id": state.id,
+            },
+        }
+        if arm_namespaces:
+            payload["arm_namespaces"] = arm_namespaces
+        payload.update(topic_suffixes)
+        return payload
 
     @staticmethod
     def _validate_inference_bridge_resolution(
@@ -115,6 +160,78 @@ class InferenceSessionManager(BaseSessionManager):
             cls._recorder_state(status) in _ACTIVE_RECORDER_STATES
             and cls._recorder_dataset_id(status) == dataset_id
         )
+
+    @staticmethod
+    def _extract_denoising_steps(policy_options: Any) -> int | None:
+        if not isinstance(policy_options, dict):
+            return None
+        for options in policy_options.values():
+            if isinstance(options, dict) and options.get("denoising_steps") is not None:
+                try:
+                    return int(options.get("denoising_steps"))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _register_inference_recording_session(
+        self,
+        *,
+        state: SessionState,
+        dataset_id: str,
+        task_value: str,
+        recording_status: dict[str, Any],
+    ) -> None:
+        self._recording_sessions.register_external_session(
+            session_id=dataset_id,
+            profile=state.profile,
+            status="running",
+            extras={
+                "dataset_name": f"eval-{state.id[:8]}",
+                "task": task_value,
+                "target_total_episodes": int(recording_status.get("batch_size") or 20),
+                "recording_started": True,
+                "external_owner": "inference",
+                "recorder_payload": self._build_inference_recording_payload(
+                    dataset_id=dataset_id,
+                    state=state,
+                    task=task_value,
+                    num_episodes=int(recording_status.get("batch_size") or 20),
+                    episode_time_s=float(recording_status.get("episode_time_s") or _DEFAULT_EPISODE_TIME_S),
+                    reset_time_s=float(recording_status.get("reset_time_s") or _DEFAULT_RESET_TIME_S),
+                ),
+            },
+        )
+
+    async def _start_recording_for_state(self, state: SessionState) -> None:
+        worker_session_id = str(state.extras.get("worker_session_id") or "").strip()
+        if not worker_session_id:
+            raise HTTPException(status_code=400, detail="Active worker session not found")
+
+        task_value = str(state.extras.get("task") or "").strip()
+        denoising_steps = state.extras.get("denoising_steps")
+        episode_time_s = float(state.extras.get("episode_time_s") or _DEFAULT_EPISODE_TIME_S)
+        reset_time_s = float(state.extras.get("reset_time_s") or _DEFAULT_RESET_TIME_S)
+
+        await self._recording_controller.start(
+            session=state,
+            task=task_value,
+            denoising_steps=int(denoising_steps) if denoising_steps is not None else None,
+            episode_time_s=episode_time_s,
+            reset_time_s=reset_time_s,
+        )
+        dataset_id = str(state.extras.get("dataset_id") or "").strip()
+        if not dataset_id:
+            raise HTTPException(status_code=500, detail="Failed to prepare inference recording dataset")
+
+        recording_status = self._recording_controller.get_status(state.id)
+        self._register_inference_recording_session(
+            state=state,
+            dataset_id=dataset_id,
+            task_value=task_value,
+            recording_status=recording_status,
+        )
+        self._runtime.set_paused(session_id=worker_session_id, paused=False)
+        state.extras["recording_started"] = True
 
     async def create(
         self,
@@ -230,38 +347,34 @@ class InferenceSessionManager(BaseSessionManager):
         state.extras["worker_session_id"] = worker_session_id
         state.extras["model_id"] = kwargs["model_id"]
         state.extras["bridge_stream_config"] = bridge_stream_config
+        state.extras["task"] = str(kwargs.get("task") or "").strip()
+        state.extras["episode_time_s"] = _DEFAULT_EPISODE_TIME_S
+        state.extras["reset_time_s"] = _DEFAULT_RESET_TIME_S
+        state.extras["denoising_steps"] = self._extract_denoising_steps(kwargs.get("policy_options"))
+        state.extras["recording_started"] = False
 
-        # Simultaneous recording (best-effort)
+        # Keep inference paused until the operator explicitly starts from ControlsView.
         self._emit_progress(
             progress_callback,
             phase="persist",
             progress_percent=96.0,
             message="推論セッション情報を保存しています...",
         )
-        policy_options = kwargs.get("policy_options")
-        denoising_steps = None
-        if isinstance(policy_options, dict):
-            for options in policy_options.values():
-                if isinstance(options, dict) and options.get("denoising_steps") is not None:
-                    try:
-                        denoising_steps = int(options.get("denoising_steps"))
-                    except (TypeError, ValueError):
-                        denoising_steps = None
-                    break
         try:
-            await self._recording_controller.start(
-                session=state,
-                task=kwargs.get("task"),
-                denoising_steps=denoising_steps,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to start simultaneous recording (non-critical)",
-                exc_info=True,
-            )
-
-        state.status = "running"
+            self._runtime.set_paused(session_id=worker_session_id, paused=True)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to pause inference worker: {exc}"
+            ) from exc
         return state
+
+    async def start(self, session_id: str, **kwargs: Any) -> SessionState:
+        state = self._get_or_raise(session_id)
+        if not bool(state.extras.get("recording_started")):
+            await self._start_recording_for_state(state)
+        return await super().start(session_id, **kwargs)
 
     async def stop(self, session_id: str, **kwargs: Any) -> SessionState:
         state = self._get_or_raise(session_id)
@@ -345,6 +458,7 @@ class InferenceSessionManager(BaseSessionManager):
                         exc_info=True,
                     )
             await self._dataset.auto_upload(dataset_id)
+            self._recording_sessions.unregister_external_session(str(dataset_id))
         self._recording_controller.unregister(session_id)
         return await super().stop(session_id, **kwargs)
 
@@ -352,7 +466,13 @@ class InferenceSessionManager(BaseSessionManager):
         active = self.any_active()
         if active is None:
             return self._recording_controller.get_status("")
-        return self._recording_controller.get_status(active.id)
+        status = self._recording_controller.get_status(active.id)
+        if bool(active.extras.get("recording_started")):
+            return status
+        status["episode_time_s"] = float(active.extras.get("episode_time_s") or _DEFAULT_EPISODE_TIME_S)
+        status["reset_time_s"] = float(active.extras.get("reset_time_s") or _DEFAULT_RESET_TIME_S)
+        status["denoising_steps"] = active.extras.get("denoising_steps")
+        return status
 
     async def apply_active_settings(
         self,
@@ -368,7 +488,45 @@ class InferenceSessionManager(BaseSessionManager):
         worker_session_id = str(active.extras.get("worker_session_id") or "").strip()
         if not worker_session_id:
             raise HTTPException(status_code=400, detail="Active worker session not found")
-        return await self._recording_controller.apply_settings(
+        if not bool(active.extras.get("recording_started")):
+            next_task = str(active.extras.get("task") or "").strip()
+            next_episode_time_s = float(active.extras.get("episode_time_s") or _DEFAULT_EPISODE_TIME_S)
+            next_reset_time_s = float(active.extras.get("reset_time_s") or _DEFAULT_RESET_TIME_S)
+            next_denoising_steps = active.extras.get("denoising_steps")
+
+            if task is not None:
+                normalized_task = task.strip()
+                if not normalized_task:
+                    raise HTTPException(status_code=400, detail="task must not be empty")
+                self._runtime.set_task(session_id=worker_session_id, task=normalized_task)
+                next_task = normalized_task
+            if episode_time_s is not None:
+                if episode_time_s <= 0:
+                    raise HTTPException(status_code=400, detail="episode_time_s must be > 0")
+                next_episode_time_s = float(episode_time_s)
+            if reset_time_s is not None:
+                if reset_time_s < 0:
+                    raise HTTPException(status_code=400, detail="reset_time_s must be >= 0")
+                next_reset_time_s = float(reset_time_s)
+            if denoising_steps is not None:
+                self._runtime.set_policy_options(
+                    session_id=worker_session_id,
+                    denoising_steps=int(denoising_steps),
+                )
+                next_denoising_steps = int(denoising_steps)
+
+            active.extras["task"] = next_task
+            active.extras["episode_time_s"] = next_episode_time_s
+            active.extras["reset_time_s"] = next_reset_time_s
+            active.extras["denoising_steps"] = next_denoising_steps
+            return {
+                "task": next_task,
+                "episode_time_s": next_episode_time_s,
+                "reset_time_s": next_reset_time_s,
+                "denoising_steps": next_denoising_steps,
+            }
+
+        applied = await self._recording_controller.apply_settings(
             inference_session_id=active.id,
             worker_session_id=worker_session_id,
             task=task,
@@ -376,6 +534,11 @@ class InferenceSessionManager(BaseSessionManager):
             reset_time_s=reset_time_s,
             denoising_steps=denoising_steps,
         )
+        active.extras["task"] = str(applied.get("task") or "").strip()
+        active.extras["episode_time_s"] = float(applied.get("episode_time_s") or _DEFAULT_EPISODE_TIME_S)
+        active.extras["reset_time_s"] = float(applied.get("reset_time_s") or _DEFAULT_RESET_TIME_S)
+        active.extras["denoising_steps"] = applied.get("denoising_steps")
+        return applied
 
     async def decide_active_recording_continue(
         self, *, continue_recording: bool
@@ -383,6 +546,8 @@ class InferenceSessionManager(BaseSessionManager):
         active = self.any_active()
         if active is None:
             raise HTTPException(status_code=404, detail="Active inference session not found")
+        if not bool(active.extras.get("recording_started")):
+            raise HTTPException(status_code=409, detail="Inference session has not started yet")
         return await self._recording_controller.decide_continue(
             inference_session_id=active.id,
             continue_recording=continue_recording,
@@ -392,6 +557,8 @@ class InferenceSessionManager(BaseSessionManager):
         active = self.any_active()
         if active is None:
             raise HTTPException(status_code=404, detail="Active inference session not found")
+        if not bool(active.extras.get("recording_started")):
+            raise HTTPException(status_code=409, detail="Inference session has not started yet")
         return await self._recording_controller.set_manual_pause(
             inference_session_id=active.id,
             paused=True,
@@ -401,6 +568,14 @@ class InferenceSessionManager(BaseSessionManager):
         active = self.any_active()
         if active is None:
             raise HTTPException(status_code=404, detail="Active inference session not found")
+        if not bool(active.extras.get("recording_started")):
+            await self.start(active.id)
+            return {
+                "paused": False,
+                "teleop_enabled": False,
+                "recorder_state": "warming",
+                "started": True,
+            }
         return await self._recording_controller.set_manual_pause(
             inference_session_id=active.id,
             paused=False,

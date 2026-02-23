@@ -115,6 +115,12 @@
     pendingConfirmAction = null;
   };
   const handleStart = async () => {
+    if (sessionKind === 'inference') {
+      await runAction('開始', () => api.inference.resumeRunner(), {
+        successToast: '推論と録画の開始リクエストを受け付けました。状態反映を待っています。'
+      });
+      return;
+    }
     if (!sessionId) return;
     await runAction('開始', () => api.recording.startSession({ dataset_id: sessionId }), {
       successToast: '開始リクエストを受け付けました。状態反映を待っています。'
@@ -163,11 +169,15 @@
         if (targetDatasetId) {
           startUploadModal(targetDatasetId);
         }
-        const success = await runAction('終了', () =>
-          api.recording.stopSession({
-            dataset_id: datasetId,
-            save_current: true
-          }),
+        const success = await runAction(
+          '終了',
+          () =>
+            sessionKind === 'inference'
+              ? api.inference.decideRecording({ continue_recording: false })
+              : api.recording.stopSession({
+                  dataset_id: datasetId,
+                  save_current: true
+                }),
           {
             successToast: '終了リクエストを受け付けました。状態反映を待っています。'
           }
@@ -342,9 +352,12 @@
   const canStop = $derived(
     ['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)) && !isFinalizing
   );
-  const canStart = $derived(
-    Boolean(sessionId) && ['idle', 'completed', 'inactive', ''].includes(String(statusState))
-  );
+  const canStart = $derived.by(() => {
+    const startableState = ['idle', 'completed', 'inactive', ''].includes(String(statusState));
+    if (!startableState) return false;
+    if (sessionKind === 'inference') return true;
+    return Boolean(sessionId);
+  });
 
   $effect(() => {
     if (typeof window === 'undefined') return;

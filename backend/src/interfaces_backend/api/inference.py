@@ -616,9 +616,10 @@ async def resume_inference_runner():
             message=str(exc),
         )
         raise HTTPException(status_code=500, detail=f"Failed to resume inference runner: {exc}") from exc
+    started = bool(result.get("started", False))
     response = InferenceRunnerControlResponse(
         success=True,
-        message="Inference and recording resumed.",
+        message="Inference and recording started." if started else "Inference and recording resumed.",
         paused=bool(result.get("paused", False)),
         teleop_enabled=bool(result.get("teleop_enabled", False)),
         recorder_state=str(result.get("recorder_state") or "") or None,

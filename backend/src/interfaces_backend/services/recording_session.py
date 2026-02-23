@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -43,6 +44,48 @@ class RecordingSessionManager(BaseSessionManager):
         # Use dataset_id as session_id so the client API can address
         # sessions by dataset_id directly.
         return generate_dataset_id()
+
+    def register_external_session(
+        self,
+        *,
+        session_id: str,
+        profile,
+        status: str = "running",
+        extras: dict[str, Any] | None = None,
+    ) -> SessionState:
+        """Register or update an externally managed recording session.
+
+        Used by inference session flow so recording session state is visible
+        through the same manager namespace.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            existing = self._sessions.get(session_id)
+            if existing is not None:
+                existing.status = status
+                if profile is not None:
+                    existing.profile = profile
+                if status in {"running", "paused"} and not existing.started_at:
+                    existing.started_at = now_iso
+                if extras:
+                    existing.extras.update(extras)
+                return existing
+
+            state = SessionState(
+                id=session_id,
+                kind=self.kind,
+                status=status,
+                profile=profile,
+                created_at=now_iso,
+                started_at=now_iso if status in {"running", "paused"} else None,
+                extras=dict(extras or {}),
+            )
+            self._sessions[session_id] = state
+            return state
+
+    def unregister_external_session(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
 
     @staticmethod
     def _validate_recorder_resolution(
