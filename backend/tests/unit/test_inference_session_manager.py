@@ -248,3 +248,35 @@ def test_apply_active_settings_updates_pending_values_before_start() -> None:
     assert manager._sessions["session-1"].extras["reset_time_s"] == 5.0
     assert manager._sessions["session-1"].extras["denoising_steps"] == 4
     assert result["task"] == "new-task"
+
+
+def test_any_active_prefers_latest_session_with_worker_session_id() -> None:
+    runtime = _FakeRuntime()
+    recorder = _FakeRecorder()
+    dataset = _FakeDataset()
+    recording_sessions = _FakeRecordingSessions()
+    manager = _build_manager(
+        recorder=recorder,
+        dataset=dataset,
+        runtime=runtime,
+        recording_sessions=recording_sessions,
+    )
+    manager._sessions["session-stale"] = SessionState(
+        id="session-stale",
+        kind="inference",
+        status="created",
+        profile=SimpleNamespace(name="profile-a", snapshot={"raw": {}}),
+        extras={},
+    )
+    manager._sessions["session-active"] = SessionState(
+        id="session-active",
+        kind="inference",
+        status="created",
+        profile=SimpleNamespace(name="profile-a", snapshot={"raw": {}}),
+        extras={"worker_session_id": "worker-2"},
+    )
+
+    active = manager.any_active()
+
+    assert active is not None
+    assert active.id == "session-active"

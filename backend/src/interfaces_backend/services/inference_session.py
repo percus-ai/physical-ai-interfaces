@@ -63,6 +63,37 @@ class InferenceSessionManager(BaseSessionManager):
             runtime=self._runtime,
         )
 
+    def _drop_session_state(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+    def _cleanup_failed_create(self, *, session_id: str, worker_session_id: str) -> None:
+        if worker_session_id:
+            try:
+                self._runtime.stop(session_id=worker_session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to stop worker during create cleanup: session_id=%s worker_session_id=%s",
+                    session_id,
+                    worker_session_id,
+                    exc_info=True,
+                )
+        self._drop_session_state(session_id)
+
+    def any_active(self) -> SessionState | None:
+        # Prefer the most recent active state that has a worker session.
+        # This avoids selecting stale "created" entries left by past startup failures.
+        with self._lock:
+            active_states = [
+                state for state in self._sessions.values() if state.status in ("created", "running")
+            ]
+        if not active_states:
+            return None
+        for state in reversed(active_states):
+            if str(state.extras.get("worker_session_id") or "").strip():
+                return state
+        return active_states[-1]
+
     def _build_inference_recording_payload(
         self,
         *,
@@ -245,130 +276,134 @@ class InferenceSessionManager(BaseSessionManager):
             progress_callback=progress_callback,
             **kwargs,
         )
-
-        joint_names = build_inference_joint_names(state.profile.snapshot)
-        if not joint_names:
-            raise HTTPException(
-                status_code=400,
-                detail="No inference joints configured in active profile",
-            )
-        camera_key_aliases = build_inference_camera_aliases(state.profile.snapshot)
-        bridge_stream_config = build_inference_bridge_config(state.profile.snapshot)
-        self._validate_inference_bridge_resolution(
-            profile_name=state.profile.name,
-            profile_source=getattr(state.profile, "source_path", "unknown"),
-            bridge_stream_config=bridge_stream_config,
-        )
-
-        # Download model from R2
-        self._emit_progress(
-            progress_callback,
-            phase="sync_model",
-            progress_percent=56.0,
-            message="モデル同期を開始します...",
-        )
-
-        def _on_model_sync(status: InferenceModelSyncStatus) -> None:
-            if progress_callback is None:
-                return
-            status_name = str(status.status or "").strip().lower()
-            phase = "sync_model"
-            detail = {
-                "files_done": status.files_done,
-                "total_files": status.total_files,
-                "transferred_bytes": status.transferred_bytes,
-                "total_bytes": status.total_bytes,
-                "current_file": status.current_file,
-            }
-            if status_name in {"checking", "syncing"}:
-                mapped_progress = 56.0 + (float(status.progress_percent or 0.0) * 0.26 / 100.0)
-                self._emit_progress(
-                    progress_callback,
-                    phase=phase,
-                    progress_percent=mapped_progress,
-                    message=status.message or "モデルを同期中です...",
-                    detail=detail,
-                )
-                return
-            if status_name == "completed":
-                self._emit_progress(
-                    progress_callback,
-                    phase=phase,
-                    progress_percent=82.0,
-                    message=status.message or "モデル同期が完了しました。",
-                    detail=detail,
-                )
-                return
-            if status_name == "error":
-                detail["error"] = status.error
-                self._emit_progress(
-                    progress_callback,
-                    phase=phase,
-                    progress_percent=82.0,
-                    message=status.message or "モデル同期に失敗しました。",
-                    detail=detail,
-                )
-
-        await self._dataset.ensure_model_local(
-            kwargs["model_id"],
-            sync_status_callback=_on_model_sync,
-        )
-
-        # Start GPU worker
-        self._emit_progress(
-            progress_callback,
-            phase="launch_worker",
-            progress_percent=86.0,
-            message="推論ワーカーを起動しています...",
-        )
+        worker_session_id = ""
         try:
-            worker_session_id = self._runtime.start(
-                model_id=kwargs["model_id"],
-                device=kwargs.get("device"),
-                task=kwargs.get("task"),
-                policy_options=kwargs.get("policy_options"),
-                joint_names=joint_names,
-                camera_key_aliases=camera_key_aliases,
+            joint_names = build_inference_joint_names(state.profile.snapshot)
+            if not joint_names:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No inference joints configured in active profile",
+                )
+            camera_key_aliases = build_inference_camera_aliases(state.profile.snapshot)
+            bridge_stream_config = build_inference_bridge_config(state.profile.snapshot)
+            self._validate_inference_bridge_resolution(
+                profile_name=state.profile.name,
+                profile_source=getattr(state.profile, "source_path", "unknown"),
                 bridge_stream_config=bridge_stream_config,
-                progress_callback=progress_callback,
             )
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            message = str(exc)
-            if "already running" in message:
-                raise HTTPException(status_code=409, detail=message) from exc
-            raise HTTPException(status_code=400, detail=message) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to start inference worker: {exc}"
-            ) from exc
 
-        state.extras["worker_session_id"] = worker_session_id
-        state.extras["model_id"] = kwargs["model_id"]
-        state.extras["bridge_stream_config"] = bridge_stream_config
-        state.extras["task"] = str(kwargs.get("task") or "").strip()
-        state.extras["episode_time_s"] = _DEFAULT_EPISODE_TIME_S
-        state.extras["reset_time_s"] = _DEFAULT_RESET_TIME_S
-        state.extras["denoising_steps"] = self._extract_denoising_steps(kwargs.get("policy_options"))
-        state.extras["recording_started"] = False
+            # Download model from R2
+            self._emit_progress(
+                progress_callback,
+                phase="sync_model",
+                progress_percent=56.0,
+                message="モデル同期を開始します...",
+            )
 
-        # Keep inference paused until the operator explicitly starts from ControlsView.
-        self._emit_progress(
-            progress_callback,
-            phase="persist",
-            progress_percent=96.0,
-            message="推論セッション情報を保存しています...",
-        )
-        try:
-            self._runtime.set_paused(session_id=worker_session_id, paused=True)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to pause inference worker: {exc}"
-            ) from exc
-        return state
+            def _on_model_sync(status: InferenceModelSyncStatus) -> None:
+                if progress_callback is None:
+                    return
+                status_name = str(status.status or "").strip().lower()
+                phase = "sync_model"
+                detail = {
+                    "files_done": status.files_done,
+                    "total_files": status.total_files,
+                    "transferred_bytes": status.transferred_bytes,
+                    "total_bytes": status.total_bytes,
+                    "current_file": status.current_file,
+                }
+                if status_name in {"checking", "syncing"}:
+                    mapped_progress = 56.0 + (float(status.progress_percent or 0.0) * 0.26 / 100.0)
+                    self._emit_progress(
+                        progress_callback,
+                        phase=phase,
+                        progress_percent=mapped_progress,
+                        message=status.message or "モデルを同期中です...",
+                        detail=detail,
+                    )
+                    return
+                if status_name == "completed":
+                    self._emit_progress(
+                        progress_callback,
+                        phase=phase,
+                        progress_percent=82.0,
+                        message=status.message or "モデル同期が完了しました。",
+                        detail=detail,
+                    )
+                    return
+                if status_name == "error":
+                    detail["error"] = status.error
+                    self._emit_progress(
+                        progress_callback,
+                        phase=phase,
+                        progress_percent=82.0,
+                        message=status.message or "モデル同期に失敗しました。",
+                        detail=detail,
+                    )
+
+            await self._dataset.ensure_model_local(
+                kwargs["model_id"],
+                sync_status_callback=_on_model_sync,
+            )
+
+            # Start GPU worker
+            self._emit_progress(
+                progress_callback,
+                phase="launch_worker",
+                progress_percent=86.0,
+                message="推論ワーカーを起動しています...",
+            )
+            try:
+                worker_session_id = self._runtime.start(
+                    model_id=kwargs["model_id"],
+                    device=kwargs.get("device"),
+                    task=kwargs.get("task"),
+                    policy_options=kwargs.get("policy_options"),
+                    joint_names=joint_names,
+                    camera_key_aliases=camera_key_aliases,
+                    bridge_stream_config=bridge_stream_config,
+                    progress_callback=progress_callback,
+                )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                message = str(exc)
+                if "already running" in message:
+                    raise HTTPException(status_code=409, detail=message) from exc
+                raise HTTPException(status_code=400, detail=message) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to start inference worker: {exc}"
+                ) from exc
+
+            state.extras["worker_session_id"] = worker_session_id
+            state.extras["model_id"] = kwargs["model_id"]
+            state.extras["bridge_stream_config"] = bridge_stream_config
+            state.extras["task"] = str(kwargs.get("task") or "").strip()
+            state.extras["episode_time_s"] = _DEFAULT_EPISODE_TIME_S
+            state.extras["reset_time_s"] = _DEFAULT_RESET_TIME_S
+            state.extras["denoising_steps"] = self._extract_denoising_steps(kwargs.get("policy_options"))
+            state.extras["recording_started"] = False
+
+            # Keep inference paused until the operator explicitly starts from ControlsView.
+            self._emit_progress(
+                progress_callback,
+                phase="persist",
+                progress_percent=96.0,
+                message="推論セッション情報を保存しています...",
+            )
+            try:
+                self._runtime.set_paused(session_id=worker_session_id, paused=True)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to pause inference worker: {exc}"
+                ) from exc
+            return state
+        except Exception:
+            self._cleanup_failed_create(session_id=state.id, worker_session_id=worker_session_id)
+            raise
 
     async def start(self, session_id: str, **kwargs: Any) -> SessionState:
         state = self._get_or_raise(session_id)
