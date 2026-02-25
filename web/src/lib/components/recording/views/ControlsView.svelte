@@ -149,14 +149,8 @@
     });
   };
   const handleNext = async () => {
-    openConfirm({
-      title: '現在のエピソードを保存して次へ進みますか？',
-      description: '現在エピソードを保存して、次エピソードのリセットへ進みます。',
-      actionLabel: '保存して次へ',
-      action: () =>
-        runAction('次へ', () => api.recording.nextEpisode(), {
-          successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
-        })
+    await runAction('次へ', () => api.recording.nextEpisode(), {
+      successToast: '次エピソードへの遷移を受け付けました。状態反映を待っています。'
     });
   };
   const handleStop = async () => {
@@ -359,6 +353,52 @@
     return Boolean(sessionId);
   });
 
+  const isEditableTarget = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+  };
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (mode !== 'recording') return;
+      if (confirmOpen || uploadModalOpen) return;
+      if (event.defaultPrevented || event.repeat) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (isEditableTarget(event.target)) return;
+
+      if (event.key === 'ArrowRight') {
+        if (!canNext || Boolean(actionBusy)) return;
+        event.preventDefault();
+        void handleNext();
+        return;
+      }
+
+      if (event.key === 'ArrowLeft') {
+        if (!canRetakeCurrent || Boolean(actionBusy)) return;
+        event.preventDefault();
+        void handleRetakeCurrent();
+        return;
+      }
+
+      if (event.key === ' ' || event.key === 'Spacebar') {
+        if ((!canResume && !canPause) || Boolean(actionBusy)) return;
+        event.preventDefault();
+        if (canResume) {
+          void handleResume();
+        } else {
+          void handlePause();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeydown);
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+    };
+  });
+
   $effect(() => {
     if (typeof window === 'undefined') return;
     const disconnected = rosbridgeStatus !== 'connected';
@@ -488,6 +528,9 @@
 
       <p class="text-[11px] text-slate-500">
         ⇤: 直前エピソードを取り直し / ←: 現在エピソードを取り直し / →: 現在エピソードを保存して次へ
+      </p>
+      <p class="text-[11px] text-slate-500">
+        キーボード: ← 取り直し / → 次へ / Space 一時停止・再開
       </p>
     </div>
   {/if}
