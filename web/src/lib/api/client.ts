@@ -506,6 +506,7 @@ export const api = {
         method: 'POST'
       }),
     updateSession: (payload: {
+      dataset_id?: string;
       task?: string;
       episode_time_s?: number;
       reset_time_s?: number;

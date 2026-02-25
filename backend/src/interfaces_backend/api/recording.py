@@ -89,6 +89,7 @@ class RecordingSessionStatusResponse(BaseModel):
 
 
 class RecordingSessionUpdateRequest(BaseModel):
+    dataset_id: Optional[str] = None
     task: Optional[str] = None
     episode_time_s: Optional[float] = Field(None, gt=0)
     reset_time_s: Optional[float] = Field(None, ge=0)
@@ -464,6 +465,9 @@ async def resume_session():
 async def update_session(request: RecordingSessionUpdateRequest):
     require_user_id()
     payload: dict[str, Any] = {}
+    target_dataset_id = (request.dataset_id or "").strip()
+    if request.dataset_id is not None and not target_dataset_id:
+        raise HTTPException(status_code=400, detail="dataset_id must not be empty")
     if request.task is not None:
         task = request.task.strip()
         if not task:
@@ -479,6 +483,27 @@ async def update_session(request: RecordingSessionUpdateRequest):
         raise HTTPException(status_code=400, detail="No update fields provided")
 
     recorder = get_recorder_bridge()
+    if target_dataset_id:
+        status = recorder.status()
+        active_dataset_id = str(status.get("dataset_id") or "").strip()
+        active_state = str(status.get("state") or "").strip().lower()
+        if active_dataset_id != target_dataset_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Requested dataset is not the active recording session "
+                    f"(requested={target_dataset_id}, active={active_dataset_id or 'none'})"
+                ),
+            )
+        if active_state in {"idle", "completed", ""}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Requested dataset is not currently mutable "
+                    f"(dataset_id={target_dataset_id}, state={active_state or 'unknown'})"
+                ),
+            )
+
     result = recorder.update(payload)
     if not result.get("success", False):
         raise HTTPException(

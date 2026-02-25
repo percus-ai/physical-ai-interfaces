@@ -162,6 +162,7 @@
         await $inferenceRunnerStatusQuery.refetch?.();
       } else {
         await api.recording.updateSession({
+          dataset_id: sessionId || undefined,
           task,
           episode_time_s: episodeTime,
           reset_time_s: resetTime

@@ -259,3 +259,91 @@ def test_stop_session_returns_404_when_no_dataset_id_and_no_active_session(monke
     except HTTPException as exc:
         assert exc.status_code == 404
         assert str(exc.detail) == "Session not found"
+
+
+class _FakeRecorderForUpdate:
+    def __init__(self, *, dataset_id: str, state: str = "recording"):
+        self.status_payload = {"dataset_id": dataset_id, "state": state}
+        self.update_calls: list[dict] = []
+
+    def status(self):
+        return dict(self.status_payload)
+
+    def update(self, payload: dict):
+        self.update_calls.append(dict(payload))
+        return {"success": True, "message": "session updated", "dataset_id": self.status_payload["dataset_id"]}
+
+
+def test_update_session_rejects_when_dataset_id_does_not_match_active(monkeypatch):
+    recorder = _FakeRecorderForUpdate(dataset_id="dataset-active", state="recording")
+
+    async def _fake_emit(**_kwargs):
+        return None
+
+    monkeypatch.setattr(recording_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(recording_api, "get_recorder_bridge", lambda: recorder)
+    monkeypatch.setattr(recording_api, "_emit_recording_control_event", _fake_emit)
+
+    request = recording_api.RecordingSessionUpdateRequest(
+        dataset_id="dataset-requested",
+        task="updated task",
+        episode_time_s=45.0,
+        reset_time_s=5.0,
+    )
+
+    try:
+        asyncio.run(recording_api.update_session(request))
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert "Requested dataset is not the active recording session" in str(exc.detail)
+
+    assert recorder.update_calls == []
+
+
+def test_update_session_updates_when_dataset_id_matches_active(monkeypatch):
+    recorder = _FakeRecorderForUpdate(dataset_id="dataset-active", state="paused")
+
+    class _FakeTable:
+        def update(self, _payload):
+            return self
+
+        def eq(self, _key, _value):
+            return self
+
+        async def execute(self):
+            return type("Resp", (), {"data": []})()
+
+    class _FakeClient:
+        def table(self, _name):
+            return _FakeTable()
+
+    async def _fake_emit(**_kwargs):
+        return None
+
+    async def _fake_supabase_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(recording_api, "require_user_id", lambda: "user-1")
+    monkeypatch.setattr(recording_api, "get_recorder_bridge", lambda: recorder)
+    monkeypatch.setattr(recording_api, "_emit_recording_control_event", _fake_emit)
+    monkeypatch.setattr(recording_api, "get_supabase_async_client", _fake_supabase_client)
+
+    request = recording_api.RecordingSessionUpdateRequest(
+        dataset_id="dataset-active",
+        task="updated task",
+        episode_time_s=45.0,
+        reset_time_s=5.0,
+    )
+
+    response = asyncio.run(recording_api.update_session(request))
+
+    assert response.success is True
+    assert response.dataset_id == "dataset-active"
+    assert recorder.update_calls == [
+        {
+            "task": "updated task",
+            "episode_time_s": 45.0,
+            "reset_time_s": 5.0,
+        }
+    ]
