@@ -37,7 +37,7 @@ from interfaces_backend.services.vlabor_profiles import (
 )
 
 logger = logging.getLogger(__name__)
-_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting", "resetting_paused"}
 _DEFAULT_EPISODE_TIME_S = 60.0
 _DEFAULT_RESET_TIME_S = 10.0
 

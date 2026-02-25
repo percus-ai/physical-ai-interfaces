@@ -25,7 +25,7 @@ from percus_ai.observability import ArmId, CommOverheadReporter, PointId, resolv
 
 _RECORDER_URL = os.environ.get("LEROBOT_RECORDER_URL", "http://127.0.0.1:8082")
 _COMM_REPORTER = CommOverheadReporter("backend")
-_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting", "resetting_paused"}
 _UPDATE_TIMEOUT_S = 20.0
 _UPDATE_MAX_ATTEMPTS = 3
 _UPDATE_RETRY_BASE_DELAY_S = 0.4

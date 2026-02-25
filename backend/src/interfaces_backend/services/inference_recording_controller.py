@@ -32,7 +32,7 @@ from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting", "resetting_paused"}
 
 
 @dataclass
@@ -164,11 +164,11 @@ class InferenceRecordingController:
     ) -> bool:
         if manual_paused:
             return True
-        return is_finalizing or recorder_state in {"resetting", "paused", "completed"}
+        return is_finalizing or recorder_state in {"resetting", "resetting_paused", "paused", "completed"}
 
     @staticmethod
     def _desired_teleop_state(*, recorder_state: str, is_finalizing: bool) -> bool:
-        return is_finalizing or recorder_state == "resetting"
+        return is_finalizing or recorder_state in {"resetting", "resetting_paused"}
 
     async def _set_control_mode(
         self,
@@ -462,7 +462,7 @@ class InferenceRecordingController:
             raise HTTPException(status_code=409, detail="Recorder dataset does not match active inference dataset")
 
         if paused:
-            if recorder_state == "recording":
+            if recorder_state in {"recording", "resetting"}:
                 result = self._recorder.pause()
                 if not result.get("success", False):
                     raise HTTPException(
@@ -472,7 +472,7 @@ class InferenceRecordingController:
             state.manual_paused = True
         else:
             state.manual_paused = False
-            if recorder_state == "paused":
+            if recorder_state in {"paused", "resetting_paused"}:
                 result = self._recorder.resume()
                 if not result.get("success", False):
                     raise HTTPException(

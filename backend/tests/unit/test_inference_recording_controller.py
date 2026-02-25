@@ -40,13 +40,19 @@ class _FakeRecorder:
     def pause(self) -> dict:
         self.pause_calls += 1
         if self._status.get("dataset_id"):
-            self._status["state"] = "paused"
+            if self._status.get("state") == "resetting":
+                self._status["state"] = "resetting_paused"
+            else:
+                self._status["state"] = "paused"
         return {"success": True, "message": "paused", "dataset_id": self._status.get("dataset_id")}
 
     def resume(self) -> dict:
         self.resume_calls += 1
         if self._status.get("dataset_id"):
-            self._status["state"] = "recording"
+            if self._status.get("state") == "resetting_paused":
+                self._status["state"] = "resetting"
+            else:
+                self._status["state"] = "recording"
         return {"success": True, "message": "resumed", "dataset_id": self._status.get("dataset_id")}
 
 
@@ -362,6 +368,61 @@ def test_manual_pause_is_cleared_when_recorder_progresses_after_redo(monkeypatch
     assert state.teleop_enabled is False
     assert dashboard.teleop_calls[-1] is False
     assert runtime.pause_calls[-1] == ("worker-1", False)
+
+
+def test_manual_pause_handles_resetting_wait_state(monkeypatch) -> None:
+    recorder = _FakeRecorder()
+    dataset = _FakeDataset()
+    runtime = _FakeRuntime()
+    dashboard = _FakeDashboard()
+    controller = InferenceRecordingController(
+        recorder=recorder, dataset=dataset, runtime=runtime, dashboard=dashboard
+    )
+    session = _build_session()
+
+    async def _fake_save_session_profile_binding(**_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(controller_module, "generate_dataset_id", lambda: "dataset-fixed")
+    monkeypatch.setattr(
+        controller_module,
+        "save_session_profile_binding",
+        _fake_save_session_profile_binding,
+    )
+    monkeypatch.setattr(controller, "_start_monitor_loop", lambda _session_id: None)
+
+    asyncio.run(
+        controller.start(
+            session=session,
+            task="pick and place",
+            denoising_steps=8,
+        )
+    )
+
+    recorder._status = {"state": "resetting", "dataset_id": "dataset-fixed"}
+    paused = asyncio.run(
+        controller.set_manual_pause(
+            inference_session_id="inf-1",
+            paused=True,
+        )
+    )
+    assert paused["paused"] is True
+    assert paused["recorder_state"] == "resetting_paused"
+    assert paused["teleop_enabled"] is True
+    assert recorder.pause_calls == 1
+    assert runtime.pause_calls[-1] == ("worker-1", True)
+    assert dashboard.teleop_calls[-1] is True
+
+    resumed = asyncio.run(
+        controller.set_manual_pause(
+            inference_session_id="inf-1",
+            paused=False,
+        )
+    )
+    assert resumed["paused"] is True
+    assert resumed["recorder_state"] == "resetting"
+    assert resumed["teleop_enabled"] is True
+    assert recorder.resume_calls == 1
 
 
 def test_finalizing_phase_uses_same_transition_as_reset(monkeypatch) -> None:

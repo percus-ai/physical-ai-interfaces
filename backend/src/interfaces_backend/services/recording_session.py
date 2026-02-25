@@ -24,7 +24,7 @@ from interfaces_backend.services.vlabor_profiles import (
 from percus_ai.storage.naming import generate_dataset_id
 
 logger = logging.getLogger(__name__)
-_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting"}
+_ACTIVE_RECORDER_STATES = {"warming", "recording", "paused", "resetting", "resetting_paused"}
 
 
 class RecordingSessionManager(BaseSessionManager):
@@ -330,6 +330,7 @@ class RecordingSessionManager(BaseSessionManager):
                     "recording",
                     "paused",
                     "resetting",
+                    "resetting_paused",
                 }
                 if recorder_active:
                     recorder_result = self._recorder.stop(save_current=save_current)

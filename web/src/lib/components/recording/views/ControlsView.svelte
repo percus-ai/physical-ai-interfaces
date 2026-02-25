@@ -321,8 +321,8 @@
   const statusPhase = $derived(String((status as Record<string, unknown>)?.phase ?? 'wait'));
   const isFinalizing = $derived(statusPhase === 'finalizing');
 
-  const canPause = $derived(statusState === 'recording' && !isFinalizing);
-  const canResume = $derived(statusState === 'paused' && !isFinalizing);
+  const canPause = $derived(['recording', 'resetting'].includes(String(statusState)) && !isFinalizing);
+  const canResume = $derived(['paused', 'resetting_paused'].includes(String(statusState)) && !isFinalizing);
   const canRetakePrevious = $derived.by(() => {
     if (isFinalizing) return false;
     const state = String(statusState);
@@ -342,9 +342,11 @@
     }
     return state === 'recording' || state === 'paused';
   });
-  const canNext = $derived(['recording', 'paused'].includes(String(statusState)) && !isFinalizing);
+  const canNext = $derived(
+    ['recording', 'paused', 'resetting', 'resetting_paused'].includes(String(statusState)) && !isFinalizing
+  );
   const canStop = $derived(
-    ['recording', 'paused', 'resetting', 'warming'].includes(String(statusState)) && !isFinalizing
+    ['recording', 'paused', 'resetting', 'resetting_paused', 'warming'].includes(String(statusState)) && !isFinalizing
   );
   const canStart = $derived.by(() => {
     const startableState = ['idle', 'completed', 'inactive', ''].includes(String(statusState));
