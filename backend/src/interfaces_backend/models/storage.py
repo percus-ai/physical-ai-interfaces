@@ -1,6 +1,6 @@
 """Storage API request/response models (DB-backed)."""
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -75,19 +75,45 @@ class ModelListResponse(BaseModel):
     total: int
 
 
-class ModelSyncResult(BaseModel):
-    """Per-model sync result."""
+ModelSyncJobState = Literal["queued", "running", "completed", "failed", "cancelled"]
 
+
+class ModelSyncJobDetail(BaseModel):
+    files_done: int = 0
+    total_files: int = 0
+    transferred_bytes: int = 0
+    total_bytes: int = 0
+    current_file: Optional[str] = None
+
+
+class ModelSyncJobStatus(BaseModel):
+    job_id: str
     model_id: str
-    success: bool
-    skipped: bool = False
+    state: ModelSyncJobState
+    progress_percent: float = 0.0
+    message: Optional[str] = None
+    error: Optional[str] = None
+    detail: ModelSyncJobDetail = Field(default_factory=ModelSyncJobDetail)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ModelSyncJobAcceptedResponse(BaseModel):
+    job_id: str
+    model_id: str
+    state: ModelSyncJobState = "queued"
+    message: str = "accepted"
+
+
+class ModelSyncJobListResponse(BaseModel):
+    jobs: List[ModelSyncJobStatus] = Field(default_factory=list)
+
+
+class ModelSyncJobCancelResponse(BaseModel):
+    job_id: str
+    accepted: bool
+    state: ModelSyncJobState
     message: str
-
-
-class ModelSyncResponse(BaseModel):
-    """Response for single model sync endpoint."""
-
-    result: ModelSyncResult
 
 
 class ArchiveResponse(BaseModel):

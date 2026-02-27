@@ -58,7 +58,7 @@ class InferenceRunnerStatus(BaseModel):
 
 class InferenceModelSyncStatus(BaseModel):
     active: bool = False
-    status: str = Field("idle", description="idle | checking | syncing | completed | error")
+    status: str = Field("idle", description="idle | checking | syncing | completed | cancelled | error")
     model_id: Optional[str] = None
     message: Optional[str] = None
     progress_percent: float = 0.0

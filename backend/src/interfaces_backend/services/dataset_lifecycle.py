@@ -475,12 +475,34 @@ class DatasetLifecycle:
                 )
                 if sync_status_callback is not None:
                     sync_status_callback(snapshot)
+                return
+            if event_type == "cancelled":
+                snapshot = self._set_model_sync_status(
+                    active=False,
+                    status="cancelled",
+                    message=event_message or "モデル同期を中断しました。",
+                    current_file=None,
+                    error=None,
+                )
+                if sync_status_callback is not None:
+                    sync_status_callback(snapshot)
 
         sync_result = await self._get_sync_service().ensure_model_local(
             model_id,
             auto_download=True,
             progress_callback=on_sync_progress,
         )
+        if sync_result.cancelled:
+            snapshot = self._set_model_sync_status(
+                active=False,
+                status="cancelled",
+                message="モデル同期を中断しました。",
+                current_file=None,
+                error=None,
+            )
+            if sync_status_callback is not None:
+                sync_status_callback(snapshot)
+            raise HTTPException(status_code=409, detail="Model sync cancelled")
         if not sync_result.success:
             snapshot = self._set_model_sync_status(
                 active=False,

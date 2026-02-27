@@ -168,15 +168,44 @@ export type DatasetPlaybackResponse = {
   cameras: DatasetPlaybackCameraInfo[];
 };
 
-export type ModelSyncResult = {
-  model_id: string;
-  success: boolean;
-  skipped?: boolean;
-  message: string;
+export type ModelSyncJobState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type ModelSyncJobDetail = {
+  files_done?: number;
+  total_files?: number;
+  transferred_bytes?: number;
+  total_bytes?: number;
+  current_file?: string | null;
 };
 
-export type ModelSyncResponse = {
-  result: ModelSyncResult;
+export type ModelSyncJobStatus = {
+  job_id: string;
+  model_id: string;
+  state: ModelSyncJobState;
+  progress_percent?: number;
+  message?: string | null;
+  error?: string | null;
+  detail?: ModelSyncJobDetail;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ModelSyncJobAcceptedResponse = {
+  job_id: string;
+  model_id: string;
+  state: ModelSyncJobState;
+  message?: string;
+};
+
+export type ModelSyncJobListResponse = {
+  jobs?: ModelSyncJobStatus[];
+};
+
+export type ModelSyncJobCancelResponse = {
+  job_id: string;
+  accepted: boolean;
+  state: ModelSyncJobState;
+  message: string;
 };
 
 export type TrainingReviveResult = {
@@ -577,7 +606,18 @@ export const api = {
     reuploadDataset: (datasetId: string) =>
       fetchApi(`/api/storage/datasets/${datasetId}/reupload`, { method: 'POST' }),
     syncModel: (modelId: string) =>
-      fetchApi<ModelSyncResponse>(`/api/storage/models/${modelId}/sync`, { method: 'POST' }),
+      fetchApi<ModelSyncJobAcceptedResponse>(`/api/storage/models/${modelId}/sync`, { method: 'POST' }),
+    modelSyncJobs: (includeTerminal = false) =>
+      fetchApi<ModelSyncJobListResponse>(
+        `/api/storage/model-sync/jobs${includeTerminal ? '?include_terminal=true' : ''}`
+      ),
+    modelSyncJob: (jobId: string) =>
+      fetchApi<ModelSyncJobStatus>(`/api/storage/model-sync/jobs/${encodeURIComponent(jobId)}`),
+    cancelModelSyncJob: (jobId: string) =>
+      fetchApi<ModelSyncJobCancelResponse>(
+        `/api/storage/model-sync/jobs/${encodeURIComponent(jobId)}/cancel`,
+        { method: 'POST' }
+      ),
     archiveModel: (modelId: string) =>
       fetchApi(`/api/storage/models/${modelId}`, { method: 'DELETE' }),
     restoreModel: (modelId: string) =>

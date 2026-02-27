@@ -32,18 +32,22 @@ from interfaces_backend.models.storage import (
     HuggingFaceTransferResponse,
     ModelInfo,
     ModelListResponse,
-    ModelSyncResponse,
-    ModelSyncResult,
+    ModelSyncJobAcceptedResponse,
+    ModelSyncJobCancelResponse,
+    ModelSyncJobListResponse,
+    ModelSyncJobStatus,
     StorageUsageResponse,
 )
 from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
+from interfaces_backend.services.model_sync_jobs import get_model_sync_jobs_service
+from interfaces_backend.services.session_manager import require_user_id
 from interfaces_backend.services.vlabor_profiles import resolve_profile_spec
 from percus_ai.db import get_supabase_async_client, upsert_with_owner
 from percus_ai.storage.hash import compute_directory_hash, compute_directory_size
 from percus_ai.storage.hub import download_model, ensure_hf_token, get_local_model_info, upload_model
 from percus_ai.storage.naming import validate_dataset_name, generate_dataset_id
 from percus_ai.storage.paths import get_datasets_dir, get_models_dir
-from percus_ai.storage.r2_db_sync import R2DBSyncService
+from percus_ai.storage.r2_db_sync import ModelSyncCancelledError, R2DBSyncService
 from lerobot.datasets.aggregate import aggregate_datasets
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
@@ -545,12 +549,57 @@ async def get_model(model_id: str):
     return _model_row_to_info(rows[0])
 
 
-@router.post("/models/{model_id}/sync", response_model=ModelSyncResponse)
+async def _run_model_sync_job(*, job_id: str, model_id: str) -> None:
+    jobs = get_model_sync_jobs_service()
+    sync_service = R2DBSyncService()
+    progress_callback = jobs.build_progress_callback(job_id=job_id)
+    cancel_event = jobs.get_cancel_event(job_id=job_id)
+    try:
+        result = await sync_service.ensure_model_local(
+            model_id,
+            auto_download=True,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
+    except ModelSyncCancelledError:
+        jobs.cancelled(job_id=job_id)
+        return
+    except asyncio.CancelledError:
+        jobs.cancelled(job_id=job_id)
+        return
+    except Exception as exc:
+        logger.exception("Model sync job failed unexpectedly: %s", job_id)
+        jobs.fail(
+            job_id=job_id,
+            message="モデル同期に失敗しました。",
+            error=str(exc),
+        )
+    else:
+        if result.success:
+            jobs.complete(
+                job_id=job_id,
+                message="ローカルキャッシュを利用しました。" if result.skipped else "モデル同期が完了しました。",
+            )
+            return
+        if result.cancelled:
+            jobs.cancelled(job_id=job_id)
+            return
+        jobs.fail(
+            job_id=job_id,
+            message="モデル同期に失敗しました。",
+            error=result.message,
+        )
+    finally:
+        jobs.release_runtime_handles(job_id=job_id)
+
+
+@router.post("/models/{model_id}/sync", response_model=ModelSyncJobAcceptedResponse, status_code=202)
 async def sync_model(model_id: str):
-    """Ensure a model is synchronized to local storage."""
+    """Start a background model sync job."""
     model_id = model_id.strip()
     if not model_id:
         raise HTTPException(status_code=400, detail="Model ID is required")
+    user_id = require_user_id()
 
     client = await get_supabase_async_client()
     rows = (
@@ -561,18 +610,34 @@ async def sync_model(model_id: str):
     if rows[0].get("status") != "active":
         raise HTTPException(status_code=400, detail="Model is not active")
 
-    lifecycle = get_dataset_lifecycle()
-    await lifecycle.ensure_model_local(model_id)
-    status = lifecycle.get_model_sync_status()
-    message = str(status.message or "モデル同期が完了しました。")
-    skipped = "ローカルキャッシュ" in message
-    return ModelSyncResponse(
-        result=ModelSyncResult(
-            model_id=model_id,
-            success=True,
-            skipped=skipped,
-            message=message,
-        )
+    jobs = get_model_sync_jobs_service()
+    accepted = jobs.create(user_id=user_id, model_id=model_id)
+    task = asyncio.create_task(_run_model_sync_job(job_id=accepted.job_id, model_id=model_id))
+    jobs.attach_task(user_id=user_id, job_id=accepted.job_id, task=task)
+    return accepted
+
+
+@router.get("/model-sync/jobs", response_model=ModelSyncJobListResponse)
+async def list_model_sync_jobs(include_terminal: bool = Query(False, description="Include completed jobs")):
+    user_id = require_user_id()
+    jobs = get_model_sync_jobs_service()
+    return jobs.list(user_id=user_id, include_terminal=include_terminal)
+
+
+@router.get("/model-sync/jobs/{job_id}", response_model=ModelSyncJobStatus)
+async def get_model_sync_job(job_id: str):
+    user_id = require_user_id()
+    jobs = get_model_sync_jobs_service()
+    return jobs.get(user_id=user_id, job_id=job_id)
+
+
+@router.post("/model-sync/jobs/{job_id}/cancel", response_model=ModelSyncJobCancelResponse)
+async def cancel_model_sync_job(job_id: str):
+    user_id = require_user_id()
+    jobs = get_model_sync_jobs_service()
+    return jobs.cancel(
+        user_id=user_id,
+        job_id=job_id,
     )
 
 
