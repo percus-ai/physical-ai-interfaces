@@ -74,6 +74,21 @@ class ModelListResponse(BaseModel):
     total: int
 
 
+class ModelSyncResult(BaseModel):
+    """Per-model sync result."""
+
+    model_id: str
+    success: bool
+    skipped: bool = False
+    message: str
+
+
+class ModelSyncResponse(BaseModel):
+    """Response for single model sync endpoint."""
+
+    result: ModelSyncResult
+
+
 class ArchiveResponse(BaseModel):
     """Response for archive/restore operations."""
 

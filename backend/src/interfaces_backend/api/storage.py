@@ -32,6 +32,8 @@ from interfaces_backend.models.storage import (
     HuggingFaceTransferResponse,
     ModelInfo,
     ModelListResponse,
+    ModelSyncResponse,
+    ModelSyncResult,
     StorageUsageResponse,
 )
 from interfaces_backend.services.dataset_lifecycle import get_dataset_lifecycle
@@ -539,6 +541,37 @@ async def get_model(model_id: str):
     if not rows:
         raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
     return _model_row_to_info(rows[0])
+
+
+@router.post("/models/{model_id}/sync", response_model=ModelSyncResponse)
+async def sync_model(model_id: str):
+    """Ensure a model is synchronized to local storage."""
+    model_id = model_id.strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Model ID is required")
+
+    client = await get_supabase_async_client()
+    rows = (
+        await client.table("models").select("id,status").eq("id", model_id).execute()
+    ).data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    if rows[0].get("status") != "active":
+        raise HTTPException(status_code=400, detail="Model is not active")
+
+    lifecycle = get_dataset_lifecycle()
+    await lifecycle.ensure_model_local(model_id)
+    status = lifecycle.get_model_sync_status()
+    message = str(status.message or "モデル同期が完了しました。")
+    skipped = "ローカルキャッシュ" in message
+    return ModelSyncResponse(
+        result=ModelSyncResult(
+            model_id=model_id,
+            success=True,
+            skipped=skipped,
+            message=message,
+        )
+    )
 
 
 @router.delete("/models/{model_id}", response_model=ArchiveResponse)

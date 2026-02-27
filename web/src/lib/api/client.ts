@@ -168,6 +168,17 @@ export type DatasetPlaybackResponse = {
   cameras: DatasetPlaybackCameraInfo[];
 };
 
+export type ModelSyncResult = {
+  model_id: string;
+  success: boolean;
+  skipped?: boolean;
+  message: string;
+};
+
+export type ModelSyncResponse = {
+  result: ModelSyncResult;
+};
+
 export type TrainingReviveResult = {
   job_id: string;
   old_instance_id: string;
@@ -565,6 +576,8 @@ export const api = {
       fetchApi(`/api/storage/datasets/${datasetId}/restore`, { method: 'POST' }),
     reuploadDataset: (datasetId: string) =>
       fetchApi(`/api/storage/datasets/${datasetId}/reupload`, { method: 'POST' }),
+    syncModel: (modelId: string) =>
+      fetchApi<ModelSyncResponse>(`/api/storage/models/${modelId}/sync`, { method: 'POST' }),
     archiveModel: (modelId: string) =>
       fetchApi(`/api/storage/models/${modelId}`, { method: 'DELETE' }),
     restoreModel: (modelId: string) =>
