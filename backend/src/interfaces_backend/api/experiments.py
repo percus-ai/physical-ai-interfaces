@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
@@ -109,6 +110,7 @@ async def create_experiment(request: ExperimentCreateRequest):
         else DEFAULT_METRIC_OPTIONS
     )
     record = {
+        "id": str(uuid4()),
         "model_id": request.model_id,
         "profile_instance_id": request.profile_instance_id,
         "name": request.name,
@@ -234,6 +236,7 @@ async def replace_experiment_evaluations(
         for idx, item in enumerate(items, start=1):
             records.append(
                 {
+                    "id": str(uuid4()),
                     "experiment_id": experiment_id,
                     "trial_index": idx,
                     "value": item.value or "",
@@ -323,6 +326,7 @@ async def replace_experiment_analyses(
         for idx, item in enumerate(items, start=1):
             records.append(
                 {
+                    "id": str(uuid4()),
                     "experiment_id": experiment_id,
                     "block_index": idx,
                     "name": item.name,
