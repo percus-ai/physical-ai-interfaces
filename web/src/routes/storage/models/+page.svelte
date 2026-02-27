@@ -11,6 +11,7 @@
     policy_type?: string;
     dataset_id?: string;
     size_bytes?: number;
+    is_local?: boolean;
     status?: string;
     created_at?: string;
   };
@@ -250,7 +251,7 @@
                   onclick={() => handleSyncModel(model.id)}
                   disabled={syncPending || isModelSyncing(model.id)}
                 >
-                  {isModelSyncing(model.id) ? '同期中...' : '同期'}
+                  {isModelSyncing(model.id) ? '同期中...' : model.is_local ? '同期済' : '同期'}
                 </button>
                 {#if activeSyncModelId === model.id}
                   <div class="mt-2 max-w-[220px]">

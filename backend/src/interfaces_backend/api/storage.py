@@ -173,10 +173,11 @@ def _dataset_row_to_info(row: dict) -> DatasetInfo:
 
 
 def _model_row_to_info(row: dict) -> ModelInfo:
+    model_id = row.get("id")
     profile_snapshot = row.get("profile_snapshot")
     return ModelInfo(
-        id=row.get("id"),
-        name=row.get("name") or row.get("id"),
+        id=model_id,
+        name=row.get("name") or model_id,
         dataset_id=row.get("dataset_id"),
         profile_name=_extract_profile_name(profile_snapshot),
         profile_snapshot=profile_snapshot if isinstance(profile_snapshot, dict) else None,
@@ -184,6 +185,7 @@ def _model_row_to_info(row: dict) -> ModelInfo:
         training_steps=row.get("training_steps"),
         batch_size=row.get("batch_size"),
         size_bytes=row.get("size_bytes") or 0,
+        is_local=_model_is_local(str(model_id)) if model_id else False,
         source=row.get("source") or "r2",
         status=row.get("status") or "active",
         created_at=row.get("created_at"),

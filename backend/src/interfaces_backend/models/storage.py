@@ -61,6 +61,7 @@ class ModelInfo(BaseModel):
     training_steps: Optional[int] = Field(None, description="Training steps")
     batch_size: Optional[int] = Field(None, description="Batch size")
     size_bytes: int = Field(0, description="Size in bytes")
+    is_local: bool = Field(False, description="Model is downloaded locally")
     source: str = Field("r2", description="Data source")
     status: str = Field("active", description="Data status")
     created_at: Optional[str] = Field(None, description="Creation time")
